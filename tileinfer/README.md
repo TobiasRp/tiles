@@ -18,8 +18,10 @@ ctest --preset debug
 
 The test suite includes a CCCL cooperative launch gate, malformed-package
 checks, and execution of TilePlan packages against PyTorch reference cases
-with both sparse and many-task schedules. The gate passed on the RTX 3050
-with 20 blocks of 128 threads.
+with both sparse and many-task schedules. When installed, `clang-format` checks
+the C++/CUDA sources and Compute Sanitizer runs memcheck, racecheck, and
+synccheck on another generated plan. The gate passed on the RTX 3050 with 20
+blocks of 128 threads.
 
 ```sh
 build/debug/tile_runtime --describe-target-json

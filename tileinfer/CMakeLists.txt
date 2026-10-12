@@ -10,6 +10,19 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(CTest)
 
+find_program(CLANG_FORMAT_EXECUTABLE clang-format)
+if(BUILD_TESTING AND CLANG_FORMAT_EXECUTABLE)
+    add_test(NAME clang_format
+        COMMAND ${CLANG_FORMAT_EXECUTABLE} --dry-run --Werror
+            ${PROJECT_SOURCE_DIR}/src/runtime/main.cpp
+            ${PROJECT_SOURCE_DIR}/src/runtime/plan.cpp
+            ${PROJECT_SOURCE_DIR}/src/runtime/runtime.hpp
+            ${PROJECT_SOURCE_DIR}/src/runtime/worker.cu
+            ${PROJECT_SOURCE_DIR}/tests/cccl_cooperative_smoke.cu
+            ${PROJECT_SOURCE_DIR}/tests/runtime_unit.cpp)
+    set_tests_properties(clang_format PROPERTIES TIMEOUT 30)
+endif()
+
 add_executable(cpp_smoke tests/cpp_smoke.cpp)
 add_executable(runtime_unit tests/runtime_unit.cpp src/runtime/plan.cpp)
 target_include_directories(runtime_unit PRIVATE src/runtime third_party)
@@ -63,12 +76,21 @@ if(TILE_INFER_ENABLE_CUDA)
         set_tests_properties(cccl_cooperative_smoke PROPERTIES TIMEOUT 30)
 
         find_program(UV_EXECUTABLE uv HINTS "$ENV{HOME}/.local/bin")
+        find_program(COMPUTE_SANITIZER_EXECUTABLE compute-sanitizer HINTS ${CUDAToolkit_BIN_DIR})
         if(UV_EXECUTABLE)
             add_test(NAME runtime_regression
                 COMMAND ${UV_EXECUTABLE} run --project ${PROJECT_SOURCE_DIR}/../tileplan
                     python ${PROJECT_SOURCE_DIR}/tests/regression.py
                     --executor $<TARGET_FILE:tile_runtime>)
             set_tests_properties(runtime_regression PROPERTIES TIMEOUT 180)
+            if(COMPUTE_SANITIZER_EXECUTABLE)
+                add_test(NAME runtime_sanitizer
+                    COMMAND ${UV_EXECUTABLE} run --project ${PROJECT_SOURCE_DIR}/../tileplan
+                        python ${PROJECT_SOURCE_DIR}/tests/sanitizer.py
+                        --executor $<TARGET_FILE:tile_runtime>
+                        --sanitizer ${COMPUTE_SANITIZER_EXECUTABLE})
+                set_tests_properties(runtime_sanitizer PROPERTIES TIMEOUT 180)
+            endif()
         endif()
     endif()
 endif()

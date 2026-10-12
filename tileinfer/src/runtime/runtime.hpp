@@ -11,10 +11,20 @@ inline constexpr int kThreads = 128;
 inline constexpr const char* kAbi = "tileinfer-mlp-v1";
 inline constexpr const char* kFingerprint = "warp-gemv-cub-gelu-tanh-task-v1-sm86-b128";
 
-enum class Opcode : std::uint32_t { gemv_bias_gelu_f32 = 1, gemv_bias_f32 = 2 };
-enum class Buffer : std::uint32_t { input = 0, scratch = 1, output = 2 };
+enum class Opcode : std::uint32_t
+{
+    gemv_bias_gelu_f32 = 1,
+    gemv_bias_f32 = 2
+};
+enum class Buffer : std::uint32_t
+{
+    input = 0,
+    scratch = 1,
+    output = 2
+};
 
-struct Task {
+struct Task
+{
     std::uint32_t opcode;
     std::uint32_t row_begin;
     std::uint32_t row_end;
@@ -25,12 +35,14 @@ struct Task {
     std::uint32_t output_buffer;
 };
 
-struct Range {
+struct Range
+{
     std::uint32_t begin;
     std::uint32_t count;
 };
 
-struct Target {
+struct Target
+{
     std::string name;
     int major;
     int minor;
@@ -45,7 +57,8 @@ struct Target {
     int runtime_version;
 };
 
-struct Plan {
+struct Plan
+{
     int d;
     int h;
     int o;
@@ -60,8 +73,9 @@ struct Plan {
 
 Target describe_target();
 
-class Executor {
-public:
+class Executor
+{
+  public:
     explicit Executor(const Plan& plan);
     ~Executor();
     Executor(const Executor&) = delete;
@@ -71,7 +85,8 @@ public:
     void launch();
     void synchronize();
     double timed_batch(int iterations);
-private:
+
+  private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
