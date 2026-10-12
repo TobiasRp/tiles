@@ -2,28 +2,60 @@
 
 Status: design and milestones agreed, 2026-10-12. The implemented software
 still executes only the float32 MLP described in the [core design](tile_graph_inference.md).
-This document specifies the next workload for [TilePlan](tile_graph_python_architecture.md)
-and [TileInfer](tile_graph_cuda_runtime.md); it is not a claim that decoder
-support or Hugging Face checkpoint loading already works.
+This document specifies the path to one-token inference with the
+[`meta-llama/Llama-3.2-1B` base model](https://huggingface.co/meta-llama/Llama-3.2-1B)
+for [TilePlan](tile_graph_python_architecture.md) and
+[TileInfer](tile_graph_cuda_runtime.md). Decoder execution, BF16 weights, and
+Hugging Face checkpoint loading are not yet implemented.
 
 ## Goal and first supported model
 
 Build a batch-one, **one-token decode** path, first for one deterministic
-Llama-style block, then for a stack ending in vocabulary logits. Each call
-accepts one token's hidden vector (or, for the full model, one token ID) and
-one mutable sequence context. It consumes positions `0..p` and advances the
+Llama-style block, then for the complete Llama 3.2 1B stack ending in
+vocabulary logits. The end-to-end goal is to import a pinned revision of the
+official base checkpoint, keep its weights in **BF16** on the GPU, process
+prompt tokens through repeated decode calls, and generate tokens whose logits
+match a reference using the same stored weight values.
+
+Each call accepts one token's hidden vector (or, for the full model, one token
+ID) and one mutable sequence context. It consumes positions `0..p` and advances the
 context from length `p` to `p + 1`. The plan and weights are fixed; the input,
 position, cache contents, and output vary across calls. Only one invocation
 may use a context at a time. A fixed maximum context length is part of the
 plan; reaching it returns an error instead of silently overwriting cache.
 
-The first implementation uses float32 weights, activations, KV cache, and
+The first synthetic block uses float32 weights, activations, KV cache, and
 accumulation, batch size one, standard full causal attention, no dropout, and
-the existing cooperative wave barrier. Start with small synthetic dimensions
-that fit the RTX 3050 and an independent PyTorch reference. An actual
-checkpoint defines exact parameter values and some semantic variants; the
-first checkpoint importer will support one explicitly named architecture and
-revision rather than every model with a `Llama` label.
+the existing cooperative wave barrier. This isolates decoder semantics before
+adding BF16 weight storage. The checkpoint path stores **all model weights**
+(including embeddings and norm scales) as BF16, converts them to float32 when
+consumed by the initial kernels, and keeps activations, KV cache, reductions,
+and softmax in float32. Activation/KV precision can be revisited separately.
+Start with small synthetic dimensions and an independent PyTorch reference.
+The first importer supports the pinned Llama 3.2 1B base checkpoint rather
+than every model with a `Llama` label.
+
+## Concrete Llama 3.2 1B target
+
+The model has hidden width 2,048, 16 layers, 32 query heads, 8 KV heads,
+head width 64, feed-forward width 8,192, vocabulary size 128,256, and
+`rms_norm_eps = 1e-5`. Its Llama 3 RoPE uses `rope_theta = 500000`, frequency
+scaling factor 32, low/high frequency factors 1/4, and original context 8,192.
+The output projection shares the token-embedding weight. The checkpoint
+supports a 128K-token context, but the first GPU package should allocate a
+smaller fixed capacity, such as 4K or 8K tokens. Record the checkpoint
+repository and immutable revision in the package and regression report.
+These values come from [Meta's model specification](https://github.com/meta-llama/llama-models/blob/main/models/sku_list.py),
+the [model card](https://huggingface.co/meta-llama/Llama-3.2-1B), and
+[Hugging Face's Llama 3.2 conversion](https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/convert_llama_weights_to_hf.py).
+
+When consuming the Hugging Face safetensors, use its Q/K row layout and
+split-half rotary pairing. Hugging Face's converter permutes Meta-format Q/K
+weights for that convention. Do not apply the Meta-format permutation a
+second time; compare rotated Q/K and logits against the same Hugging Face
+revision before accepting the importer. See the
+[conversion mapping](https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/convert_llama_weights_to_hf.py)
+and [rotary implementation](https://github.com/huggingface/transformers/blob/main/src/transformers/models/llama/modeling_llama.py).
 
 ## Block computation
 
@@ -39,7 +71,7 @@ q = Wq @ u;  k = Wk @ u;  v = Wv @ u
 q = RoPE(q, p);  k = RoPE(k, p)
 K[layer, p] = k;  V[layer, p] = v
 for query head h:
-    kv_head = h // (n_q / n_kv)
+    kv_head = h // (n_q // n_kv)
     scores[t] = dot(q[h], K[layer, t, kv_head]) / sqrt(d_h), t = 0..p
     a[h] = softmax(scores) @ V[layer, 0:p+1, kv_head]
 r = x + Wo @ concat(a)
@@ -120,15 +152,26 @@ new opcodes change its resource use.
    cache per layer, final norm, and logits. Compare token-by-token logits
    and cache with a PyTorch reference. Preserve a one-token API so the same
    plan can process a sequence by repeated calls.
-5. **Checkpoint bridge.** Choose one small, permitted Hugging Face checkpoint
-   and pin its revision. Read `config.json` and safetensors shards, check the
-   model variant, convert named tensors to the plan's weight layout, and
-   record hashes. Compare logits and cache against `AutoModelForCausalLM`
-   under a recorded precision policy for several short prompts.
-6. **Performance experiments.** Measure decode against PyTorch eager and
+5. **BF16 weight path.** Extend the decoder package with per-tensor dtypes
+   and packed BF16 weight storage; validate sizes, offsets, hashes, and tied
+   weight aliases. Add BF16-loading GEMV, embedding, and norm paths that
+   accumulate/compute in float32 while preserving float32 activations and
+   cache. Test synthetic BF16-quantized weights against a PyTorch reference
+   using the same BF16 values converted to float32 for computation. Keep
+   float32 decoder packages and version-1 MLP packages working. Reprobe the
+   compiled worker's occupancy and run Compute Sanitizer.
+6. **Llama 3.2 1B checkpoint bridge.** Pin an accessible revision of
+   `meta-llama/Llama-3.2-1B`. Read its `config.json` and safetensors, reject
+   unsupported variants, map all named tensors to a BF16 plan, and alias the
+   tied embedding/output weight without a second GPU allocation. Record
+   revision and hashes. Compare intermediate block values, KV cache, and
+   token-by-token logits for several short prompts against
+   `AutoModelForCausalLM` with its stored BF16 weights converted to float32
+   for the same computation policy. Run a short greedy-generation regression.
+7. **Performance experiments.** Measure decode against PyTorch eager and
    CUDA Graph replay at fixed context lengths. Profile the decoder worker
-   and memory traffic. Add chunked prefill, reduced precision, cache
-   paging/sliding-window variants, or per-tile readiness only when a
+   and memory traffic. Add chunked prefill, lower-precision activations/cache,
+   cache paging/sliding-window variants, or per-tile readiness only when a
    measured workload justifies each change. A companion micrograph can
    isolate partial tile handoff if the decoder schedule does not.
 
@@ -138,16 +181,17 @@ regression and the existing formatting/static-check gates.
 
 ## Path from synthetic weights to a real checkpoint
 
-The full-model milestone supplies the operations required by a basic
-Llama-style causal model. To run actual weights, select an exact checkpoint
-and match its config: layer/head/FFN/vocabulary sizes; epsilon; RoPE base,
-pairing and scaling; bias flags; and tied or separate output embeddings.
-The importer must map checkpoint tensor names and layouts into a checked,
-versioned `weights.bin` package, including sharded safetensors. Unsupported
-variants should fail with a clear error. Tokenization and chat-template
-formatting can run in Python initially; the executor receives token IDs and
-returns logits. Generation then selects a token (greedy selection is enough
-for the first end-to-end test) and feeds it back with the same context.
+The full-model milestone supplies the operations required by the Llama 3.2
+1B base model. Its official Hugging Face repository is gated, so checkpoint
+access is required for the importer and end-to-end regression. Match the
+pinned config exactly: layer/head/FFN/vocabulary sizes; epsilon; RoPE base,
+pairing and scaling; bias flags; and tied output embedding. The importer maps
+checkpoint tensor names and layouts into a checked, versioned BF16
+`weights.bin` package and rejects unsupported variants. Tokenization can run
+in Python initially; the executor receives token IDs and returns logits.
+Generation then selects a token (greedy selection is enough for the first
+end-to-end test) and feeds it back with the same context. Chat-template
+formatting is needed only if an instruct checkpoint is chosen later.
 
 A dedicated prefill kernel is **not required for functional support**. Feed
 prompt token IDs to the one-token API in order from an empty context; each
@@ -157,12 +201,16 @@ repeatedly scans growing prefixes, so prompt latency will be poor for long
 prompts. Chunked/matrix-matrix prefill is a later performance milestone.
 The fixed `max_context` still limits prompt plus generated tokens.
 
-Memory constrains checkpoint choice on this RTX 3050. Float32 weights alone
-need roughly four bytes per parameter (a 7-billion-parameter model is about
-28 GB), plus KV cache, scratch, and runtime overhead. Calculate the actual
-package and cache budget before choosing the first checkpoint; use a small
-model or add supported FP16/BF16/quantized kernels and packing. Model-family
-names alone do not guarantee compatible math, layout, or memory footprint.
+Llama 3.2 1B has about 1.23 billion parameters: approximately 2.3 GiB of
+BF16 weights, compared with 4.6 GiB in float32. With 16 layers, 8 KV heads,
+and head width 64, a float32 K/V cache uses 64 KiB per token: about 512 MiB
+at 8K tokens and 8 GiB at 128K. The RTX 3050 has 8 GiB total, so the first
+package should cap the cache at 4K or 8K and account for scratch, program,
+CUDA runtime, and loading overhead. Keep the PyTorch reference and TileInfer
+weights off the GPU at the same time during checkpoint comparison. A later
+128K experiment requires a different cache/storage strategy and much faster
+prefill. BF16 weight storage reduces traffic and residency; its latency
+effect must still be measured on the worker kernel.
 
 The [Meta Llama 3 reference implementation](https://github.com/meta-llama/llama-models/blob/main/models/llama3/model.py)
 illustrates the block ingredients. The

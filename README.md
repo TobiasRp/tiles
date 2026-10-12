@@ -10,9 +10,12 @@ CUDA Graph baselines.
 
 **Status:** The two-wave MLP path works end to end on `tux`. The runtime uses
 one logical worker block per reported SM, CUB warp reduction for GEMV, and a
-grid barrier between MLP stages. The [next milestone](docs/tile_graph_decoder.md)
-is a Llama-style one-token decoder, starting with a synthetic float32 block,
-then a full stack, token-loop prefill, and one pinned checkpoint bridge.
+grid barrier between MLP stages. The [next goal](docs/tile_graph_decoder.md)
+is one-token inference with a pinned revision of the
+`meta-llama/Llama-3.2-1B` base model:
+start with a synthetic float32 block, build the full stack, add BF16 weight
+storage, and import the checkpoint. Prompt tokens can initially use repeated
+decode calls.
 Decoder execution, partial tile handoff, and a tuned shape/tile sweep remain
 future work. The current benchmark is an exploratory workload comparison,
 not evidence that static scheduling alone improves latency.

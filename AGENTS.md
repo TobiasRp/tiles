@@ -4,7 +4,9 @@ This repository tests the tile-graph inference hypothesis on the RTX 3050.
 Read the four design documents in `docs/` before changing the plan format or
 executor. The MLP is the implemented workload; its two stages require a full
 barrier. The Llama-style one-token decoder in `docs/tile_graph_decoder.md` is
-the next planned workload, with a separate versioned plan and KV-state contract.
+the next planned workload, targeting BF16 weights from a pinned revision of
+the `meta-llama/Llama-3.2-1B` base checkpoint with a separate versioned plan
+and KV-state contract.
 
 - Keep Python as the offline planner, fixture generator, baseline runner, and
   one-command orchestrator. Keep per-inference scheduling in the C++/CUDA
