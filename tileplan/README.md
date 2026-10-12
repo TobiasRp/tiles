@@ -1,16 +1,51 @@
-# Python side
+# TilePlan
 
-`src/tileplan/` is the installable Python package. Its CLI names the planned
-stages, but each execution command currently reports that implementation is
-pending. The existing uv environment and lockfile are retained.
+TilePlan is the offline Python half of the tile-graph experiment. It creates a
+deterministic float32 MLP fixture, probes the **final compiled** CUDA worker,
+lowers the MLP into row-tile tasks, schedules those tasks in two waves, and
+writes a versioned `plan.json` plus little-endian `weights.bin`. `verify` checks
+the package without CUDA. The PyTorch eager and CUDA Graph baselines run on the
+GPU and compare their outputs with the saved CPU reference.
 
-Planned responsibilities:
+The C++/CUDA executor is still a scaffold. A real target probe and persistent
+inference cannot succeed until that executor reports its compiled worker
+capabilities and implements the file bridge. `demo` stops with the executor's
+diagnostic at that point; it does not claim a successful inference run. The
+Python file bridge is tested with an explicitly mock executor.
 
-- `reference`: seeded PyTorch model, weights, and expected values.
-- `probe`: normalize facts from the final compiled CUDA worker into `target.json`.
-- `build`: tile DAG, wave schedule, memory plan, validation, and package output.
-- `benchmark`: PyTorch eager and CUDA Graph replay baselines plus comparison.
-- `demo`: single command orchestrating the full pipeline.
+## Install and test on `tux`
 
-The package format and pass design live in
-[`docs/tile_graph_python_architecture.md`](../docs/tile_graph_python_architecture.md).
+```sh
+cd ~/dev/tile-infer/tileplan
+~/.local/bin/uv sync --locked
+~/.local/bin/uv run --locked python -m unittest discover -s tests -v
+```
+
+## Offline workflow
+
+```sh
+uv run --locked python -m tileplan reference --out ../runs/fixture
+uv run --locked python -m tileplan probe --executor ../tileinfer/build/release/tile_runtime --out ../runs/target.json
+uv run --locked python -m tileplan build --model ../runs/fixture/model.json --weights ../runs/fixture/weights.npz --target ../runs/target.json --tile-h1 16 --tile-h2 16 --out ../runs/package
+uv run --locked python -m tileplan inspect ../runs/package
+uv run --locked python -m tileplan verify ../runs/package
+uv run --locked python -m tileplan benchmark --package ../runs/package --cases ../runs/fixture/reference_cases.npz --out ../runs/baselines.json
+```
+
+`probe` needs the eventual compiled worker, not the current C++ stub. Unit
+tests use synthetic target descriptions to exercise the offline planner.
+`benchmark` reports PyTorch baselines only and labels them as such. It does not
+claim a persistent-kernel speedup.
+
+Once the CUDA executor is implemented,
+`python -m tileplan demo --out ../runs/demo` builds it and drives the complete pipeline. Use `--executor PATH`
+to reuse a prebuilt binary. The planned `--run-plan` bridge reads raw float32
+inputs and writes both final outputs and diagnostic hidden values via
+`--outputs` and `--hidden`; `--benchmark` reads the same saved input used by
+PyTorch and must report its SHA-256.
+
+Packages are reproducible for the same fixture, target, and tile heights. The
+builder writes to a fresh directory via a temporary directory and rename;
+`planning_report.json` records the plan and weight hashes, per-wave worker
+loads, and peak buffer bytes. The schedule uses logical worker IDs and a full
+barrier between the two MLP stages.
