@@ -22,7 +22,7 @@ The RTX 3050 is the actual target, rather than a proxy for a data-center GPU. Th
 | --- | --- |
 | Workload | One fixed-shape, batch-one forward pass; no dynamic batching or variable graph structure. |
 | First graph | A two-layer MLP: `h = GELU(W1 × x + b1)`, `y = W2 × h + b2`. This exercises tiled matrix-vector products, a fused pointwise operation, and a full-layer dependency. |
-| Next graph | One concrete decoder block after the MLP executor is validated; identify any partial tile dependencies explicitly and use a focused companion micrograph if the decoder does not expose them cleanly. |
+| Next graph | A Llama-style, batch-one, one-token decoder block with RMSNorm, RoPE, grouped-query attention, a per-layer KV cache, and SwiGLU; see the [decoder design](tile_graph_decoder.md). Begin with full wave barriers and synthetic float32 weights. |
 | Precision | Float32 inputs, weights, and accumulation; fix PyTorch's TF32 policy and the executor's math mode before comparing outputs or timings. |
 | Test model | A PyTorch reference creates a small deterministic MLP, exports its weights and test inputs, and computes expected intermediate and final values. |
 | Planning | Python expands tensor operations into tile tasks, dependencies, buffer lifetimes, and an assignment to logical workers. Planning happens once per supported model/shape/device configuration. |
@@ -30,7 +30,7 @@ The RTX 3050 is the actual target, rather than a proxy for a data-center GPU. Th
 | First operator implementation | Batch-one matrix–vector tasks use device routines inside the persistent kernel and CUB warp reduction. The CCCL cooperative-launch gate passed on the RTX 3050. |
 | Primary metric | CUDA-event elapsed time per GPU-resident forward pass, compared with PyTorch eager execution and PyTorch CUDA Graph replay of the same MLP. |
 
-The MLP is a scheduling test, not a claim that it represents full language-model inference. A later decoder experiment needs explicit rules for KV state and context length; these are outside the first fixed-shape graph.
+The MLP is a scheduling test, not a claim that it represents full language-model inference. The [decoder design](tile_graph_decoder.md) now specifies KV state, context length, the block's operations, and the path to full-model logits and checkpoint weights. Those features are planned, not implemented.
 
 ## Implemented MLP pipeline
 
@@ -81,6 +81,6 @@ The primary result is a latency-versus-shape comparison against PyTorch CUDA Gra
 ## For the next iteration
 
 - Freeze a shape and tile-height suite, run independent pilot and final rounds, and profile the worker on the RTX 3050. The single demo run is a correctness and pipeline check, not a tuned comparison.
-- Specify the next one-token decoder's state and dependencies. Identify a partial-dependency subgraph or focused micrograph before evaluating tile-ready signaling.
+- Build the [one-token decoder milestones](tile_graph_decoder.md): reference semantics, a new plan/state ABI, one block, a full stack, and a pinned-checkpoint bridge. Use wave barriers first; identify a partial-dependency subgraph or focused micrograph before evaluating tile-ready signaling.
 - Start with one logical worker per SM. Evaluate more resident workers only after measuring the first configuration.
 - Open question: which partial-dependency workload warrants replacing wave barriers with per-tile readiness signals?

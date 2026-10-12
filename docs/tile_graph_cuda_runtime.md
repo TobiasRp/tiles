@@ -4,8 +4,10 @@ Status: version 1 MLP executor implemented and checked on `tux`, 2026-10-12.
 This document describes its current behavior and later design goals for
 [the RTX 3050 tile-graph experiment](tile_graph_inference.md). The executor
 consumes [TilePlan's Python package](tile_graph_python_architecture.md).
-A one-token decoder follows after its state and dependency rules are specified;
-a suitable decoder subgraph or focused micrograph will test early tile handoff.
+The [Llama-style one-token decoder design](tile_graph_decoder.md) specifies
+the next workload and its state/dependency rules. Decoder support is not yet
+implemented; a suitable decoder subgraph or focused micrograph will later
+test early tile handoff.
 
 ## 1. Runtime contract
 
@@ -124,9 +126,11 @@ PyTorch on sparse and many-task schedules. CTest runs clang-format, unit and
 regression tests, and Compute Sanitizer memcheck, racecheck, and synccheck.
 
 Next, freeze a shape and tile-height suite and profile the RTX 3050 before
-changing tile or worker policies. A one-token decoder needs specified KV-state
-rules, new task opcodes and validation, and a new plan ABI if the program
-representation changes. Identify partial tile dependencies in a decoder
-subgraph or focused micrograph before evaluating tile-ready signaling.
+changing tile or worker policies. The chosen [decoder design](tile_graph_decoder.md)
+calls for new task opcodes, validation, a versioned plan ABI, and a mutable
+per-sequence context. Begin with wave barriers and compare synthetic-weight
+results and cache contents against PyTorch. Identify partial tile dependencies
+in a decoder subgraph or focused micrograph before evaluating tile-ready
+signaling.
 
 The first executor does not need cross-block polling, task stealing, persistent operation across requests, or dynamic allocation inside the kernel. A later per-tile readiness protocol requires its own memory-order, progress, and reset design; it should not be added to the wave executor implicitly.

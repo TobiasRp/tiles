@@ -10,10 +10,12 @@ CUDA Graph baselines.
 
 **Status:** The two-wave MLP path works end to end on `tux`. The runtime uses
 one logical worker block per reported SM, CUB warp reduction for GEMV, and a
-grid barrier between MLP stages. A decoder, new task opcodes, partial tile
-handoff, and a tuned shape/tile sweep are future work. The current benchmark
-is an exploratory workload comparison, not evidence that static scheduling
-alone improves latency.
+grid barrier between MLP stages. The [next milestone](docs/tile_graph_decoder.md)
+is a Llama-style one-token decoder, starting with a synthetic float32 block,
+then a full stack, token-loop prefill, and one pinned checkpoint bridge.
+Decoder execution, partial tile handoff, and a tuned shape/tile sweep remain
+future work. The current benchmark is an exploratory workload comparison,
+not evidence that static scheduling alone improves latency.
 
 ## Layout
 
@@ -31,8 +33,9 @@ tileinfer/
 
 See the [core design](docs/tile_graph_inference.md),
 [Python design](docs/tile_graph_python_architecture.md), and
-[runtime design](docs/tile_graph_cuda_runtime.md) for the experiment and its
-planned extensions.
+[runtime design](docs/tile_graph_cuda_runtime.md) for the existing experiment.
+The [decoder design](docs/tile_graph_decoder.md) records the new architecture,
+state contract, milestones, and path to actual model weights.
 
 ## Target environment
 
