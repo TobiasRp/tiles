@@ -32,6 +32,7 @@ uv run --locked python -m tileplan probe --executor ../tileinfer/build/release/t
 uv run --locked python -m tileplan build --model ../runs/fixture/model.json --weights ../runs/fixture/weights.npz --target ../runs/target.json --tile-h1 16 --tile-h2 16 --out ../runs/package
 uv run --locked python -m tileplan inspect ../runs/package
 uv run --locked python -m tileplan verify ../runs/package
+uv run --locked python -m tileplan visualize ../runs/package --out ../runs/schedule.svg
 uv run --locked python -m tileplan benchmark --package ../runs/package --cases ../runs/fixture/reference_cases.npz --out ../runs/baselines.json
 ```
 
@@ -52,3 +53,8 @@ builder writes to a fresh directory via a temporary directory and rename;
 `planning_report.json` records the plan and weight hashes, per-wave worker
 loads, and peak buffer bytes. The schedule uses logical worker IDs and a full
 barrier between the two MLP stages.
+
+`visualize` writes a self-contained SVG with the row ranges and execution
+order of each worker's tasks in both waves. It also shows estimated work and
+the full barrier; vertical spacing is illustrative, not GPU elapsed time.
+Pass `--note TEXT` to label a synthetic or experimental target in the image.

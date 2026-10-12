@@ -12,6 +12,7 @@ from .pipeline import demo
 from .plan import build, read_package, summary
 from .probe import probe
 from .reference import generate
+from .visualize import visualize
 
 
 def _path(value: str) -> Path:
@@ -41,6 +42,10 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("inspect", "verify"):
         command = commands.add_parser(name, help=f"{name} a package without CUDA")
         command.add_argument("package", type=_path)
+    image = commands.add_parser("visualize", help="render a package schedule as SVG")
+    image.add_argument("package", type=_path)
+    image.add_argument("--out", type=_path, required=True)
+    image.add_argument("--note", default="")
     benchmark = commands.add_parser(
         "benchmark", help="measure PyTorch eager and CUDA Graph baselines"
     )
@@ -88,6 +93,10 @@ def main(argv: list[str] | None = None) -> int:
                 if args.command == "inspect"
                 else {"valid": True, "plan_sha256": digest}
             )
+        elif args.command == "visualize":
+            result = {
+                "visualization": str(visualize(args.package, args.out, note=args.note))
+            }
         elif args.command == "benchmark":
             result = baselines.run(
                 args.package, args.cases, args.out, args.iterations, args.rounds

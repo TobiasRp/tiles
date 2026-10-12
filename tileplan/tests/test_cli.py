@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from xml.etree import ElementTree
 
 from tileplan.probe import normalize
 
@@ -64,10 +65,34 @@ class CliTest(unittest.TestCase):
             for command in ("inspect", "verify"):
                 result = invoke(command, str(root / "package"))
                 self.assertEqual(result.returncode, 0, result.stderr)
+            image = root / "schedule.svg"
+            result = invoke(
+                "visualize",
+                str(root / "package"),
+                "--out",
+                str(image),
+                "--note",
+                "synthetic <target> & test",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            svg = image.read_text()
+            self.assertEqual(
+                len(
+                    ElementTree.fromstring(svg).findall("{http://www.w3.org/2000/svg}g")
+                ),
+                5,
+            )
+            self.assertIn("FULL GRID BARRIER", svg)
+            self.assertIn("synthetic &lt;target&gt; &amp; test", svg)
+            result = invoke("visualize", str(root / "package"), "--out", str(image))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Worker 0", image.read_text())
             (root / "package/weights.bin").write_bytes(b"broken")
             result = invoke("verify", str(root / "package"))
             self.assertEqual(result.returncode, 2)
             self.assertIn("checksum", result.stderr)
+            result = invoke("visualize", str(root / "package"), "--out", str(image))
+            self.assertEqual(result.returncode, 2)
 
     def test_demo_stops_at_unimplemented_runtime(self) -> None:
         runtime = (
