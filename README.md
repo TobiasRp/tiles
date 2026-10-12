@@ -1,83 +1,124 @@
 # tile-infer
 
-Prototype for statically scheduled tile-graph inference on an RTX 3050.
-[TilePlan](tileplan/README.md) generates a fixed-shape float32 MLP fixture,
-probes the compiled CUDA worker, and writes a versioned plan and weights.
-[TileInfer](tileinfer/README.md) validates that package and executes its tile
-tasks in one cooperative kernel per inference. Python checks the intermediate
-and final values against a saved PyTorch reference and runs PyTorch eager and
-CUDA Graph baselines.
+Tile inference prototype targeting the
+[Llama 3.2 1B **base** model](https://huggingface.co/meta-llama/Llama-3.2-1B)
+on an 8 GB RTX 3050. [TilePlan](tileplan/README.md) turns the pinned Hugging
+Face checkpoint into a validated, tiled execution package. [TileInfer](tileinfer/README.md)
+executes one token at a time with a persistent CUDA worker and a per-layer KV
+cache.
 
-**Status:** The two-wave MLP path works end to end on `tux`. The runtime uses
-one logical worker block per reported SM, CUB warp reduction for GEMV, and a
-grid barrier between MLP stages. The [next goal](docs/tile_graph_decoder.md)
-is one-token inference with a pinned revision of the
-`meta-llama/Llama-3.2-1B` base model:
-start with a synthetic float32 block, build the full stack, add BF16 weight
-storage, and import the checkpoint. Prompt tokens can initially use repeated
-decode calls.
-Decoder execution, partial tile handoff, and a tuned shape/tile sweep remain
-future work. The current benchmark is an exploratory workload comparison,
-not evidence that static scheduling alone improves latency.
+The checkpoint stays in BF16 storage; loads convert weights to float32 for
+arithmetic. Activations, accumulation, logits, and the KV cache are float32.
+The output projection aliases the token embedding. Tokenization runs in Python;
+the CUDA executor accepts token IDs. The base model has no chat template in
+this workflow.
 
-## Layout
+## Run Llama 3.2 1B on `tux`
 
-```text
-docs/                  Hypothesis and design notes
-tileplan/
-  src/tileplan/         Planner, fixture, probe, visualization, and demo
-  tests/                Python unit and file-bridge tests
-  pyproject.toml        uv-managed dependencies and CLI entry point
-tileinfer/
-  src/runtime/          C++23 loader/CLI and CUDA20 cooperative worker
-  tests/                Unit, PyTorch regression, CCCL, and sanitizer checks
-  CMakePresets.json     Debug, release, and CPU-only builds
-```
-
-See the [core design](docs/tile_graph_inference.md),
-[Python design](docs/tile_graph_python_architecture.md), and
-[runtime design](docs/tile_graph_cuda_runtime.md) for the existing experiment.
-The [decoder design](docs/tile_graph_decoder.md) records the new architecture,
-state contract, milestones, and path to actual model weights.
-
-## Target environment
-
-The target workstation has an RTX 3050 (compute capability 8.6), CUDA Toolkit
-13.4, driver 595.91.07, CMake, Ninja, uv, and a Python 3.14 environment with
-PyTorch 2.14.1. The CMake CUDA presets use `/usr/local/cuda/bin/nvcc` and
-architecture 86. Adjust the presets before building on another GPU.
-
-## Run the complete demo on `tux`
+You need access to the gated model on Hugging Face. Sign in on `tux` so your
+token remains on that machine, then download the pinned revision. The model
+files are kept under `checkpoints/`, which Git ignores.
 
 ```sh
-cd ~/dev/tile-infer/tileplan
+~/.local/bin/uv tool install huggingface_hub
+~/.local/bin/hf auth login
+~/.local/bin/hf download meta-llama/Llama-3.2-1B \
+  --revision 4e20de362430cd3b72f300e6b0f18e50e7166e08 \
+  --local-dir ~/dev/tile-infer/checkpoints/Llama-3.2-1B
+```
+
+Build the CUDA runtime, probe that exact worker, and import a package with a
+4K-token context. Use a new `RUN` directory each time; TilePlan refuses to
+overwrite an existing package. This package uses about 2.47 GB for weights
+and 256 MiB for the float32 KV cache.
+
+```sh
+cd ~/dev/tile-infer/tileinfer
+cmake --preset release
+cmake --build --preset release
+
+cd ../tileplan
 ~/.local/bin/uv sync --locked
-~/.local/bin/uv run --locked python -m tileplan demo --out ../runs/demo
+RUN=../runs/llama32-$(date +%Y%m%d-%H%M%S)
+MODEL=../checkpoints/Llama-3.2-1B
+mkdir -p "$RUN"
+~/.local/bin/uv run --locked python -m tileplan probe \
+  --executor ../tileinfer/build/release/tile_runtime \
+  --out "$RUN/target.json"
+~/.local/bin/uv run --locked python -m tileplan import-llama32 \
+  --checkpoint "$MODEL" --target "$RUN/target.json" \
+  --max-context 4096 --tile-rows auto --out "$RUN/package"
+~/.local/bin/uv run --locked python -m tileplan verify "$RUN/package"
 ```
 
-`demo` builds the release executor, probes its actual worker occupancy,
-generates the reference and package, checks CUDA `h` and `y` against PyTorch,
-and records the persistent, eager, and CUDA Graph measurements under
-`runs/demo/`. Choose a fresh output directory for each run. See the TilePlan
-README for individual commands and custom dimensions or tile heights.
-
-## Checks
+To run a prompt, tokenize it, feed its IDs to the one-token executor in order,
+and decode the highest-logit next token:
 
 ```sh
-cd ~/dev/tile-infer/tileplan
+PROMPT='The capital of France is'
+~/.local/bin/uv run --locked --group checkpoint python - "$MODEL" "$PROMPT" "$RUN/inputs.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained(sys.argv[1], local_files_only=True)
+tokens = tokenizer(sys.argv[2], add_special_tokens=True)["input_ids"]
+Path(sys.argv[3]).write_text(json.dumps({"tokens": tokens}))
+PY
+
+../tileinfer/build/release/tile_runtime \
+  --run-stack "$RUN/package" "$RUN/inputs.json" > "$RUN/inference.json"
+
+~/.local/bin/uv run --locked --group checkpoint python - "$MODEL" "$RUN/inference.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+from transformers import AutoTokenizer
+
+tokenizer = AutoTokenizer.from_pretrained(sys.argv[1], local_files_only=True)
+steps = json.loads(Path(sys.argv[2]).read_text())["steps"]
+logits = steps[-1]["logits"]
+next_token = max(range(len(logits)), key=logits.__getitem__)
+print(next_token, repr(tokenizer.decode([next_token])))
+PY
+```
+
+`inference.json` includes logits and each layer's current K/V values for every
+input token. The CLI starts a fresh context for each invocation; the
+[checkpoint regression](tileinfer/tests/llama32_checkpoint.py) demonstrates
+two greedy feedback steps per prompt. A text generation CLI and fast chunked
+prefill are future work.
+
+## Check correctness
+
+The real-checkpoint regression compares every block output, per-layer K/V
+slice, and full-vocabulary logits with Hugging Face Transformers using the
+same BF16 checkpoint values converted to float32. It runs three short prompts
+and checks their greedy next-token choices. The reference process exits before
+TileInfer loads the weights on the 8 GB GPU.
+
+```sh
+~/.local/bin/uv run --locked --group checkpoint python \
+  ../tileinfer/tests/llama32_checkpoint.py \
+  --checkpoint "$MODEL" --package "$RUN/package" \
+  --executor ../tileinfer/build/release/tile_runtime \
+  --out "$RUN/comparison"
+
 ~/.local/bin/uv run --locked ruff check src tests ../tileinfer/tests
 ~/.local/bin/uv run --locked ruff format --check src tests ../tileinfer/tests
 ~/.local/bin/uv run --locked ty check src tests ../tileinfer/tests
 ~/.local/bin/uv run --locked python -m unittest discover -s tests -v
-
 cd ../tileinfer
-cmake --preset release
-cmake --build --preset release
-ctest --preset release
+ctest --preset release --output-on-failure
 ```
 
-The release tests on `tux` include clang-format, C++ unit tests, the CCCL
-cooperative-launch gate, generated-plan regression against PyTorch, and
-Compute Sanitizer memcheck, racecheck, and synccheck. CMake also provides a
-`cpu-debug` preset for host-only tests. Optional tools are added to CTest when
-found during configuration.
+The validated run on `tux` compared 27 tokens across three prompts: maximum
+absolute errors were 0.000504 for block outputs and 0.0000801 for logits, and
+all 27 next-token choices matched. The full report is in
+`runs/llama32-import-2026-10-12/comparison-final/report.json` on `tux`.
+
+For a small deterministic example that needs no checkpoint, see the
+[TilePlan synthetic stack instructions](tileplan/README.md). The
+[decoder design](docs/tile_graph_decoder.md) describes the plan and state ABI,
+current scope, and performance experiments still to do.

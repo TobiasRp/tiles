@@ -1,4 +1,4 @@
-"""Command-line entry points for each offline planning stage."""
+"""Decoder-only reference, planning, inspection, and visualization commands."""
 
 import argparse
 import json
@@ -6,12 +6,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import baselines
-from .model import Model
-from .pipeline import demo
-from .plan import build, read_package, summary
+from .decoder_plan import build, read_package, summary
+from .decoder_reference import generate_fixture
+from .decoder_stack import build_stack, generate_stack_fixture
+from .llama32_import import import_llama32
 from .probe import probe
-from .reference import generate
 from .visualize import visualize
 
 
@@ -22,58 +21,55 @@ def _path(value: str) -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="tileplan")
     commands = parser.add_subparsers(dest="command", required=True)
-    reference = commands.add_parser(
-        "reference", help="generate deterministic PyTorch MLP cases"
-    )
+    reference = commands.add_parser("reference", help="write a decoder PyTorch fixture")
     reference.add_argument("--out", type=_path, required=True)
-    reference.add_argument("--seed", type=int, default=7)
-    for name, default in (("d", 129), ("h", 65), ("o", 33)):
-        reference.add_argument(f"--{name}", type=int, default=default)
-    target = commands.add_parser(
-        "probe", help="query final compiled CUDA worker capabilities"
+    reference.add_argument("--seed", type=int, default=19)
+    stack_reference = commands.add_parser(
+        "stack-reference", help="write a deterministic full decoder fixture"
     )
+    stack_reference.add_argument("--out", type=_path, required=True)
+    stack_reference.add_argument("--seed", type=int, default=37)
+    target = commands.add_parser("probe", help="query the compiled decoder worker")
     target.add_argument("--executor", type=_path, required=True)
     target.add_argument("--out", type=_path, required=True)
-    planner = commands.add_parser("build", help="write a validated tile-plan package")
+    planner = commands.add_parser("build", help="write a decoder block package")
     for name in ("model", "weights", "target", "out"):
         planner.add_argument(f"--{name}", type=_path, required=True)
-    planner.add_argument("--tile-h1", type=int, required=True)
-    planner.add_argument("--tile-h2", type=int, required=True)
+    planner.add_argument("--tile-rows", default="auto")
+    planner.add_argument(
+        "--weight-dtype", choices=("float32", "bfloat16"), default="float32"
+    )
+    stack_planner = commands.add_parser(
+        "build-stack", help="write a decoder stack package"
+    )
+    for name in ("model", "weights", "target", "out"):
+        stack_planner.add_argument(f"--{name}", type=_path, required=True)
+    stack_planner.add_argument("--tile-rows", default="auto")
+    stack_planner.add_argument(
+        "--weight-dtype", choices=("float32", "bfloat16"), default="float32"
+    )
+    importer = commands.add_parser(
+        "import-llama32", help="pack the pinned Llama 3.2 1B base checkpoint"
+    )
+    for name in ("checkpoint", "target", "out"):
+        importer.add_argument(f"--{name}", type=_path, required=True)
+    importer.add_argument("--max-context", type=int, default=4096)
+    importer.add_argument("--tile-rows", default="auto")
+    importer.add_argument("--revision", help="pinned Hugging Face commit SHA")
     for name in ("inspect", "verify"):
-        command = commands.add_parser(name, help=f"{name} a package without CUDA")
+        command = commands.add_parser(name, help=f"{name} a decoder package")
         command.add_argument("package", type=_path)
-    image = commands.add_parser("visualize", help="render a package schedule as SVG")
+    image = commands.add_parser("visualize", help="render decoder waves as SVG")
     image.add_argument("package", type=_path)
     image.add_argument("--out", type=_path, required=True)
     image.add_argument("--note", default="")
-    benchmark = commands.add_parser(
-        "benchmark", help="measure PyTorch eager and CUDA Graph baselines"
-    )
-    benchmark.add_argument("--package", type=_path, required=True)
-    benchmark.add_argument("--cases", type=_path, required=True)
-    benchmark.add_argument("--out", type=_path, required=True)
-    benchmark.add_argument("--iterations", type=int, default=100)
-    benchmark.add_argument("--rounds", type=int, default=5)
-    driver = commands.add_parser(
-        "demo", help="build, plan, execute, check, and benchmark"
-    )
-    driver.add_argument("--out", type=_path, required=True)
-    driver.add_argument("--executor", type=_path)
-    driver.add_argument("--seed", type=int, default=7)
-    for name, default in (
-        ("d", 129),
-        ("h", 65),
-        ("o", 33),
-        ("tile-h1", 16),
-        ("tile-h2", 16),
-        ("iterations", 100),
-        ("rounds", 5),
-    ):
-        driver.add_argument(f"--{name}", type=int, default=default)
     args = parser.parse_args(argv)
     try:
         if args.command == "reference":
-            generate(args.out, Model(args.d, args.h, args.o), args.seed)
+            generate_fixture(args.out, seed=args.seed)
+            result = {"reference": str(args.out)}
+        elif args.command == "stack-reference":
+            generate_stack_fixture(args.out, seed=args.seed)
             result = {"reference": str(args.out)}
         elif args.command == "probe":
             result = probe(args.executor, args.out)
@@ -82,9 +78,27 @@ def main(argv: list[str] | None = None) -> int:
                 args.model,
                 args.weights,
                 args.target,
-                args.tile_h1,
-                args.tile_h2,
+                args.tile_rows,
                 args.out,
+                args.weight_dtype,
+            )
+        elif args.command == "build-stack":
+            result = build_stack(
+                args.model,
+                args.weights,
+                args.target,
+                args.tile_rows,
+                args.out,
+                args.weight_dtype,
+            )
+        elif args.command == "import-llama32":
+            result = import_llama32(
+                args.checkpoint,
+                args.target,
+                args.out,
+                args.max_context,
+                args.tile_rows,
+                args.revision,
             )
         elif args.command in {"inspect", "verify"}:
             plan, _, digest = read_package(args.package)
@@ -93,27 +107,12 @@ def main(argv: list[str] | None = None) -> int:
                 if args.command == "inspect"
                 else {"valid": True, "plan_sha256": digest}
             )
-        elif args.command == "visualize":
+        else:
             result = {
                 "visualization": str(visualize(args.package, args.out, note=args.note))
             }
-        elif args.command == "benchmark":
-            result = baselines.run(
-                args.package, args.cases, args.out, args.iterations, args.rounds
-            )
-        else:
-            result = demo(
-                args.out,
-                args.executor,
-                Model(args.d, args.h, args.o),
-                args.seed,
-                args.tile_h1,
-                args.tile_h2,
-                args.iterations,
-                args.rounds,
-            )
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"tileplan {args.command}: {exc}", file=sys.stderr)
         return 2
-    print(json.dumps(result, sort_keys=True, indent=2, default=str))
+    print(json.dumps(result, sort_keys=True, indent=2))
     return 0

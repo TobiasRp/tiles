@@ -1,5 +1,7 @@
 # C++/CUDA runtime for TilePlan
 
+Historical MLP design note. The active decoder package and state ABI are described in [the decoder design](tile_graph_decoder.md); its arithmetic execution is the next milestone.
+
 Status: version 1 MLP executor implemented and checked on `tux`, 2026-10-12.
 This document describes its current behavior and later design goals for
 [the RTX 3050 tile-graph experiment](tile_graph_inference.md). The executor

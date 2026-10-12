@@ -1,5 +1,7 @@
 # Statically scheduled tile-graph inference on an RTX 3050
 
+Historical MLP design note. The active decoder package and state ABI are described in [the decoder design](tile_graph_decoder.md); its arithmetic execution is the next milestone.
+
 Status: MLP prototype implemented and checked on the RTX 3050, 2026-10-12.
 This document also describes unimplemented experiments; the current commands
 and limits are in the [repository README](../README.md).

@@ -1,12 +1,17 @@
 # Llama-style one-token decoder design
 
-Status: design and milestones agreed, 2026-10-12. The implemented software
-still executes only the float32 MLP described in the [core design](tile_graph_inference.md).
+Status: milestones 1–6 implemented, 2026-10-12. The CPU reference,
+version-3 decoder package, cooperative CUDA arithmetic, and compact repeated-block
+stack are available. Synthetic float32 block and full-stack fixtures are under
+`tileplan/tests/fixtures/decoder_m1` and `decoder_m4`; the planner can pack
+their weights as BF16. The pinned Llama 3.2 1B base checkpoint also imports
+and passes a real-model regression.
+
 This document specifies the path to one-token inference with the
 [`meta-llama/Llama-3.2-1B` base model](https://huggingface.co/meta-llama/Llama-3.2-1B)
 for [TilePlan](tile_graph_python_architecture.md) and
-[TileInfer](tile_graph_cuda_runtime.md). Decoder execution, BF16 weights, and
-Hugging Face checkpoint loading are not yet implemented.
+[TileInfer](tile_graph_cuda_runtime.md). BF16 weight storage and Hugging Face
+checkpoint loading are implemented.
 
 ## Goal and first supported model
 
@@ -120,8 +125,7 @@ is intentionally a simple, correct mapping; tiling the context dimension
 requires a later partial reduction.
 
 The MLP version-1 task record hardcodes GEMV buffers and two waves. Add a
-new plan format/executor ABI for decoder work while preserving acceptance of
-existing MLP packages. Plan tasks should reference typed tensor/storage IDs,
+new plan format/executor ABI for decoder work. Plan tasks should reference typed tensor/storage IDs,
 an opcode with a small validated operand payload, output region, predecessor
 IDs, wave, and worker. Extend the scheduler to form topological waves from
 the task DAG. The loader validates opcode-specific dimensions, ownership,
@@ -133,34 +137,50 @@ first concrete block exposes a need; dedicated scratch buffers are adequate
 at the start. Reprobe occupancy for the **compiled decoder worker** because
 new opcodes change its resource use.
 
+The version-2 planner chooses the earliest legal wave for each task and balances
+estimated work across logical workers. Its automatic tile-height heuristic
+compares candidate schedules and records every score in the planning report.
+The compiled worker executes the block wave loop and both stack stages in one
+cooperative launch. The stack package stores one block task template, repeats
+it across layers, reuses block scratch, and gives each layer its own K/V
+region and weight stride. Embedding lookup runs before the first block;
+final RMSNorm and logits run after the last. The output embedding may alias
+the input embedding by an explicit package flag. The target report declares
+`execution_ready: true` and records occupancy from this compiled kernel.
+
 ## Milestones and acceptance checks
 
-1. **Reference and semantics.** Implement a small independent PyTorch block
+1. **Reference and semantics (complete).** Implement a small independent PyTorch block
    with fixed weights and a token sequence. Freeze shapes, RoPE variant,
    epsilon, head mapping, cache layout, and tolerances in test fixtures.
    Verify its sequential cache against recomputation on the same prefix.
-2. **Plan and state ABI.** Add a versioned decoder model specification,
+2. **Plan and state ABI (complete).** Add a versioned decoder model specification,
    typed task operands, general wave scheduling, decoder package validation,
-   and `SequenceContext`. Existing MLP packages and tests continue to run.
+   and `SequenceContext`. Existing MLP packages and tests can be deleted.
    Inspect output shows waves, per-worker load, scratch, and KV bytes.
-3. **One CUDA block.** Execute one block for one token at `p=0`, then a
+3. **One CUDA block (complete).** Execute one block for one token at `p=0`, then a
    sequence of tokens through the same context. Compare Q/K/V after RoPE,
    cache entries, attention output, both residuals, FFN output, and final
    hidden vector with PyTorch. Cover GQA, tail tiles, reset, and capacity
    boundary. Run CTest and Compute Sanitizer memcheck/racecheck/synccheck.
-4. **Full decoder stack.** Add embedding lookup, repeated blocks with one
+4. **Full decoder stack (complete).** Add embedding lookup, repeated blocks with one
    cache per layer, final norm, and logits. Compare token-by-token logits
    and cache with a PyTorch reference. Preserve a one-token API so the same
    plan can process a sequence by repeated calls.
-5. **BF16 weight path.** Extend the decoder package with per-tensor dtypes
+5. **BF16 weight path (complete).** Extend the decoder package with per-tensor dtypes
    and packed BF16 weight storage; validate sizes, offsets, hashes, and tied
    weight aliases. Add BF16-loading GEMV, embedding, and norm paths that
    accumulate/compute in float32 while preserving float32 activations and
    cache. Test synthetic BF16-quantized weights against a PyTorch reference
    using the same BF16 values converted to float32 for computation. Keep
-   float32 decoder packages and version-1 MLP packages working. Reprobe the
-   compiled worker's occupancy and run Compute Sanitizer.
-6. **Llama 3.2 1B checkpoint bridge.** Pin an accessible revision of
+   float32 decoder packages working. The version-3 package selects one weight
+   dtype (`float32` or `bfloat16`) and records it on every weight tensor;
+   activations and K/V remain float32. The CUDA worker and weight-consuming
+   operators are instantiated for both storage types, with float32 arithmetic
+   after each load. Version-2 float32 packages remain readable. The compiled
+   worker was reprobed at seven resident blocks per SM, and BF16 block and
+   stack runs passed Compute Sanitizer memcheck, racecheck, and synccheck.
+6. **Llama 3.2 1B checkpoint bridge (implemented).** Pin an accessible revision of
    `meta-llama/Llama-3.2-1B`. Read its `config.json` and safetensors, reject
    unsupported variants, map all named tensors to a BF16 plan, and alias the
    tied embedding/output weight without a second GPU allocation. Record
@@ -168,6 +188,15 @@ new opcodes change its resource use.
    token-by-token logits for several short prompts against
    `AutoModelForCausalLM` with its stored BF16 weights converted to float32
    for the same computation policy. Run a short greedy-generation regression.
+   The imported revision is `4e20de362430cd3b72f300e6b0f18e50e7166e08`.
+   A 64-token validation package from the base checkpoint has 2,471,628,800
+   bytes of BF16 weights and aliases `lm_head` to the embedding. Across 27
+   tokens from three prompts, the maximum absolute errors against a float32
+   Transformers run were 0.000504 for block outputs, 0.0000477 for K,
+   0.0000146 for V, and 0.0000801 for logits. All 27 next-token choices
+   matched. The clean one-command report is at
+   `runs/llama32-import-2026-10-12/comparison-final/report.json` on `tux`.
+   A separate 4K-context package also completed a real-token GPU smoke run.
 7. **Performance experiments.** Measure decode against PyTorch eager and
    CUDA Graph replay at fixed context lengths. Profile the decoder worker
    and memory traffic. Add chunked prefill, lower-precision activations/cache,
@@ -176,8 +205,7 @@ new opcodes change its resource use.
    isolate partial tile handoff if the decoder schedule does not.
 
 Each milestone has deterministic unit tests for the planner/loader contract
-and GPU regression tests against PyTorch for the paths it adds. Keep the MLP
-regression and the existing formatting/static-check gates.
+and GPU regression tests against PyTorch for the paths it adds. Keep the existing formatting/static-check gates.
 
 ## Path from synthetic weights to a real checkpoint
 

@@ -1,129 +1,134 @@
-"""Render a validated tile plan as a self-contained SVG schedule."""
+"""Render decoder waves and worker assignments to a self-contained SVG."""
 
 from html import escape
 from pathlib import Path
 
-from .plan import read_package
+from .decoder_plan import read_package
+
+COLORS = {
+    "rms_norm_f32": "#dbeafe",
+    "gemv_f32": "#dcfce7",
+    "rope_query_f32": "#fef3c7",
+    "rope_cache_f32": "#fde68a",
+    "attention_prefix_f32": "#fce7f3",
+    "silu_product_f32": "#e9d5ff",
+}
 
 
 def render_schedule_svg(plan: dict, *, plan_sha256: str, note: str = "") -> str:
-    """Show waves, logical workers, task order, row ownership, and the barrier."""
-    workers = plan["target"]["worker_count"]
-    model = plan["model"]
-    storage = plan["storage"]
-    peak_bytes = sum(
-        storage[name]
-        for name in ("input_bytes", "weight_bytes", "scratch_bytes", "output_bytes")
-    )
     tasks = {task["id"]: task for task in plan["tasks"]}
-    column_width = 220
-    lane_x = 215
-    width = lane_x + workers * column_width + 48
-    card_height = 58
-    card_gap = 10
-    stage_tops = [185]
-    stage_heights = [
-        max(172, 87 + max(map(len, wave["workers"])) * (card_height + card_gap))
-        for wave in plan["waves"]
-    ]
-    stage_tops.append(stage_tops[0] + stage_heights[0] + 76)
-    height = stage_tops[1] + stage_heights[1] + 78
+    waves = plan["waves"]
+    width = 1210
+    top = 222
+    columns = 4
+    card_width = 270
+    card_height = 64
+    gap_x = 16
+    gap_y = 12
+    wave_heights = []
+    for wave in waves:
+        count = sum(len(ids) for ids in wave["workers"])
+        wave_heights.append(
+            75 + ((count + columns - 1) // columns) * (card_height + gap_y) + 10
+        )
+    height = top + sum(wave_heights) + 52
+    model, storage = plan["model"], plan["storage"]
+    stack = plan["header"]["model_kind"] == "llama_decoder_stack_f32"
+    title = (
+        f"Full decoder: {model['layers']} layers"
+        if stack
+        else "One-token decoder block"
+    )
+    stage_text = (
+        f"Embedding lookup → these {len(waves)} waves × {model['layers']} layers "
+        "→ final RMSNorm → logits. Scratch is reused each layer."
+        if stack
+        else "Each task is placed in its earliest legal wave. "
+        "Larger tasks go to the least-loaded worker."
+    )
 
     def label(value: object) -> str:
         return escape(str(value), quote=True)
 
     svg = [
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" '
-        f'width="{width}" height="{height}" role="img" '
-        'aria-labelledby="title description">',
-        '<title id="title">TilePlan MLP task schedule</title>',
-        '<desc id="description">Two waves of row-tile tasks assigned to logical workers, '
-        "with a full barrier between the MLP layers.</desc>",
+        f'width="{width}" height="{height}" role="img" aria-labelledby="title description">',
+        f'<title id="title">{label(title)} schedule</title>',
+        f'<desc id="description">{label(stage_text)} '
+        "Cards show logical worker assignment and estimated work.</desc>",
         '<rect width="100%" height="100%" fill="#f5f7fb"/>',
-        '<text x="48" y="49" font-family="sans-serif" font-size="27" '
-        'font-weight="700" fill="#172338">TilePlan schedule</text>',
-        f'<text x="48" y="79" font-family="sans-serif" font-size="15" '
-        f'fill="#475569">MLP float32 · D={model["D"]} · H={model["H"]} · '
-        f"O={model['O']} · tiles={model['tile_h1']}/{model['tile_h2']} · "
-        f"{workers} logical workers</text>",
-        f'<text x="48" y="105" font-family="sans-serif" font-size="13" '
-        f'fill="#64748b">Plan SHA-256: {label(plan_sha256[:16])}… · '
-        f"Kernel: {label(plan['target']['kernel_fingerprint'])}</text>",
-        f'<text x="48" y="128" font-family="sans-serif" font-size="13" '
-        f'fill="#64748b">Buffers: input {storage["input_bytes"]:,} B · '
-        f"weights {storage['weight_bytes']:,} B · scratch {storage['scratch_bytes']:,} B · "
-        f"output {storage['output_bytes']:,} B · peak {peak_bytes:,} B</text>",
+        '<text x="40" y="51" font-family="sans-serif" font-size="28" '
+        f'font-weight="700" fill="#172338">{label(title)}</text>',
+        f'<text x="40" y="80" font-family="sans-serif" font-size="15" fill="#475569">'
+        f"d={model['hidden_size']} · f={model['intermediate_size']} · "
+        f"Q/KV heads={model['num_attention_heads']}/{model['num_key_value_heads']} · "
+        f"context={model['max_context']} · tile rows={model['tile_rows']}</text>",
+        f'<text x="40" y="107" font-family="sans-serif" font-size="14" fill="#475569">'
+        f"{len(plan['tasks'])} tasks · {len(waves)} waves · "
+        f"{plan['target']['worker_count']} logical workers · "
+        f"scratch {storage['scratch_bytes']:,} B · KV {storage['kv_bytes']:,} B · "
+        f"weights {storage['weight_bytes']:,} B</text>",
+        f'<text x="40" y="132" font-family="sans-serif" font-size="12" fill="#64748b">'
+        f"plan {label(plan_sha256[:16])}… · "
+        f"kernel {label(plan['target']['kernel_fingerprint'])}</text>",
+        f'<text x="40" y="158" font-family="sans-serif" font-size="13" '
+        f'fill="#64748b">{label(stage_text)}</text>',
     ]
     if note:
         svg.append(
-            f'<text x="48" y="153" font-family="sans-serif" font-size="13" '
+            f'<text x="40" y="185" font-family="sans-serif" font-size="13" '
             f'font-weight="600" fill="#9a3412">{label(note)}</text>'
         )
-
-    for wave_index, wave in enumerate(plan["waves"]):
-        top = stage_tops[wave_index]
-        stage_height = stage_heights[wave_index]
-        layer = "W1 × x + b1; GELU" if wave_index == 0 else "W2 × h + b2; output y"
-        color = "#dbeafe" if wave_index == 0 else "#dcfce7"
-        stroke = "#93c5fd" if wave_index == 0 else "#86efac"
+    for wave in waves:
+        count = sum(len(ids) for ids in wave["workers"])
+        wave_height = wave_heights[wave["id"]]
+        active = sum(bool(ids) for ids in wave["workers"])
         svg.extend(
             [
-                f'<rect x="32" y="{top}" width="{width - 64}" height="{stage_height}" '
-                'rx="15" fill="white" stroke="#cbd5e1"/>',
-                f'<text x="49" y="{top + 34}" font-family="sans-serif" font-size="20" '
-                f'font-weight="700" fill="#172338">Wave {wave_index}</text>',
-                f'<text x="49" y="{top + 58}" font-family="sans-serif" font-size="13" '
-                f'fill="#475569">{layer}</text>',
+                f'<rect x="24" y="{top}" width="{width - 48}" height="{wave_height}" '
+                'rx="12" fill="white" stroke="#cbd5e1"/>',
+                f'<text x="40" y="{top + 30}" font-family="sans-serif" font-size="18" '
+                f'font-weight="700" fill="#172338">Wave {wave["id"]}</text>',
+                f'<text x="170" y="{top + 29}" font-family="sans-serif" font-size="13" '
+                f'fill="#475569">{count} tasks · {active} active workers · '
+                f"estimated work {sum(wave['estimated_work']):,}</text>",
             ]
         )
-        for worker, ids in enumerate(wave["workers"]):
-            x = lane_x + worker * column_width
-            svg.append(
-                f'<text x="{x + 8}" y="{top + 34}" font-family="sans-serif" '
-                f'font-size="15" font-weight="700" fill="#334155">Worker {worker}</text>'
+        entries = [
+            (worker, task_id)
+            for worker, ids in enumerate(wave["workers"])
+            for task_id in ids
+        ]
+        for index, (worker, task_id) in enumerate(entries):
+            task = tasks[task_id]
+            x = 40 + (index % columns) * (card_width + gap_x)
+            y = top + 50 + (index // columns) * (card_height + gap_y)
+            color = COLORS[task["opcode"]]
+            output = ", ".join(
+                f"{plan['model']['tensors'][part['tensor']]['name']}"
+                + (f" {part['rows']}" if "rows" in part else f" p/head {part['head']}")
+                for part in task["output"]
             )
-            svg.append(
-                f'<text x="{x + 8}" y="{top + 54}" font-family="sans-serif" '
-                f'font-size="12" fill="#64748b">estimated work: '
-                f"{wave['estimated_work'][worker]:,}</text>"
+            svg.extend(
+                [
+                    f"<g><title>Task {task_id}: {label(task['opcode'])}; "
+                    f"predecessors {label(task['predecessors'])}; "
+                    f"estimated work {task['estimated_work']}</title>",
+                    f'<rect x="{x}" y="{y}" width="{card_width}" height="{card_height}" '
+                    f'rx="8" fill="{color}" stroke="#cbd5e1"/>',
+                    f'<text x="{x + 10}" y="{y + 19}" font-family="sans-serif" '
+                    f'font-size="13" font-weight="700" fill="#172338">'
+                    f"T{task_id} · worker {worker} · {label(task['opcode'])}</text>",
+                    f'<text x="{x + 10}" y="{y + 42}" font-family="sans-serif" '
+                    f'font-size="12" fill="#334155">{label(output)}</text></g>',
+                ]
             )
-            if not ids:
-                svg.append(
-                    f'<text x="{x + 8}" y="{top + 111}" font-family="sans-serif" '
-                    'font-size="13" fill="#94a3b8">idle this wave</text>'
-                )
-            for position, task_id in enumerate(ids):
-                task = tasks[task_id]
-                begin, end = task["rows"]
-                y = top + 72 + position * (card_height + card_gap)
-                work = (end - begin) * (model["D"] if wave_index == 0 else model["H"])
-                svg.extend(
-                    [
-                        f"<g><title>Task {task_id}: {label(task['opcode'])}, "
-                        f"rows [{begin}, {end}), estimated work {work}</title>",
-                        f'<rect x="{x + 7}" y="{y}" width="{column_width - 17}" '
-                        f'height="{card_height}" rx="9" fill="{color}" stroke="{stroke}"/>',
-                        f'<text x="{x + 20}" y="{y + 24}" font-family="sans-serif" '
-                        f'font-size="15" font-weight="700" fill="#172338">Task {task_id}</text>',
-                        f'<text x="{x + 20}" y="{y + 44}" font-family="sans-serif" '
-                        f'font-size="13" fill="#334155">rows [{begin}, {end}) · work {work:,}</text>',
-                        "</g>",
-                    ]
-                )
-
-    barrier_y = stage_tops[0] + stage_heights[0] + 38
+        top += wave_height
     svg.extend(
         [
-            f'<line x1="48" x2="{width - 48}" y1="{barrier_y}" y2="{barrier_y}" '
-            'stroke="#64748b" stroke-width="2" stroke-dasharray="7 6"/>',
-            f'<rect x="{width / 2 - 155}" y="{barrier_y - 14}" width="310" '
-            'height="28" rx="14" fill="#f5f7fb"/>',
-            f'<text x="{width / 2}" y="{barrier_y + 5}" text-anchor="middle" '
-            'font-family="sans-serif" font-size="13" font-weight="700" '
-            'fill="#475569">FULL GRID BARRIER · all h rows ready</text>',
-            f'<text x="48" y="{height - 30}" font-family="sans-serif" font-size="12" '
-            'fill="#64748b">Cards follow each worker’s task order. '
-            "Workers are logical blocks; vertical position is not elapsed time.</text>",
+            f'<text x="40" y="{height - 24}" font-family="sans-serif" font-size="12" '
+            'fill="#64748b">Worker IDs are logical CUDA blocks. '
+            "Wave boundaries are full cooperative-grid barriers.</text>",
             "</svg>",
         ]
     )
@@ -131,7 +136,6 @@ def render_schedule_svg(plan: dict, *, plan_sha256: str, note: str = "") -> str:
 
 
 def visualize(package: Path, out: Path, *, note: str = "") -> Path:
-    """Validate a package, then write its schedule to an SVG file."""
     plan, _, digest = read_package(package)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(render_schedule_svg(plan, plan_sha256=digest, note=note))

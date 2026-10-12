@@ -1,11 +1,18 @@
-"""Normalize facts reported by the final compiled CUDA worker executable."""
+"""Normalize decoder worker facts from the compiled CUDA executable."""
 
 import json
 import subprocess
 from pathlib import Path
 
-ABI = "tileinfer-mlp-v1"
-OPCODES = {"gemv_bias_gelu_f32", "gemv_bias_f32"}
+ABI = "tileinfer-decoder-v3"
+OPCODES = {
+    "rms_norm_f32",
+    "gemv_f32",
+    "rope_query_f32",
+    "rope_cache_f32",
+    "attention_prefix_f32",
+    "silu_product_f32",
+}
 
 
 def normalize(raw: dict) -> dict:
@@ -35,22 +42,21 @@ def normalize(raw: dict) -> dict:
             or executor["abi"] != ABI
             or not OPCODES.issubset(set(executor["opcodes"]))
         ):
-            raise ValueError("executor lacks required MLP capabilities")
+            raise ValueError("executor lacks required decoder capabilities")
         if not isinstance(executor["fingerprint"], str) or not executor["fingerprint"]:
             raise ValueError("missing compiled-kernel fingerprint")
     except (KeyError, TypeError) as exc:
         raise ValueError(f"incomplete target description: {exc}") from exc
-    launch = {
-        "worker_count": sm,
-        "grid_blocks": sm,
-        "threads_per_block": block,
-        "cooperative_grid_limit": sm * active,
-    }
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "device": device,
         "executor": executor,
-        "launch": launch,
+        "launch": {
+            "worker_count": sm,
+            "grid_blocks": sm,
+            "threads_per_block": block,
+            "cooperative_grid_limit": sm * active,
+        },
     }
 
 
@@ -68,9 +74,7 @@ def probe(executable: Path, out: Path) -> dict:
     try:
         target = normalize(json.loads(completed.stdout))
     except json.JSONDecodeError as exc:
-        raise ValueError(
-            "executor did not return target JSON from its final compiled worker"
-        ) from exc
+        raise ValueError("executor did not return target JSON") from exc
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(target, sort_keys=True, indent=2) + "\n")
     return target
@@ -78,7 +82,7 @@ def probe(executable: Path, out: Path) -> dict:
 
 def read_target(path: Path) -> dict:
     target = json.loads(path.read_text())
-    if target.get("schema_version") != 1 or target != normalize(
+    if target.get("schema_version") != 2 or target != normalize(
         {"device": target["device"], "executor": target["executor"]}
     ):
         raise ValueError("target.json is invalid or has an inconsistent launch")

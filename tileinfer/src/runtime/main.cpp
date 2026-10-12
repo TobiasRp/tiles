@@ -2,77 +2,14 @@
 
 #include <nlohmann/json.hpp>
 
-#include <algorithm>
-#include <chrono>
-#include <cstring>
-#include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <numeric>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
 
 namespace {
 using json = nlohmann::json;
-
-void require(bool condition, std::string_view message)
-{
-    if (!condition)
-        throw std::runtime_error(std::string(message));
-}
-
-std::string option(int argc, char** argv, std::string_view name, bool required = true)
-{
-    for (int i = 2; i + 1 < argc; ++i)
-        if (std::string_view(argv[i]) == name)
-            return argv[i + 1];
-    if (required)
-        throw std::runtime_error("missing option " + std::string(name));
-    return {};
-}
-
-int count_option(int argc, char** argv, std::string_view name, int default_value)
-{
-    const auto text = option(argc, argv, name, false);
-    if (text.empty())
-        return default_value;
-    size_t consumed = 0;
-    const int value = std::stoi(text, &consumed);
-    require(consumed == text.size() && value > 0, "invalid positive count");
-    return value;
-}
-
-std::vector<std::uint8_t> read_bytes(const std::string& path)
-{
-    std::ifstream file(path, std::ios::binary | std::ios::ate);
-    require(static_cast<bool>(file), "cannot open input file");
-    const auto size = file.tellg();
-    require(size >= 0, "cannot size input file");
-    std::vector<std::uint8_t> result(static_cast<size_t>(size));
-    file.seekg(0);
-    if (!result.empty())
-        file.read(reinterpret_cast<char*>(result.data()), size);
-    require(static_cast<bool>(file), "cannot read input file");
-    return result;
-}
-
-void write_bytes(const std::string& path, const std::vector<float>& values)
-{
-    std::ofstream file(path, std::ios::binary);
-    require(static_cast<bool>(file), "cannot open output file");
-    file.write(reinterpret_cast<const char*>(values.data()),
-        static_cast<std::streamsize>(values.size() * sizeof(float)));
-    require(static_cast<bool>(file), "cannot write output file");
-}
-
-void write_json(const std::string& path, const json& value)
-{
-    std::ofstream file(path);
-    require(static_cast<bool>(file), "cannot open report file");
-    file << value.dump(2) << '\n';
-    require(static_cast<bool>(file), "cannot write report file");
-}
 
 json target_json(const tileinfer::Target& t)
 {
@@ -82,79 +19,151 @@ json target_json(const tileinfer::Target& t)
                     {"global_memory_bytes", t.global_memory_bytes},
                     {"max_threads_per_sm", t.max_threads_per_sm},
                     {"driver_version", t.driver_version}, {"runtime_version", t.runtime_version}}},
-        {"executor",
-            {{"abi", tileinfer::kAbi}, {"opcodes", {"gemv_bias_gelu_f32", "gemv_bias_f32"}},
-                {"threads_per_block", tileinfer::kThreads},
-                {"active_blocks_per_sm", t.active_blocks_per_sm},
-                {"registers_per_thread", t.registers_per_thread},
-                {"static_shared_bytes", t.static_shared_bytes},
-                {"fingerprint", tileinfer::kFingerprint}}}};
+        {"executor", {{"abi", tileinfer::kAbi},
+                         {"opcodes", {"rms_norm_f32", "gemv_f32", "rope_query_f32",
+                                         "rope_cache_f32", "attention_prefix_f32",
+                                         "silu_product_f32", "embedding_lookup_f32", "logits_f32"}},
+                         {"execution_ready", true}, {"threads_per_block", tileinfer::kThreads},
+                         {"active_blocks_per_sm", t.active_blocks_per_sm},
+                         {"registers_per_thread", t.registers_per_thread},
+                         {"static_shared_bytes", t.static_shared_bytes},
+                         {"fingerprint", tileinfer::kFingerprint}}}};
 }
 
-json identity(const tileinfer::Plan& p)
+json inspect(const tileinfer::LoadedPlan& plan)
 {
-    return {{"plan_sha256", p.plan_sha256}, {"weights_sha256", p.weights_sha256},
-        {"dimensions", {{"D", p.d}, {"H", p.h}, {"O", p.o}}}, {"workers", p.workers},
-        {"waves", p.wave_count}, {"tasks", p.tasks.size()}};
+    return {{"plan_sha256", plan.plan_sha256}, {"weights_sha256", plan.weights_sha256},
+        {"model",
+            {{"hidden_size", plan.hidden_size}, {"intermediate_size", plan.intermediate_size},
+                {"num_attention_heads", plan.query_heads}, {"num_key_value_heads", plan.kv_heads},
+                {"head_dim", plan.head_dim}, {"max_context", plan.max_context}}},
+        {"workers", plan.workers}, {"wave_count", plan.wave_count},
+        {"task_count", plan.tasks.size()}, {"worker_loads", plan.worker_loads},
+        {"scratch_bytes", plan.scratch_bytes}, {"kv_bytes", plan.kv_bytes},
+        {"weight_bytes", plan.weights.size()},
+        {"weight_dtype",
+            plan.weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
+        {"model_kind",
+            plan.stack.full_stack ? "llama_decoder_stack_f32" : "llama_decoder_block_f32"},
+        {"layers", plan.stack.layers}, {"vocab_size", plan.stack.vocab_size}};
 }
 
-void run_cases(int argc, char** argv, const tileinfer::Target& target)
+json run_block(const tileinfer::LoadedPlan& plan, const std::string& input_path)
 {
-    const auto plan = tileinfer::load_plan(argv[2], target);
-    const auto input_data = read_bytes(option(argc, argv, "--inputs"));
-    require(!input_data.empty() && input_data.size() % (static_cast<size_t>(plan.d) * 4) == 0,
-        "input length must contain complete float32 vectors");
-    const size_t cases = input_data.size() / (static_cast<size_t>(plan.d) * 4);
-    std::vector<float> x(static_cast<size_t>(plan.d) * cases);
-    std::memcpy(x.data(), input_data.data(), input_data.size());
-    std::vector<float> y(static_cast<size_t>(plan.o) * cases);
-    const auto hidden_path = option(argc, argv, "--hidden", false);
-    std::vector<float> h(hidden_path.empty() ? 0 : static_cast<size_t>(plan.h) * cases);
-    tileinfer::Executor executor(plan);
-    const auto began = std::chrono::steady_clock::now();
-    for (size_t i = 0; i < cases; ++i)
-        executor.run(x.data() + i * plan.d, y.data() + i * plan.o,
-            h.empty() ? nullptr : h.data() + i * plan.h);
-    const double elapsed_ms =
-        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began).count();
-    write_bytes(option(argc, argv, "--outputs"), y);
-    if (!hidden_path.empty())
-        write_bytes(hidden_path, h);
-    auto report = identity(plan);
-    report["case_count"] = cases;
-    report["input_sha256"] = tileinfer::sha256(input_data);
-    report["host_to_host_ms_total"] = elapsed_ms;
-    report["pass"] = true;
-    write_json(option(argc, argv, "--report"), report);
+    if (plan.stack.full_stack)
+        throw std::runtime_error("expected a decoder block package");
+    std::ifstream file(input_path);
+    if (!file)
+        throw std::runtime_error("cannot open block inputs");
+    const json request = json::parse(file);
+    tileinfer::SequenceContext context(plan);
+    json steps = json::array();
+    for (const auto& item : request.at("tokens")) {
+        if (item.contains("reset") && item.at("reset") == true) {
+            context.reset();
+            continue;
+        }
+        const auto hidden = item.at("hidden").get<std::vector<float>>();
+        const auto output = context.run_hidden(hidden);
+        const auto scratch = context.scratch_snapshot();
+        const auto kv = context.kv_snapshot();
+        auto segment = [&](int tensor, int count) {
+            const auto offset = plan.tensors.at(tensor).offset;
+            return std::vector<float>(scratch.begin() + offset, scratch.begin() + offset + count);
+        };
+        const int kv_width = plan.kv_heads * plan.head_dim;
+        const int p = context.position() - 1;
+        const auto key_offset = plan.tensors.at(10).offset + p * kv_width;
+        const auto value_offset = plan.tensors.at(11).offset + p * kv_width;
+        const std::vector<float> key(kv.begin() + key_offset, kv.begin() + key_offset + kv_width);
+        const std::vector<float> value(
+            kv.begin() + value_offset, kv.begin() + value_offset + kv_width);
+        auto residual = segment(14, plan.hidden_size);
+        std::vector<float> ffn(plan.hidden_size);
+        for (int i = 0; i < plan.hidden_size; ++i)
+            ffn[i] = output[i] - residual[i];
+        steps.push_back({{"position", p}, {"q", segment(9, plan.hidden_size)}, {"k", key},
+            {"v", value}, {"attention", segment(12, plan.hidden_size)}, {"attn_residual", residual},
+            {"ffn", ffn}, {"y", output}});
+    }
+    return {{"steps", steps}, {"position", context.position()}, {"valid", context.valid()}};
 }
 
-void benchmark(int argc, char** argv, const tileinfer::Target& target)
+json run_stack(const tileinfer::LoadedPlan& plan, const std::string& input_path)
 {
-    const auto plan = tileinfer::load_plan(argv[2], target);
-    const auto input_data = read_bytes(option(argc, argv, "--input"));
-    require(
-        input_data.size() == static_cast<size_t>(plan.d) * 4, "benchmark input length mismatch");
-    std::vector<float> x(plan.d);
-    std::memcpy(x.data(), input_data.data(), input_data.size());
-    const int iterations = count_option(argc, argv, "--iterations", 100);
-    const int rounds = count_option(argc, argv, "--rounds", 5);
-    tileinfer::Executor executor(plan);
-    executor.upload_input(x.data());
-    for (int i = 0; i < 20; ++i)
-        executor.launch();
-    executor.synchronize();
-    std::vector<double> samples;
-    for (int i = 0; i < rounds; ++i)
-        samples.push_back(executor.timed_batch(iterations));
-    const double mean = std::accumulate(samples.begin(), samples.end(), 0.0) / samples.size();
-    auto report = identity(plan);
-    report["input_sha256"] = tileinfer::sha256(input_data);
-    report["iterations_per_round"] = iterations;
-    report["rounds"] = rounds;
-    report["gpu_batch_mean_us_per_forward"] = mean;
-    report["gpu_batch_rounds_us_per_forward"] = samples;
-    report["device"] = target.name;
-    write_json(option(argc, argv, "--report"), report);
+    if (!plan.stack.full_stack)
+        throw std::runtime_error("expected a decoder stack package");
+    std::ifstream file(input_path);
+    if (!file)
+        throw std::runtime_error("cannot open stack inputs");
+    const json request = json::parse(file);
+    tileinfer::SequenceContext context(plan);
+    const bool trace_blocks = request.value("trace_blocks", false);
+    if (trace_blocks)
+        context.enable_block_trace();
+    json steps = json::array();
+    const int width = plan.kv_heads * plan.head_dim;
+    for (const auto& item : request.at("tokens")) {
+        if (item.is_object() && item.value("reset", false)) {
+            context.reset();
+            continue;
+        }
+        const int token_id = item.get<int>();
+        const auto logits = context.run_token(token_id);
+        const int position = context.position() - 1;
+        const auto kv = context.kv_snapshot();
+        json keys = json::array();
+        json values = json::array();
+        for (int layer = 0; layer < plan.stack.layers; ++layer) {
+            const int base = layer * plan.stack.layer_kv_stride + position * width;
+            const int key_offset = base + plan.tensors.at(10).offset;
+            const int value_offset = base + plan.tensors.at(11).offset;
+            keys.push_back(
+                std::vector<float>(kv.begin() + key_offset, kv.begin() + key_offset + width));
+            values.push_back(
+                std::vector<float>(kv.begin() + value_offset, kv.begin() + value_offset + width));
+        }
+        json step = {{"token_id", token_id}, {"position", position}, {"logits", logits},
+            {"k", keys}, {"v", values}};
+        if (trace_blocks) {
+            const auto hidden = context.block_trace_snapshot();
+            json blocks = json::array();
+            for (int layer = 0; layer < plan.stack.layers; ++layer) {
+                const auto begin = hidden.begin() + layer * plan.hidden_size;
+                blocks.push_back(std::vector<float>(begin, begin + plan.hidden_size));
+            }
+            step["blocks"] = std::move(blocks);
+        }
+        steps.push_back(std::move(step));
+    }
+    return {{"steps", steps}, {"position", context.position()}, {"valid", context.valid()}};
+}
+
+void state_smoke(const tileinfer::LoadedPlan& plan)
+{
+    tileinfer::SequenceContext context(plan);
+    if (context.position() != 0 || !context.valid())
+        throw std::runtime_error("bad new context state");
+    for (int position = 0; position < plan.max_context; ++position) {
+        if (context.begin_token() != position)
+            throw std::runtime_error("bad token position");
+        context.complete_token(true);
+    }
+    try {
+        context.begin_token();
+        throw std::runtime_error("capacity check did not fail");
+    } catch (const std::runtime_error& error) {
+        if (std::string_view(error.what()) != "sequence context capacity reached")
+            throw;
+    }
+    context.reset();
+    context.begin_token();
+    context.complete_token(false);
+    if (context.valid())
+        throw std::runtime_error("failed call did not invalidate context");
+    context.reset();
+    if (context.position() != 0 || !context.valid())
+        throw std::runtime_error("reset failed");
 }
 
 } // namespace
@@ -164,21 +173,28 @@ int main(int argc, char** argv)
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--help") {
             std::cout << "tile_runtime --describe-target-json\n"
-                         "tile_runtime --run-plan PACKAGE --inputs FILE --outputs FILE [--hidden "
-                         "FILE] --report FILE\n"
-                         "tile_runtime --benchmark PACKAGE --input FILE --iterations N --rounds R "
-                         "--report FILE\n";
+                         "tile_runtime --inspect-plan PACKAGE\n"
+                         "tile_runtime --state-smoke PACKAGE\n"
+                         "tile_runtime --run-block PACKAGE INPUTS.json\n"
+                         "tile_runtime --run-stack PACKAGE INPUTS.json\n";
             return 0;
         }
-        require(argc >= 2, "missing mode; use --help");
-        const std::string_view mode = argv[1];
+        if (argc < 2)
+            throw std::runtime_error("missing mode; use --help");
         const auto target = tileinfer::describe_target();
-        if (mode == "--describe-target-json") {
+        const std::string_view mode = argv[1];
+        if (mode == "--describe-target-json" && argc == 2) {
             std::cout << target_json(target).dump(2) << '\n';
-        } else if (mode == "--run-plan" && argc >= 3) {
-            run_cases(argc, argv, target);
-        } else if (mode == "--benchmark" && argc >= 3) {
-            benchmark(argc, argv, target);
+        } else if (mode == "--inspect-plan" && argc == 3) {
+            std::cout << inspect(tileinfer::load_plan(argv[2], target)).dump(2) << '\n';
+        } else if (mode == "--run-stack" && argc == 4) {
+            std::cout << run_stack(tileinfer::load_plan(argv[2], target), argv[3]).dump() << '\n';
+        } else if (mode == "--run-block" && argc == 4) {
+            std::cout << run_block(tileinfer::load_plan(argv[2], target), argv[3]).dump() << '\n';
+        } else if (mode == "--state-smoke" && argc == 3) {
+            const auto plan = tileinfer::load_plan(argv[2], target);
+            state_smoke(plan);
+            std::cout << "{\"state_smoke\": true}\n";
         } else {
             throw std::runtime_error("unknown mode; use --help");
         }

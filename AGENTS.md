@@ -2,11 +2,12 @@
 
 This repository tests the tile-graph inference hypothesis on the RTX 3050.
 Read the four design documents in `docs/` before changing the plan format or
-executor. The MLP is the implemented workload; its two stages require a full
-barrier. The Llama-style one-token decoder in `docs/tile_graph_decoder.md` is
-the next planned workload, targeting BF16 weights from a pinned revision of
-the `meta-llama/Llama-3.2-1B` base checkpoint with a separate versioned plan
-and KV-state contract.
+executor. The active workload is the Llama-style one-token decoder in
+`docs/tile_graph_decoder.md`. Its CPU reference, version-3 plan (with
+version-2 float32 compatibility), SequenceContext, CUDA arithmetic, and
+synthetic full stack with float32 or BF16 weights, and the pinned Llama 3.2 1B
+checkpoint bridge are implemented.
+The MLP prototype is historical and its source/tests were removed.
 
 - Keep Python as the offline planner, fixture generator, baseline runner, and
   one-command orchestrator. Keep per-inference scheduling in the C++/CUDA
@@ -19,7 +20,8 @@ and KV-state contract.
   changing the worker or CUDA toolchain.
 - Preserve the existing `uv.lock` and CMake presets when changing
   dependencies or build inputs. Host code uses C++23; CUDA code uses C++20.
-- The float32 MLP executor works end to end. Keep its `h` and `y` regression
-  checks against the PyTorch fixture when changing plans or kernels. Run
-  clang-format, Ruff, ty, CTest, and Compute Sanitizer before performance
-  claims; distinguish exploratory timings from a controlled shape/tile sweep.
+- Keep the decoder reference and package-regression checks when changing
+  plans or kernels. Reprobe the compiled decoder worker after changing arithmetic
+  opcodes or the execution loop. Run clang-format, Ruff, ty, CTest, and Compute Sanitizer before
+  performance claims; distinguish exploratory timings from a controlled
+  shape/tile sweep.

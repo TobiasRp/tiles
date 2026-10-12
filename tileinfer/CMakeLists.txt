@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.24)
 
-project(tile_infer VERSION 0.1.0 LANGUAGES CXX)
+project(tile_infer VERSION 0.2.0 LANGUAGES CXX)
 
 option(TILE_INFER_ENABLE_CUDA "Build the CUDA runtime and checks" ON)
 
@@ -17,6 +17,7 @@ if(BUILD_TESTING AND CLANG_FORMAT_EXECUTABLE)
             ${PROJECT_SOURCE_DIR}/src/runtime/main.cpp
             ${PROJECT_SOURCE_DIR}/src/runtime/plan.cpp
             ${PROJECT_SOURCE_DIR}/src/runtime/runtime.hpp
+            ${PROJECT_SOURCE_DIR}/src/runtime/ops.cuh
             ${PROJECT_SOURCE_DIR}/src/runtime/worker.cu
             ${PROJECT_SOURCE_DIR}/tests/cccl_cooperative_smoke.cu
             ${PROJECT_SOURCE_DIR}/tests/runtime_unit.cpp)
@@ -48,7 +49,8 @@ if(TILE_INFER_ENABLE_CUDA)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_EXTENSIONS OFF)
 
-    add_executable(tile_runtime src/runtime/main.cpp src/runtime/plan.cpp src/runtime/worker.cu)
+    add_executable(tile_runtime src/runtime/main.cpp src/runtime/plan.cpp
+        src/runtime/worker.cu src/runtime/ops.cuh)
     target_include_directories(tile_runtime PRIVATE third_party ${CUDAToolkit_INCLUDE_DIRS}/cccl)
     target_link_libraries(tile_runtime PRIVATE CUDA::cudart)
     if(MSVC)
@@ -76,21 +78,17 @@ if(TILE_INFER_ENABLE_CUDA)
         set_tests_properties(cccl_cooperative_smoke PROPERTIES TIMEOUT 30)
 
         find_program(UV_EXECUTABLE uv HINTS "$ENV{HOME}/.local/bin")
-        find_program(COMPUTE_SANITIZER_EXECUTABLE compute-sanitizer HINTS ${CUDAToolkit_BIN_DIR})
         if(UV_EXECUTABLE)
-            add_test(NAME runtime_regression
-                COMMAND ${UV_EXECUTABLE} run --project ${PROJECT_SOURCE_DIR}/../tileplan
-                    python ${PROJECT_SOURCE_DIR}/tests/regression.py
+            add_test(NAME decoder_regression
+                COMMAND ${UV_EXECUTABLE} run --locked --project ${PROJECT_SOURCE_DIR}/../tileplan
+                    python ${PROJECT_SOURCE_DIR}/tests/decoder_regression.py
                     --executor $<TARGET_FILE:tile_runtime>)
-            set_tests_properties(runtime_regression PROPERTIES TIMEOUT 180)
-            if(COMPUTE_SANITIZER_EXECUTABLE)
-                add_test(NAME runtime_sanitizer
-                    COMMAND ${UV_EXECUTABLE} run --project ${PROJECT_SOURCE_DIR}/../tileplan
-                        python ${PROJECT_SOURCE_DIR}/tests/sanitizer.py
-                        --executor $<TARGET_FILE:tile_runtime>
-                        --sanitizer ${COMPUTE_SANITIZER_EXECUTABLE})
-                set_tests_properties(runtime_sanitizer PROPERTIES TIMEOUT 180)
-            endif()
+            set_tests_properties(decoder_regression PROPERTIES TIMEOUT 180)
+            add_test(NAME stack_regression
+                COMMAND ${UV_EXECUTABLE} run --locked --project ${PROJECT_SOURCE_DIR}/../tileplan
+                    python ${PROJECT_SOURCE_DIR}/tests/stack_regression.py
+                    --executor $<TARGET_FILE:tile_runtime>)
+            set_tests_properties(stack_regression PROPERTIES TIMEOUT 180)
         endif()
     endif()
 endif()

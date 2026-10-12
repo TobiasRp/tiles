@@ -1,5 +1,7 @@
 # Python architecture for the tile-graph inference prototype
 
+Historical MLP design note. The active decoder package and state ABI are described in [the decoder design](tile_graph_decoder.md); its arithmetic execution is the next milestone.
+
 Status: MLP planner, visualization, and one-command demo implemented on `tux`,
 2026-10-12. This document describes the current package contract and further
 design goals for [the RTX 3050 tile-graph prototype](tile_graph_inference.md).

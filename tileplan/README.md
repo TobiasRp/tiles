@@ -1,18 +1,20 @@
-# TilePlan
+# TilePlan decoder planner
 
-TilePlan is the offline Python half of the tile-graph experiment. It creates a
-deterministic float32 MLP fixture, probes the **final compiled** CUDA worker,
-lowers the MLP into row-tile tasks, schedules those tasks in two waves, and
-writes a versioned `plan.json` plus little-endian `weights.bin`. `verify` checks
-the package without CUDA. The PyTorch eager and CUDA Graph baselines run on the
-GPU and compare their outputs with the saved CPU reference.
+TilePlan builds version-3 decoder packages with float32 or BF16 weights from
+deterministic PyTorch fixtures and a probe of the compiled CUDA worker. It
+supports one block and a full decoder stack. A stack package stores one block
+task DAG and nine-wave schedule, then repeats that schedule across layers. It
+reuses block scratch, allocates K/V storage per layer, and records whether the
+output projection shares the token embedding. Python validates the package before
+writing it; TileInfer validates it again before encoding device records.
+Weight storage is selected at build time; all activations and the KV cache
+remain float32. Existing version-2 float32 packages remain readable. The
+`import-llama32` command reads the pinned Hugging Face Llama 3.2 1B base
+checkpoint directly from safetensors, validates its config and tensor set, and
+writes BF16 bytes one tensor at a time. The tied output projection aliases the
+token embedding. Its plan records the checkpoint revision and source-file hashes.
 
-The [TileInfer executor](../tileinfer/README.md) implements the target probe,
-file bridge, and cooperative MLP worker. `demo` now runs the complete pipeline
-on `tux` and checks the executor's hidden and final outputs against the saved
-PyTorch reference. The Python file bridge also has mock-executor unit tests.
-
-## Install and test on `tux`
+## Install and check
 
 ```sh
 cd ~/dev/tile-infer/tileplan
@@ -23,43 +25,85 @@ cd ~/dev/tile-infer/tileplan
 ~/.local/bin/uv run --locked python -m unittest discover -s tests -v
 ```
 
-## Offline workflow
+## Build and run on tux
+
+Build the [TileInfer runtime](../tileinfer/README.md) first. Then:
 
 ```sh
-uv run --locked python -m tileplan reference --out ../runs/fixture
-uv run --locked python -m tileplan probe --executor ../tileinfer/build/release/tile_runtime --out ../runs/target.json
-uv run --locked python -m tileplan build --model ../runs/fixture/model.json --weights ../runs/fixture/weights.npz --target ../runs/target.json --tile-h1 16 --tile-h2 16 --out ../runs/package
-uv run --locked python -m tileplan inspect ../runs/package
-uv run --locked python -m tileplan verify ../runs/package
-uv run --locked python -m tileplan visualize ../runs/package --out ../runs/schedule.svg
-uv run --locked python -m tileplan benchmark --package ../runs/package --cases ../runs/fixture/reference_cases.npz --out ../runs/baselines.json
+cd ~/dev/tile-infer/tileplan
+RUN=../runs/decoder-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$RUN"
+~/.local/bin/uv run --locked python -m tileplan probe \
+  --executor ../tileinfer/build/release/tile_runtime \
+  --out "$RUN/target.json"
+~/.local/bin/uv run --locked python -m tileplan build \
+  --model tests/fixtures/decoder_m1/model.json \
+  --weights tests/fixtures/decoder_m1/weights.npz \
+  --target "$RUN/target.json" \
+  --tile-rows auto --weight-dtype bfloat16 --out "$RUN/block"
+~/.local/bin/uv run --locked python -m tileplan build-stack \
+  --model tests/fixtures/decoder_m4/model.json \
+  --weights tests/fixtures/decoder_m4/weights.npz \
+  --target "$RUN/target.json" \
+  --tile-rows auto --weight-dtype bfloat16 --out "$RUN/stack"
+printf '%s\n' '{"tokens":[0,7,15,3,47]}' > "$RUN/inputs.json"
+../tileinfer/build/release/tile_runtime \
+  --run-stack "$RUN/stack" "$RUN/inputs.json" > "$RUN/inference.json"
+~/.local/bin/uv run --locked python -m tileplan inspect "$RUN/stack"
+~/.local/bin/uv run --locked python -m tileplan verify "$RUN/stack"
 ```
 
-`probe` uses the final compiled worker, not the CCCL smoke-test kernel. Unit
-tests also use synthetic target descriptions to exercise the offline planner.
-`benchmark` reports PyTorch baselines only and labels them as such. It does not
-claim a persistent-kernel speedup.
+`inference.json` contains per-token vocabulary logits and K/V snapshots for
+the synthetic three-layer stack. These IDs have no text tokenizer yet.
 
-## Complete demo
+`reference` and `stack-reference` generate new deterministic fixtures.
+Both `build` and `build-stack` accept `--weight-dtype float32|bfloat16`,
+defaulting to float32. For BF16, the planner rounds the float32 fixture
+weights to BF16 once and packs their raw 16-bit values. Tensor descriptors
+record each weight's dtype; byte offsets, hashes, and tied aliases are checked
+by both the planner and runtime.
+
+`visualize PACKAGE --out FILE.svg` renders the block task schedule.
+The automatic tile-height search evaluates 2, 4, 8, and 16 rows using
+per-wave maximum estimated worker load plus a per-task dispatch penalty.
+The selected height and all candidate scores are recorded in
+`planning_report.json`. This is an offline schedule heuristic, not a
+latency prediction. A target probe must be refreshed after the worker changes.
+
+## Import and check Llama 3.2 1B
+
+Access to the [official base checkpoint](https://huggingface.co/meta-llama/Llama-3.2-1B)
+is gated. Sign in on `tux` with your own Hugging Face account and download the
+pinned revision. The token stays on `tux`.
 
 ```sh
-uv run --locked python -m tileplan demo --out ../runs/demo
+~/.local/bin/uv tool install huggingface_hub
+~/.local/bin/hf auth login
+~/.local/bin/hf download meta-llama/Llama-3.2-1B \
+  --revision 4e20de362430cd3b72f300e6b0f18e50e7166e08 \
+  --local-dir ~/dev/tile-infer/checkpoints/Llama-3.2-1B
+
+cd ~/dev/tile-infer/tileplan
+RUN=../runs/llama32-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$RUN"
+~/.local/bin/uv run --locked python -m tileplan probe \
+  --executor ../tileinfer/build/release/tile_runtime --out "$RUN/target.json"
+~/.local/bin/uv run --locked python -m tileplan import-llama32 \
+  --checkpoint ../checkpoints/Llama-3.2-1B \
+  --target "$RUN/target.json" --max-context 64 \
+  --tile-rows auto --out "$RUN/package"
+~/.local/bin/uv run --locked --group checkpoint python \
+  ../tileinfer/tests/llama32_checkpoint.py \
+  --checkpoint ../checkpoints/Llama-3.2-1B \
+  --package "$RUN/package" \
+  --executor ../tileinfer/build/release/tile_runtime \
+  --out "$RUN/comparison"
 ```
 
-`demo` builds the release executor and drives the complete pipeline. Use
-`--executor PATH` to reuse a prebuilt binary. The executor's `--run-plan`
-bridge reads raw float32 inputs and writes final outputs and optional hidden
-values via `--outputs` and `--hidden`. Its `--benchmark` mode reads the same
-saved input used by PyTorch and reports its SHA-256. The demo checks that hash
-before combining results. Choose a fresh `--out` directory for each run.
-
-Packages are reproducible for the same fixture, target, and tile heights. The
-builder writes to a fresh directory via a temporary directory and rename;
-`planning_report.json` records the plan and weight hashes, per-wave worker
-loads, and peak buffer bytes. The schedule uses logical worker IDs and a full
-barrier between the two MLP stages.
-
-`visualize` writes a self-contained SVG with the row ranges and execution
-order of each worker's tasks in both waves. It also shows estimated work and
-the full barrier; vertical spacing is illustrative, not GPU elapsed time.
-Pass `--note TEXT` to label a synthetic or experimental target in the image.
+The comparison converts the stored BF16 weights to float32 for the Transformers
+reference, then releases that model before launching TileInfer on the 8 GB GPU.
+It checks every block output, each layer's current K/V slice, and the full
+vocabulary logits at every token of three short prompts. It also feeds back
+two greedy tokens per prompt and checks the next-token choices. The report and
+raw outputs are saved under `comparison/`. For a larger usable context, import
+with `--max-context 4096`; the 64-token package above keeps validation fast.

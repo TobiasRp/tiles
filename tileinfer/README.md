@@ -1,52 +1,65 @@
-# TileInfer C++/CUDA executor
+# TileInfer decoder runtime
 
-`tile_runtime` loads TilePlan's version 1 float32 MLP package, validates its
-target, storage, checksum, tasks and wave schedule, then runs one cooperative
-worker block per SM. Workers execute compact task records; a grid barrier
-separates the hidden and output waves. The first two opcodes are warp GEMV
-with bias, with or without tanh GELU. The device program loops over arbitrary
-wave and worker ranges; adding attention will require new operator records,
-dependency validation, and device routines.
+TileInfer validates version-3 float32 or BF16-weight decoder packages, as well
+as version-2 float32 packages. It executes either one block from a hidden
+vector or a full stack from a token ID. The compiled cooperative worker uses
+one logical block per SM. A full-stack call performs embedding lookup, repeats
+the validated nine-wave block schedule, then computes
+final RMSNorm and vocabulary logits in one launch. Block scratch is reused
+across layers; each layer has its own K/V cache and packed weight stride.
+The cooperative schedule and barriers are in `src/runtime/worker.cu`.
+The arithmetic operators and tensor views are in `src/runtime/ops.cuh`;
+named opcodes and storage classes are part of the fixed task ABI.
+Weight-consuming operators and the worker are instantiated for each supported
+weight type. Activations, K/V storage, reductions, and output logits remain
+float32; BF16 weights are converted to float32 as they are read.
 
-`src/runtime/plan.cpp` owns the version 1 MLP schema and schedule checks;
-`src/runtime/worker.cu` owns the compact task dispatch and CCCL execution
-context. This separation keeps future model-specific validation out of the
-wave loop. The loader rejects stale kernel fingerprints and weight checksums
-before allocating GPU buffers.
+`SequenceContext` owns the stream, device buffers, valid-prefix position, and
+failure state. A call appends exactly one token. It rejects token IDs outside
+the vocabulary and calls beyond `max_context`; a failed launch invalidates
+the context until reset. Reset changes the valid prefix without clearing old
+cache bytes.
 
-Build and check on tux:
+For diagnostics, a `--run-stack` request may set `"trace_blocks": true`.
+Each token step then includes the output hidden vector from every decoder
+layer. The normal inference path leaves this trace disabled.
 
-```sh
-cmake --preset debug
-cmake --build --preset debug
-ctest --preset debug
-```
-
-The test suite includes a CCCL cooperative launch gate, malformed-package
-checks, and execution of TilePlan packages against PyTorch reference cases
-with both sparse and many-task schedules. When installed, `clang-format` checks
-the C++/CUDA sources and Compute Sanitizer runs memcheck, racecheck, and
-synccheck on another generated plan. The gate passed on the RTX 3050 with 20
-blocks of 128 threads.
+## Build and test on tux
 
 ```sh
-build/debug/tile_runtime --describe-target-json
-build/debug/tile_runtime --run-plan PACKAGE --inputs INPUTS.bin \
-    --outputs OUTPUTS.bin --hidden HIDDEN.bin --report RUN.json
-build/debug/tile_runtime --benchmark PACKAGE --input INPUT.bin \
-    --iterations 100 --rounds 5 --report BENCH.json
+cd ~/dev/tile-infer/tileinfer
+cmake --preset release
+cmake --build --preset release
+ctest --preset release --output-on-failure
 ```
 
-Inputs and outputs are contiguous little-endian float32 vectors. `--run-plan`
-accepts multiple inputs concatenated in one file and reuses the loaded plan
-and device buffers across them. `--benchmark` uploads one input once and times
-repeated launches with CCCL events. Host code uses C++23; CUDA code uses C++20.
-The reported GPU timing is a batch average per forward pass, not a latency
-percentile. The current implementation supports one execution context and one
-in-flight invocation, the two MLP opcodes, and a full barrier between stages.
-It does not implement decoder state, partial tile handoff, or a performance
-shape/tile search. Execution errors return nonzero and print a diagnostic to
-stderr.
+CTest includes the CCCL cooperative-launch gate, package and corruption
+checks, one-block intermediate comparisons, and full-stack logits/cache
+comparisons against PyTorch. The tests cover GQA, tail tiles, reset, capacity,
+tied and untied output embeddings, for both weight types. Compute Sanitizer
+is a separate check for kernel changes: run `memcheck`, `racecheck`, and
+`synccheck` on both `--run-block` and `--run-stack`.
 
-The JSON and SHA-256 headers under `third_party/` are pinned, header-only
-dependencies with their licenses in the source files.
+## Commands
+
+```sh
+cd ~/dev/tile-infer
+tileinfer/build/release/tile_runtime --describe-target-json
+tileinfer/build/release/tile_runtime --inspect-plan PACKAGE
+tileinfer/build/release/tile_runtime --state-smoke PACKAGE
+tileinfer/build/release/tile_runtime --run-block PACKAGE INPUTS.json
+tileinfer/build/release/tile_runtime --run-stack PACKAGE INPUTS.json
+```
+
+`--run-block` accepts `{"tokens":[{"hidden":[...]}]}`.
+`--run-stack` accepts `{"tokens":[0,7,15]}`. Either token list may
+contain `{"reset":true}`. These diagnostic commands return one trace per
+token; the public C++ API uses `SequenceContext::run_hidden` or
+`SequenceContext::run_token`.
+The [TilePlan README](../tileplan/README.md) has a complete command sequence
+that creates a package, writes token IDs, and runs `--run-stack`.
+
+`--inspect-plan` reports dimensions, wave count, worker loads, task count,
+scratch and K/V bytes, weight dtype, and package hashes. It checks the
+compiled-kernel fingerprint and cooperative residency before returning. Plans
+contain byte offsets and strides, never addresses.

@@ -15,6 +15,7 @@ __pycache__/
 # Generated experiment artifacts
 /runs/
 /artifacts/
+/checkpoints/
 
 # Editors and operating systems
 .idea/

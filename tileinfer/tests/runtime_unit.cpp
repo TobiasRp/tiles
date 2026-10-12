@@ -3,12 +3,19 @@
 #include <cstdint>
 #include <stdexcept>
 #include <type_traits>
-#include <vector>
 
-static_assert(std::is_standard_layout_v<tileinfer::Task>);
-static_assert(std::is_trivially_copyable_v<tileinfer::Task>);
-static_assert(sizeof(tileinfer::Task) == 32);
+static_assert(static_cast<std::uint32_t>(tileinfer::Opcode::rms_norm_f32) == 1);
+static_assert(static_cast<std::uint32_t>(tileinfer::Opcode::gemv_f32) == 2);
+static_assert(static_cast<std::uint32_t>(tileinfer::Opcode::silu_product_f32) == 6);
+static_assert(static_cast<std::uint32_t>(tileinfer::StorageClass::weight) == 4);
+static_assert(static_cast<std::uint32_t>(tileinfer::TensorId::Wdown) == 22);
+static_assert(std::is_standard_layout_v<tileinfer::TaskRecord>);
+static_assert(std::is_trivially_copyable_v<tileinfer::TaskRecord>);
+static_assert(sizeof(tileinfer::TaskRecord) == 40);
 static_assert(sizeof(tileinfer::Range) == 8);
+static_assert(sizeof(tileinfer::TensorRecord) == 8);
+static_assert(std::is_trivially_copyable_v<tileinfer::TensorRecord>);
+static_assert(std::is_trivially_copyable_v<tileinfer::StackConfig>);
 
 int main()
 {
