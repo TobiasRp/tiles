@@ -1,0 +1,22 @@
+# CMake
+/tileinfer/build/
+CMakeUserPresets.json
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+/tileplan/dist/
+/tileplan/build/
+
+# Generated experiment artifacts
+/runs/
+/artifacts/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store

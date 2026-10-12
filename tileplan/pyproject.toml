@@ -1,0 +1,19 @@
+[project]
+name = "tileplan"
+version = "0.1.0"
+description = "Offline tile planner and one-command RTX 3050 inference experiment"
+requires-python = ">=3.14"
+dependencies = [
+    "numpy>=2.0,<3",
+    "torch>=2.14.1",
+]
+
+[project.scripts]
+tileplan = "tileplan.cli:main"
+
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
