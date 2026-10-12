@@ -1,6 +1,8 @@
 # Statically scheduled tile-graph inference on an RTX 3050
 
-Status: initial hypothesis and architecture sketch, 2026-10-12.
+Status: MLP prototype implemented and checked on the RTX 3050, 2026-10-12.
+This document also describes unimplemented experiments; the current commands
+and limits are in the [repository README](../README.md).
 
 ## Core idea
 
@@ -25,12 +27,12 @@ The RTX 3050 is the actual target, rather than a proxy for a data-center GPU. Th
 | Test model | A PyTorch reference creates a small deterministic MLP, exports its weights and test inputs, and computes expected intermediate and final values. |
 | Planning | Python expands tensor operations into tile tasks, dependencies, buffer lifetimes, and an assignment to logical workers. Planning happens once per supported model/shape/device configuration. |
 | Execution | C++ loads and validates the plan; CUDA worker blocks follow their assigned task sequences during each invocation. Inputs change; the graph and schedule do not. |
-| First operator implementation | The batch-one matrix–vector tasks use small device routines inside the persistent kernel, reusing CUB's warp reduction after the CCCL go/no-go test. |
+| First operator implementation | Batch-one matrix–vector tasks use device routines inside the persistent kernel and CUB warp reduction. The CCCL cooperative-launch gate passed on the RTX 3050. |
 | Primary metric | CUDA-event elapsed time per GPU-resident forward pass, compared with PyTorch eager execution and PyTorch CUDA Graph replay of the same MLP. |
 
 The MLP is a scheduling test, not a claim that it represents full language-model inference. A later decoder experiment needs explicit rules for KV state and context length; these are outside the first fixed-shape graph.
 
-## Proposed pipeline
+## Implemented MLP pipeline
 
 ```mermaid
 flowchart LR
@@ -49,10 +51,10 @@ flowchart LR
 ```
 
 1. **Create the reference model.** A PyTorch script constructs the small float32 MLP with a fixed seed, exports `model.json` and `weights.npz`, and saves test inputs with expected `h` and `y` values in `reference_cases.npz`. These artifacts define both what TilePlan compiles and what the CUDA result must match.
-2. **Probe the target.** The pipeline builds or locates the final CUDA executable, with its actual GEMV device routine compiled into the worker kernel. A Python `probe_target.py` script asks it for raw device properties and kernel-specific capabilities, then derives `target.json`: one logical worker per reported SM, the executor's block size, and a cooperative launch configuration that fits the reported residency limit. It fails early if the required launch is unsupported. The runtime validates the same facts again when loading the plan.
+2. **Probe the target.** The pipeline builds or locates the final CUDA executable, with its actual GEMV device routine compiled into the worker kernel. TilePlan's `probe` command asks it for raw device properties and kernel-specific capabilities, then derives `target.json`: one logical worker per reported SM, the executor's block size, and a cooperative launch configuration that fits the reported residency limit. It fails early if the required launch is unsupported. The runtime validates the same facts again when loading the plan.
 3. **Build the tile graph and schedule.** TilePlan consumes the reference model and `target.json`. Each task records an operation kind, tile coordinates, buffer slices, and predecessors. It assigns independent tiles to workers in topological waves and computes a versioned memory plan. The [Python architecture](tile_graph_python_architecture.md) specifies these passes and the plan format.
 4. **Load and run.** The C++/CUDA runtime validates `plan.json` and `weights.bin`, allocates stable device buffers, and executes the test inputs. Worker blocks follow their preassigned task lists, synchronizing between waves. Inputs can remain on the GPU for execution measurements; host-to-host latency is reported separately. The [runtime design](tile_graph_cuda_runtime.md) defines its loader, worker kernel, and measurement interface.
-5. **Check and report.** Python runs PyTorch eager and CUDA Graph replay baselines from the same exported weights and inputs, compares all outputs with the saved reference, and records correctness, device configuration, plan identity, and timings. A single proposed entry point, `python -m tileplan demo --out RUN_DIR`, orchestrates all five stages, including the executable build and baselines, and leaves their artifacts together for inspection. Detailed profiling can run against the same package.
+5. **Check and report.** Python runs PyTorch eager and CUDA Graph replay baselines from the same exported weights and inputs, compares all outputs with the saved reference, and records correctness, plan identity, and timings. The working entry point, `python -m tileplan demo --out RUN_DIR`, orchestrates all five stages, including the executable build and baselines, and leaves their artifacts together for inspection. Detailed profiling can run against the same package.
 
 The initial plan format can be human-readable JSON plus a separate weight file. A compact binary format is warranted only if plan loading becomes material; parsing is outside the measured inference path. A loaded plan can serve many inference inputs without repeating the Python planning stage.
 
@@ -78,7 +80,7 @@ The primary result is a latency-versus-shape comparison against PyTorch CUDA Gra
 
 ## For the next iteration
 
-- Run the experiment on the RTX 3050 with Linux and the installed CUDA 13.4 toolchain; record actual device, driver, and library versions.
+- Freeze a shape and tile-height suite, run independent pilot and final rounds, and profile the worker on the RTX 3050. The single demo run is a correctness and pipeline check, not a tuned comparison.
 - Specify the next one-token decoder's state and dependencies. Identify a partial-dependency subgraph or focused micrograph before evaluating tile-ready signaling.
 - Start with one logical worker per SM. Evaluate more resident workers only after measuring the first configuration.
 - Open question: which partial-dependency workload warrants replacing wave barriers with per-tile readiness signals?

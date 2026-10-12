@@ -7,11 +7,10 @@ writes a versioned `plan.json` plus little-endian `weights.bin`. `verify` checks
 the package without CUDA. The PyTorch eager and CUDA Graph baselines run on the
 GPU and compare their outputs with the saved CPU reference.
 
-The C++/CUDA executor is still a scaffold. A real target probe and persistent
-inference cannot succeed until that executor reports its compiled worker
-capabilities and implements the file bridge. `demo` stops with the executor's
-diagnostic at that point; it does not claim a successful inference run. The
-Python file bridge is tested with an explicitly mock executor.
+The [TileInfer executor](../tileinfer/README.md) implements the target probe,
+file bridge, and cooperative MLP worker. `demo` now runs the complete pipeline
+on `tux` and checks the executor's hidden and final outputs against the saved
+PyTorch reference. The Python file bridge also has mock-executor unit tests.
 
 ## Install and test on `tux`
 
@@ -36,17 +35,23 @@ uv run --locked python -m tileplan visualize ../runs/package --out ../runs/sched
 uv run --locked python -m tileplan benchmark --package ../runs/package --cases ../runs/fixture/reference_cases.npz --out ../runs/baselines.json
 ```
 
-`probe` needs the eventual compiled worker, not the current C++ stub. Unit
-tests use synthetic target descriptions to exercise the offline planner.
+`probe` uses the final compiled worker, not the CCCL smoke-test kernel. Unit
+tests also use synthetic target descriptions to exercise the offline planner.
 `benchmark` reports PyTorch baselines only and labels them as such. It does not
 claim a persistent-kernel speedup.
 
-Once the CUDA executor is implemented,
-`python -m tileplan demo --out ../runs/demo` builds it and drives the complete pipeline. Use `--executor PATH`
-to reuse a prebuilt binary. The planned `--run-plan` bridge reads raw float32
-inputs and writes both final outputs and diagnostic hidden values via
-`--outputs` and `--hidden`; `--benchmark` reads the same saved input used by
-PyTorch and must report its SHA-256.
+## Complete demo
+
+```sh
+uv run --locked python -m tileplan demo --out ../runs/demo
+```
+
+`demo` builds the release executor and drives the complete pipeline. Use
+`--executor PATH` to reuse a prebuilt binary. The executor's `--run-plan`
+bridge reads raw float32 inputs and writes final outputs and optional hidden
+values via `--outputs` and `--hidden`. Its `--benchmark` mode reads the same
+saved input used by PyTorch and reports its SHA-256. The demo checks that hash
+before combining results. Choose a fresh `--out` directory for each run.
 
 Packages are reproducible for the same fixture, target, and tile heights. The
 builder writes to a fresh directory via a temporary directory and rename;

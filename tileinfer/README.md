@@ -8,6 +8,12 @@ with bias, with or without tanh GELU. The device program loops over arbitrary
 wave and worker ranges; adding attention will require new operator records,
 dependency validation, and device routines.
 
+`src/runtime/plan.cpp` owns the version 1 MLP schema and schedule checks;
+`src/runtime/worker.cu` owns the compact task dispatch and CCCL execution
+context. This separation keeps future model-specific validation out of the
+wave loop. The loader rejects stale kernel fingerprints and weight checksums
+before allocating GPU buffers.
+
 Build and check on tux:
 
 ```sh
@@ -35,3 +41,12 @@ Inputs and outputs are contiguous little-endian float32 vectors. `--run-plan`
 accepts multiple inputs concatenated in one file and reuses the loaded plan
 and device buffers across them. `--benchmark` uploads one input once and times
 repeated launches with CCCL events. Host code uses C++23; CUDA code uses C++20.
+The reported GPU timing is a batch average per forward pass, not a latency
+percentile. The current implementation supports one execution context and one
+in-flight invocation, the two MLP opcodes, and a full barrier between stages.
+It does not implement decoder state, partial tile handoff, or a performance
+shape/tile search. Execution errors return nonzero and print a diagnostic to
+stderr.
+
+The JSON and SHA-256 headers under `third_party/` are pinned, header-only
+dependencies with their licenses in the source files.

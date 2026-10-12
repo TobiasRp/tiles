@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from xml.etree import ElementTree
 
+import torch
+
 from tileplan.probe import normalize
 
 
@@ -94,22 +96,46 @@ class CliTest(unittest.TestCase):
             result = invoke("visualize", str(root / "package"), "--out", str(image))
             self.assertEqual(result.returncode, 2)
 
-    def test_demo_stops_at_unimplemented_runtime(self) -> None:
+    @unittest.skipUnless(torch.cuda.is_available(), "real demo requires CUDA")
+    def test_demo_runs_with_real_runtime(self) -> None:
         runtime = (
             Path(__file__).resolve().parents[2] / "tileinfer/build/release/tile_runtime"
         )
         if not runtime.exists():
-            self.skipTest("C++ scaffold executable not built")
+            self.skipTest("release executor not built")
         with tempfile.TemporaryDirectory() as directory:
+            run = Path(directory) / "run"
             result = invoke(
                 "demo",
                 "--executor",
                 str(runtime),
                 "--out",
-                str(Path(directory) / "run"),
+                str(run),
+                "--d",
+                "5",
+                "--h",
+                "7",
+                "--o",
+                "3",
+                "--tile-h1",
+                "3",
+                "--tile-h2",
+                "2",
+                "--iterations",
+                "2",
+                "--rounds",
+                "2",
             )
-        self.assertEqual(result.returncode, 2)
-        self.assertIn("target probe failed", result.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            report = json.loads(result.stdout)
+            self.assertEqual(report["correctness"], "pass")
+            self.assertEqual(
+                report["runtime"]["input_sha256"],
+                report["baselines"]["input_sha256"],
+            )
+            checks = json.loads((run / "execution/correctness.json").read_text())
+            self.assertEqual(len(checks["cases"]), 3)
+            self.assertTrue(checks["pass"])
 
 
 if __name__ == "__main__":
