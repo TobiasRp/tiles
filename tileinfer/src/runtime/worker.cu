@@ -2,7 +2,9 @@
 #include "runtime.hpp"
 
 #include <cooperative_groups.h>
+#include <cuda/__event/timed_event.h>
 #include <cuda_bf16.h>
+#include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 #include <cuda/buffer>
 #include <cuda/launch>
@@ -10,6 +12,7 @@
 #include <cuda/stream>
 
 #include <algorithm>
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -298,6 +301,58 @@ std::vector<float> SequenceContext::run_token(int token_id)
         return result;
     } catch (...) {
         complete_token(false);
+        throw;
+    }
+}
+
+BenchmarkResult SequenceContext::benchmark_token(
+    int position, int token_id, int warmup, int iterations, int rounds, bool profile)
+{
+    if (!impl_->stack.full_stack)
+        throw std::runtime_error("benchmark requires a decoder stack package");
+    if (position < 0 || position >= impl_->max_context || token_id < 0 ||
+        token_id >= impl_->stack.vocab_size || warmup < 0 || iterations <= 0 || rounds <= 0)
+        throw std::runtime_error("invalid benchmark arguments");
+    if (impl_->position != 0 || !impl_->valid || impl_->in_flight)
+        throw std::runtime_error("benchmark requires a fresh context");
+
+    // Fill the visible prefix outside the timed region. Repeated launches at
+    // position overwrite only K/V[position], so every sample sees the same
+    // context length and all earlier cache entries remain valid.
+    try {
+        for (int p = 0; p < position; ++p)
+            impl_->launch(p, token_id);
+        impl_->stream.sync();
+        for (int i = 0; i < warmup; ++i)
+            impl_->launch(position, token_id);
+        impl_->stream.sync();
+
+        std::vector<double> samples;
+        samples.reserve(rounds);
+        if (profile)
+            check(cudaProfilerStart(), "start profiler");
+        for (int round = 0; round < rounds; ++round) {
+            cuda::timed_event start{impl_->stream}, end{impl_->stream};
+            start.record(impl_->stream);
+            for (int i = 0; i < iterations; ++i)
+                impl_->launch(position, token_id);
+            end.record(impl_->stream);
+            end.sync();
+            samples.push_back(
+                cuda::std::chrono::duration<double, cuda::std::micro>(end - start).count() /
+                iterations);
+        }
+        if (profile)
+            check(cudaProfilerStop(), "stop profiler");
+        std::vector<float> logits(impl_->stack.vocab_size);
+        check(cudaMemcpyAsync(logits.data(), impl_->logits.data(), logits.size() * sizeof(float),
+                  cudaMemcpyDeviceToHost, impl_->stream.get()),
+            "copy benchmark logits");
+        impl_->stream.sync();
+        const auto top = std::max_element(logits.begin(), logits.end());
+        return {std::move(samples), static_cast<int>(top - logits.begin()), *top};
+    } catch (...) {
+        impl_->valid = false;
         throw;
     }
 }

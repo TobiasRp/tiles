@@ -118,6 +118,42 @@ absolute errors were 0.000504 for block outputs and 0.0000801 for logits, and
 all 27 next-token choices matched. The full report is in
 `runs/llama32-import-2026-10-12/comparison-final/report.json` on `tux`.
 
+## Measure decode and profile memory traffic
+
+The benchmark keeps weights, input token, and KV cache on the GPU. It times
+one-token decode at fixed positions after filling each prefix with token ID 1.
+Every timed call overwrites the same new cache slot, so context length stays
+fixed. The PyTorch eager and CUDA Graph paths use the same float32
+Transformers model, fixed `StaticCache`, and attention mask. TileInfer uses
+the imported BF16 weight storage with float32 arithmetic. Setup, prefix fill,
+and output readback are outside CUDA-event timings. The script checks the
+top token and top logit against PyTorch at every length.
+
+```sh
+cd ~/dev/tile-infer/tileplan
+~/.local/bin/uv run --locked --group checkpoint python \
+  ../tileinfer/tests/benchmark_decode.py \
+  --checkpoint ../checkpoints/Llama-3.2-1B \
+  --package ../runs/llama32-import-2026-10-12/package-4k \
+  --executor ../tileinfer/build/release/tile_runtime \
+  --positions 0 63 255 --warmup 3 --iterations 5 --rounds 3 \
+  --out ../runs/llama32-import-2026-10-12/decode-benchmark.json
+```
+
+Positions `0 63 255` measure context lengths 1, 64, and 256. To profile one
+worker launch at a chosen position, use Nsight Compute; the script skips the
+prefix launches and writes exact DRAM read/write and L2 byte counters. This
+requires access to GPU performance counters. Profiler replay perturbs latency,
+so use the benchmark report for timing.
+
+```sh
+~/.local/bin/uv run --locked python ../tileinfer/tests/profile_decode.py \
+  --package ../runs/llama32-import-2026-10-12/package-4k \
+  --executor ../tileinfer/build/release/tile_runtime \
+  --position 63 \
+  --out ../runs/llama32-import-2026-10-12/decode-profile-p63.json
+```
+
 For a small deterministic example that needs no checkpoint, see the
 [TilePlan synthetic stack instructions](tileplan/README.md). The
 [decoder design](docs/tile_graph_decoder.md) describes the plan and state ABI,

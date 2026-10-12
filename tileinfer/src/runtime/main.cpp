@@ -4,6 +4,7 @@
 
 #include <fstream>
 #include <iostream>
+#include <numeric>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -176,7 +177,9 @@ int main(int argc, char** argv)
                          "tile_runtime --inspect-plan PACKAGE\n"
                          "tile_runtime --state-smoke PACKAGE\n"
                          "tile_runtime --run-block PACKAGE INPUTS.json\n"
-                         "tile_runtime --run-stack PACKAGE INPUTS.json\n";
+                         "tile_runtime --run-stack PACKAGE INPUTS.json\n"
+                         "tile_runtime --benchmark-stack PACKAGE POSITION TOKEN_ID WARMUP "
+                         "ITERATIONS ROUNDS [--profile]\n";
             return 0;
         }
         if (argc < 2)
@@ -191,6 +194,33 @@ int main(int argc, char** argv)
             std::cout << run_stack(tileinfer::load_plan(argv[2], target), argv[3]).dump() << '\n';
         } else if (mode == "--run-block" && argc == 4) {
             std::cout << run_block(tileinfer::load_plan(argv[2], target), argv[3]).dump() << '\n';
+        } else if (mode == "--benchmark-stack" &&
+                   (argc == 8 || (argc == 9 && std::string_view(argv[8]) == "--profile"))) {
+            const auto plan = tileinfer::load_plan(argv[2], target);
+            const int position = std::stoi(argv[3]);
+            const int token_id = std::stoi(argv[4]);
+            const int warmup = std::stoi(argv[5]);
+            const int iterations = std::stoi(argv[6]);
+            const int rounds = std::stoi(argv[7]);
+            tileinfer::SequenceContext context(plan);
+            const auto result =
+                context.benchmark_token(position, token_id, warmup, iterations, rounds, argc == 9);
+            const double mean =
+                std::accumulate(result.samples_us.begin(), result.samples_us.end(), 0.0) /
+                result.samples_us.size();
+            std::cout << json{{"plan_sha256", plan.plan_sha256},
+                             {"weights_sha256", plan.weights_sha256},
+                             {"weight_dtype", plan.weight_dtype == tileinfer::WeightDtype::bfloat16
+                                                  ? "bfloat16"
+                                                  : "float32"},
+                             {"position", position}, {"context_length", position + 1},
+                             {"token_id", token_id}, {"warmup", warmup}, {"iterations", iterations},
+                             {"rounds", rounds}, {"samples_us", result.samples_us},
+                             {"mean_us", mean}, {"top_token", result.top_token},
+                             {"top_logit", result.top_logit},
+                             {"timing", "CUDA event batch average; kernel only"}}
+                             .dump(2)
+                      << '\n';
         } else if (mode == "--state-smoke" && argc == 3) {
             const auto plan = tileinfer::load_plan(argv[2], target);
             state_smoke(plan);

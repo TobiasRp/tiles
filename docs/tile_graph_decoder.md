@@ -204,6 +204,19 @@ the input embedding by an explicit package flag. The target report declares
    measured workload justifies each change. A companion micrograph can
    isolate partial tile handoff if the decoder schedule does not.
 
+   First measurements on `tux` (2026-10-12) use the pinned BF16 1B package
+   with a 4K capacity and token ID 1 repeated in each prefix. GPU-resident
+   one-token latency, in milliseconds, at context lengths 1/64/256 was
+   241.0/247.8/270.9 for TileInfer, 25.7/26.0/26.5 for float32 PyTorch
+   eager, and 24.4/24.6/25.1 for PyTorch CUDA Graph replay. Every compared
+   top token and top logit passed the fixed tolerance. Nsight Compute at
+   length 64 measured 2,492,031,104 DRAM read bytes, 4,821,632 DRAM write
+   bytes, 2,689,235,136 L2 bytes, and 5.96% SM throughput for one worker
+   launch. The package contains 2,471,628,800 BF16 weight bytes. These
+   measurements expose a large worker throughput gap; no performance
+   variants in this milestone have been implemented. Commands and report
+   paths are in the root README.
+
 Each milestone has deterministic unit tests for the planner/loader contract
 and GPU regression tests against PyTorch for the paths it adds. Keep the existing formatting/static-check gates.
 

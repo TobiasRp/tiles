@@ -156,6 +156,13 @@ struct LoadedPlan
     std::string weights_sha256;
 };
 
+struct BenchmarkResult
+{
+    std::vector<double> samples_us;
+    int top_token;
+    float top_logit;
+};
+
 Target describe_target();
 LoadedPlan load_plan(const std::string& package, const Target& target);
 std::string sha256(const std::vector<std::uint8_t>& bytes);
@@ -177,6 +184,8 @@ class SequenceContext
     [[nodiscard]] bool valid() const;
     std::vector<float> run_hidden(const std::vector<float>& hidden);
     std::vector<float> run_token(int token_id);
+    BenchmarkResult benchmark_token(
+        int position, int token_id, int warmup, int iterations, int rounds, bool profile = false);
     void enable_block_trace();
     [[nodiscard]] std::vector<float> block_trace_snapshot() const;
     [[nodiscard]] std::vector<float> scratch_snapshot() const;
