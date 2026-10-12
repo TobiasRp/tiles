@@ -1,8 +1,8 @@
 import copy
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 
@@ -14,11 +14,24 @@ from tileplan.validate import validate
 
 
 def target() -> dict:
-    return normalize({"device": {"name": "fixture GPU", "compute_capability": [8, 6], "sm_count": 4,
-                                 "cooperative_launch": True, "total_global_memory_bytes": 4_000_000_000},
-                      "executor": {"abi": "tileinfer-mlp-v1", "fingerprint": "compiled-worker-fixture",
-                                   "threads_per_block": 128, "active_blocks_per_sm": 2,
-                                   "opcodes": ["gemv_bias_gelu_f32", "gemv_bias_f32"]}})
+    return normalize(
+        {
+            "device": {
+                "name": "fixture GPU",
+                "compute_capability": [8, 6],
+                "sm_count": 4,
+                "cooperative_launch": True,
+                "total_global_memory_bytes": 4_000_000_000,
+            },
+            "executor": {
+                "abi": "tileinfer-mlp-v1",
+                "fingerprint": "compiled-worker-fixture",
+                "threads_per_block": 128,
+                "active_blocks_per_sm": 2,
+                "opcodes": ["gemv_bias_gelu_f32", "gemv_bias_f32"],
+            },
+        }
+    )
 
 
 class PlanningTest(unittest.TestCase):
@@ -32,15 +45,23 @@ class PlanningTest(unittest.TestCase):
 
     def package(self, name: str = "package") -> Path:
         out = self.root / name
-        build(self.root / "fixture/model.json", self.root / "fixture/weights.npz",
-              self.root / "target.json", 3, 2, out)
+        build(
+            self.root / "fixture/model.json",
+            self.root / "fixture/weights.npz",
+            self.root / "target.json",
+            3,
+            2,
+            out,
+        )
         return out
 
     def test_fixture_is_deterministic_and_shapes_are_exact(self) -> None:
         generate(self.root / "other", self.model, seed=19)
         for name in ("W1", "b1", "W2", "b2"):
-            np.testing.assert_array_equal(read_weights(self.root / "fixture/weights.npz", self.model)[name],
-                                          read_weights(self.root / "other/weights.npz", self.model)[name])
+            np.testing.assert_array_equal(
+                read_weights(self.root / "fixture/weights.npz", self.model)[name],
+                read_weights(self.root / "other/weights.npz", self.model)[name],
+            )
         with np.load(self.root / "fixture/reference_cases.npz") as cases:
             self.assertEqual(cases["x"].shape, (3, 5))
             self.assertEqual(cases["h"].shape, (3, 7))
@@ -50,11 +71,20 @@ class PlanningTest(unittest.TestCase):
     def test_two_waves_tail_tiles_and_reproducible_package(self) -> None:
         first = self.package()
         second = self.package("again")
-        self.assertEqual((first / "plan.json").read_bytes(), (second / "plan.json").read_bytes())
-        self.assertEqual((first / "weights.bin").read_bytes(), (second / "weights.bin").read_bytes())
+        self.assertEqual(
+            (first / "plan.json").read_bytes(), (second / "plan.json").read_bytes()
+        )
+        self.assertEqual(
+            (first / "weights.bin").read_bytes(), (second / "weights.bin").read_bytes()
+        )
         plan, weights, _ = read_package(first)
-        self.assertEqual([task["rows"] for task in plan["tasks"]], [[0, 3], [3, 6], [6, 7], [0, 2], [2, 3]])
-        self.assertEqual([task["predecessors"] for task in plan["tasks"][3:]], [[0, 1, 2], [0, 1, 2]])
+        self.assertEqual(
+            [task["rows"] for task in plan["tasks"]],
+            [[0, 3], [3, 6], [6, 7], [0, 2], [2, 3]],
+        )
+        self.assertEqual(
+            [task["predecessors"] for task in plan["tasks"][3:]], [[0, 1, 2], [0, 1, 2]]
+        )
         self.assertEqual(len(plan["waves"][0]["workers"]), 4)
         self.assertTrue(any(not ids for ids in plan["waves"][0]["workers"]))
         self.assertEqual(len(weights), plan["storage"]["weight_bytes"])

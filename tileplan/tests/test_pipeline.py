@@ -1,17 +1,15 @@
-import json
-from pathlib import Path
 import stat
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 
 import torch
 
 from tileplan.model import Model
 from tileplan.pipeline import demo
 
-
-MOCK_EXECUTOR = r'''
+MOCK_EXECUTOR = r"""
 import hashlib
 import json
 from pathlib import Path
@@ -48,7 +46,7 @@ y = h @ weights["W2"].T + weights["b2"]
 np.asarray(h, dtype="<f4").tofile(args[args.index("--hidden") + 1])
 np.asarray(y, dtype="<f4").tofile(args[args.index("--outputs") + 1])
 Path(args[args.index("--report") + 1]).write_text(json.dumps({"mock": True}))
-'''
+"""
 
 
 class PipelineTest(unittest.TestCase):

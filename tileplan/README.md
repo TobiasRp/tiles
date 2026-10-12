@@ -18,6 +18,9 @@ Python file bridge is tested with an explicitly mock executor.
 ```sh
 cd ~/dev/tile-infer/tileplan
 ~/.local/bin/uv sync --locked
+~/.local/bin/uv run --locked ruff check src tests
+~/.local/bin/uv run --locked ruff format --check src tests
+~/.local/bin/uv run --locked ty check src tests
 ~/.local/bin/uv run --locked python -m unittest discover -s tests -v
 ```
 

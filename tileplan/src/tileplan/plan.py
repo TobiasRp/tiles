@@ -1,18 +1,17 @@
 """Deterministic lowering, wave scheduling, and package emission."""
 
-from hashlib import sha256
 import json
 import os
-from pathlib import Path
 import shutil
 import tempfile
+from hashlib import sha256
+from pathlib import Path
 
 import numpy as np
 
-from .model import Model, WEIGHT_NAMES, read_weights
+from .model import WEIGHT_NAMES, Model, read_weights
 from .probe import ABI, read_target
 from .validate import validate
-
 
 FORMAT = 1
 GENERATOR = "tileplan-0.1"
@@ -20,14 +19,23 @@ ALIGNMENT = 64
 
 
 def json_bytes(value: dict) -> bytes:
-    return (json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + "\n").encode()
+    return (
+        json.dumps(value, sort_keys=True, indent=2, allow_nan=False) + "\n"
+    ).encode()
 
 
 def _tensor(tid: int, name: str, shape: tuple[int, ...], storage: str) -> dict:
     strides = [1]
     for n in reversed(shape[1:]):
         strides.insert(0, strides[0] * n)
-    return {"id": tid, "name": name, "shape": list(shape), "strides": strides, "dtype": "float32", "storage": storage}
+    return {
+        "id": tid,
+        "name": name,
+        "shape": list(shape),
+        "strides": strides,
+        "dtype": "float32",
+        "storage": storage,
+    }
 
 
 def _pack_weights(weights: dict[str, np.ndarray]) -> tuple[bytes, list[dict]]:
@@ -38,22 +46,42 @@ def _pack_weights(weights: dict[str, np.ndarray]) -> tuple[bytes, list[dict]]:
         offset = len(data)
         raw = weights[name].astype("<f4", copy=False).tobytes(order="C")
         data.extend(raw)
-        entries.append({"tensor": name, "offset": offset, "bytes": len(raw), "alignment": ALIGNMENT})
+        entries.append(
+            {
+                "tensor": name,
+                "offset": offset,
+                "bytes": len(raw),
+                "alignment": ALIGNMENT,
+            }
+        )
     return bytes(data), entries
 
 
 def _tasks(model: Model, tile_h1: int, tile_h2: int) -> list[dict]:
     tasks = []
-    for wave, (rows, height, opcode, inp, weight, bias, out) in enumerate((
-        (model.h, tile_h1, "gemv_bias_gelu_f32", "x", "W1", "b1", "h"),
-        (model.o, tile_h2, "gemv_bias_f32", "h", "W2", "b2", "y"),
-    )):
+    for wave, (rows, height, opcode, inp, weight, bias, out) in enumerate(
+        (
+            (model.h, tile_h1, "gemv_bias_gelu_f32", "x", "W1", "b1", "h"),
+            (model.o, tile_h2, "gemv_bias_f32", "h", "W2", "b2", "y"),
+        )
+    ):
         predecessors = list(range(len(tasks))) if wave else []
         for begin in range(0, rows, height):
             end = min(begin + height, rows)
-            tasks.append({"id": len(tasks), "opcode": opcode, "wave": wave, "worker": -1,
-                          "rows": [begin, end], "input": inp, "weight": weight, "bias": bias,
-                          "output": out, "predecessors": predecessors.copy()})
+            tasks.append(
+                {
+                    "id": len(tasks),
+                    "opcode": opcode,
+                    "wave": wave,
+                    "worker": -1,
+                    "rows": [begin, end],
+                    "input": inp,
+                    "weight": weight,
+                    "bias": bias,
+                    "output": out,
+                    "predecessors": predecessors.copy(),
+                }
+            )
     return tasks
 
 
@@ -64,7 +92,9 @@ def _schedule(tasks: list[dict], worker_count: int, model: Model) -> list[dict]:
         loads = [0] * worker_count
         stage = [t for t in tasks if t["wave"] == wave]
         width = model.d if wave == 0 else model.h
-        for task in sorted(stage, key=lambda t: (-(t["rows"][1] - t["rows"][0]) * width, t["id"])):
+        for task in sorted(
+            stage, key=lambda t: (-(t["rows"][1] - t["rows"][0]) * width, t["id"])
+        ):
             worker = min(range(worker_count), key=lambda i: (loads[i], i))
             task["worker"] = worker
             workers[worker].append(task["id"])
@@ -73,7 +103,13 @@ def _schedule(tasks: list[dict], worker_count: int, model: Model) -> list[dict]:
     return waves
 
 
-def make_plan(model: Model, weights: dict[str, np.ndarray], target: dict, tile_h1: int, tile_h2: int) -> tuple[dict, bytes]:
+def make_plan(
+    model: Model,
+    weights: dict[str, np.ndarray],
+    target: dict,
+    tile_h1: int,
+    tile_h2: int,
+) -> tuple[dict, bytes]:
     if any(type(n) is not int or n < 1 for n in (tile_h1, tile_h2)):
         raise ValueError("tile heights must be positive integers")
     worker_count = target["launch"]["worker_count"]
@@ -81,31 +117,68 @@ def make_plan(model: Model, weights: dict[str, np.ndarray], target: dict, tile_h
     tasks = _tasks(model, tile_h1, tile_h2)
     waves = _schedule(tasks, worker_count, model)
     tensors = [
-        _tensor(0, "x", (model.d,), "input"), _tensor(1, "W1", (model.h, model.d), "weight"),
-        _tensor(2, "b1", (model.h,), "weight"), _tensor(3, "h", (model.h,), "scratch"),
-        _tensor(4, "W2", (model.o, model.h), "weight"), _tensor(5, "b2", (model.o,), "weight"),
+        _tensor(0, "x", (model.d,), "input"),
+        _tensor(1, "W1", (model.h, model.d), "weight"),
+        _tensor(2, "b1", (model.h,), "weight"),
+        _tensor(3, "h", (model.h,), "scratch"),
+        _tensor(4, "W2", (model.o, model.h), "weight"),
+        _tensor(5, "b2", (model.o,), "weight"),
         _tensor(6, "y", (model.o,), "output"),
     ]
     plan = {
-        "header": {"format_version": FORMAT, "executor_abi": ABI, "generator": GENERATOR,
-                   "model_kind": "mlp_f32", "activation": "gelu_tanh"},
-        "target": {"compute_capability": target["device"]["compute_capability"],
-                   "sm_count": target["device"]["sm_count"], "cooperative_launch": True,
-                   "worker_count": worker_count, "threads_per_block": target["launch"]["threads_per_block"],
-                   "kernel_fingerprint": target["executor"]["fingerprint"]},
-        "model": {"D": model.d, "H": model.h, "O": model.o, "dtype": "float32",
-                  "tile_h1": tile_h1, "tile_h2": tile_h2, "tensors": tensors},
-        "storage": {"input_bytes": model.d * 4, "output_bytes": model.o * 4,
-                    "scratch_bytes": model.h * 4, "scratch": [{"tensor": "h", "offset": 0, "bytes": model.h * 4, "alignment": 4}],
-                    "weight_bytes": len(packed), "weights": entries},
-        "tasks": tasks, "waves": waves,
-        "integrity": {"weights_bytes": len(packed), "weights_sha256": sha256(packed).hexdigest()},
+        "header": {
+            "format_version": FORMAT,
+            "executor_abi": ABI,
+            "generator": GENERATOR,
+            "model_kind": "mlp_f32",
+            "activation": "gelu_tanh",
+        },
+        "target": {
+            "compute_capability": target["device"]["compute_capability"],
+            "sm_count": target["device"]["sm_count"],
+            "cooperative_launch": True,
+            "worker_count": worker_count,
+            "threads_per_block": target["launch"]["threads_per_block"],
+            "kernel_fingerprint": target["executor"]["fingerprint"],
+        },
+        "model": {
+            "D": model.d,
+            "H": model.h,
+            "O": model.o,
+            "dtype": "float32",
+            "tile_h1": tile_h1,
+            "tile_h2": tile_h2,
+            "tensors": tensors,
+        },
+        "storage": {
+            "input_bytes": model.d * 4,
+            "output_bytes": model.o * 4,
+            "scratch_bytes": model.h * 4,
+            "scratch": [
+                {"tensor": "h", "offset": 0, "bytes": model.h * 4, "alignment": 4}
+            ],
+            "weight_bytes": len(packed),
+            "weights": entries,
+        },
+        "tasks": tasks,
+        "waves": waves,
+        "integrity": {
+            "weights_bytes": len(packed),
+            "weights_sha256": sha256(packed).hexdigest(),
+        },
     }
     validate(plan, packed)
     return plan, packed
 
 
-def build(model_path: Path, weights_path: Path, target_path: Path, tile_h1: int, tile_h2: int, out: Path) -> dict:
+def build(
+    model_path: Path,
+    weights_path: Path,
+    target_path: Path,
+    tile_h1: int,
+    tile_h2: int,
+    out: Path,
+) -> dict:
     model = Model.read(model_path)
     weights = read_weights(weights_path, model)
     target = read_target(target_path)
@@ -136,11 +209,24 @@ def read_package(package: Path) -> tuple[dict, bytes, str]:
 
 
 def summary(plan: dict, plan_sha256: str) -> dict:
-    counts = {name: sum(t["opcode"] == name for t in plan["tasks"]) for name in ("gemv_bias_gelu_f32", "gemv_bias_f32")}
-    return {"task_counts": counts, "wave_count": len(plan["waves"]),
-            "worker_loads": [w["estimated_work"] for w in plan["waves"]],
-            "idle_workers": [sum(load == 0 for load in w["estimated_work"]) for w in plan["waves"]],
-            "scratch_bytes": plan["storage"]["scratch_bytes"], "weight_bytes": plan["storage"]["weight_bytes"],
-            "peak_bytes": plan["storage"]["input_bytes"] + plan["storage"]["output_bytes"] + plan["storage"]["scratch_bytes"] + plan["storage"]["weight_bytes"],
-            "plan_sha256": plan_sha256, "weights_sha256": plan["integrity"]["weights_sha256"],
-            "target": plan["target"]}
+    counts = {
+        name: sum(t["opcode"] == name for t in plan["tasks"])
+        for name in ("gemv_bias_gelu_f32", "gemv_bias_f32")
+    }
+    return {
+        "task_counts": counts,
+        "wave_count": len(plan["waves"]),
+        "worker_loads": [w["estimated_work"] for w in plan["waves"]],
+        "idle_workers": [
+            sum(load == 0 for load in w["estimated_work"]) for w in plan["waves"]
+        ],
+        "scratch_bytes": plan["storage"]["scratch_bytes"],
+        "weight_bytes": plan["storage"]["weight_bytes"],
+        "peak_bytes": plan["storage"]["input_bytes"]
+        + plan["storage"]["output_bytes"]
+        + plan["storage"]["scratch_bytes"]
+        + plan["storage"]["weight_bytes"],
+        "plan_sha256": plan_sha256,
+        "weights_sha256": plan["integrity"]["weights_sha256"],
+        "target": plan["target"],
+    }
