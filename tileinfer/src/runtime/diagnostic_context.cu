@@ -8,10 +8,12 @@
 #include <cuda/algorithm>
 #include <cuda/buffer>
 #include <cuda/memory_pool>
+#include <cuda/std/span>
 #include <cuda/stream>
 
 #include <algorithm>
 #include <chrono>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -29,7 +31,7 @@ struct DiagnosticContext::Impl
     cuda::device_buffer<float> scratch;
     cuda::device_buffer<float> kv;
     cuda::device_buffer<float> logits;
-    cuda::device_buffer<float> block_trace;
+    std::optional<cuda::device_buffer<float>> block_trace;
     int position = 0;
     bool valid = true;
     bool in_flight = false;
@@ -42,7 +44,6 @@ struct DiagnosticContext::Impl
         , scratch(stream, pool, model.scratch_count, cuda::no_init)
         , kv(stream, pool, model.kv_count, cuda::no_init)
         , logits(stream, pool, std::max(1, model.stack.vocab_size), cuda::no_init)
-        , block_trace(stream, pool, model.stack.layers * model.hidden_size, cuda::no_init)
     {
         stream.sync();
     }
@@ -50,7 +51,7 @@ struct DiagnosticContext::Impl
     void launch(int position, TokenId token_id)
     {
         const detail::WorkerBuffers buffers{input.data(), output.data(), scratch.data(), kv.data(),
-            logits.data(), capture_blocks ? block_trace.data() : nullptr};
+            logits.data(), capture_blocks ? block_trace->data() : nullptr};
         detail::enqueue_worker(stream, model.view(), buffers, position, {token_id, nullptr, 0});
     }
 };
@@ -198,6 +199,10 @@ BenchmarkResult DiagnosticContext::benchmark_token(
 
 void DiagnosticContext::enable_block_trace()
 {
+    if (!impl_->block_trace)
+        impl_->block_trace.emplace(impl_->stream, impl_->pool,
+            static_cast<std::size_t>(impl_->model.stack.layers) * impl_->model.hidden_size,
+            cuda::no_init);
     impl_->capture_blocks = true;
 }
 
@@ -206,8 +211,8 @@ std::vector<float> DiagnosticContext::block_trace_snapshot() const
     if (!impl_->capture_blocks)
         throw std::runtime_error("block trace is not enabled");
     impl_->stream.sync();
-    std::vector<float> result(impl_->block_trace.size());
-    cuda::copy_bytes(impl_->stream, impl_->block_trace, result);
+    std::vector<float> result(impl_->block_trace->size());
+    cuda::copy_bytes(impl_->stream, *impl_->block_trace, result);
     impl_->stream.sync();
     return result;
 }
@@ -216,7 +221,13 @@ std::vector<float> DiagnosticContext::scratch_snapshot() const
 {
     impl_->stream.sync();
     std::vector<float> result(impl_->scratch.size());
-    cuda::copy_bytes(impl_->stream, impl_->scratch, result);
+    // Copy only tensor payloads; alignment padding has no producer.
+    const auto& model = impl_->model;
+    // The validated scratch layout is retained on the host for exact slices.
+    for (const auto& [offset, count] : model.scratch_regions)
+        cuda::copy_bytes(impl_->stream,
+            cuda::std::span<const float>(impl_->scratch.data() + offset, count),
+            cuda::std::span<float>(result.data() + offset, count));
     impl_->stream.sync();
     return result;
 }
@@ -225,6 +236,10 @@ std::vector<float> DiagnosticContext::kv_snapshot() const
 {
     impl_->stream.sync();
     std::vector<float> result(impl_->kv.size());
+    detail::enqueue_zero_unused_kv(impl_->stream, impl_->kv.data(), impl_->model.kv_count,
+        impl_->model.stack.layers, impl_->model.stack.layer_kv_stride,
+        impl_->model.kv_heads * impl_->model.head_dim, impl_->model.max_context, impl_->position,
+        nullptr);
     cuda::copy_bytes(impl_->stream, impl_->kv, result);
     impl_->stream.sync();
     return result;

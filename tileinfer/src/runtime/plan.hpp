@@ -1,7 +1,10 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace tileinfer {
@@ -11,7 +14,8 @@ using TokenId = std::int32_t;
 
 inline constexpr int kThreads = 128;
 inline constexpr const char* kAbi = "tileinfer-decoder-v3";
-inline constexpr const char* kFingerprint = "decoder-wave-abi3-device-token-greedy-sm86-b128";
+inline constexpr const char* kFingerprint =
+    "decoder-wave-abi3-warp-gemv-head-attention-rope-table-v1-sm86-b128";
 inline constexpr const char* kLegacyAbi = "tileinfer-decoder-v2";
 inline constexpr const char* kLegacyFingerprint = "decoder-wave-abi2-ops-v3-stack-sm86-b128";
 inline constexpr const char* kLegacyProbeFingerprint = "decoder-wave-abi2-probe-v1-sm86-b128";
@@ -71,7 +75,17 @@ enum class TensorId : std::uint32_t
     product = 21,
     Wdown = 22,
     y = 23,
+    count,
+    none = std::numeric_limits<std::uint32_t>::max(),
 };
+
+inline constexpr std::size_t kTensorCount = static_cast<std::size_t>(TensorId::count);
+inline constexpr std::uint32_t kNoTensor = std::numeric_limits<std::uint32_t>::max();
+
+constexpr std::uint32_t tensor_index(TensorId id)
+{
+    return static_cast<std::uint32_t>(id);
+}
 
 // Compact operands and owned output region for one scheduled GPU task.
 struct TaskRecord
@@ -145,7 +159,7 @@ struct Target
 };
 
 // Holds checked host metadata and weights before device upload.
-struct LoadedPlan
+struct PlanData
 {
     WeightDtype weight_dtype;
     int hidden_size;
@@ -158,6 +172,7 @@ struct LoadedPlan
     NumericConfig numeric;
     StackConfig stack;
     std::vector<TensorRecord> tensors;
+    std::vector<float> rotary_frequencies;
     int wave_count;
     std::uint64_t scratch_bytes;
     std::uint64_t kv_bytes;
@@ -167,6 +182,21 @@ struct LoadedPlan
     std::vector<std::vector<std::int64_t>> worker_loads;
     std::string plan_sha256;
     std::string weights_sha256;
+};
+
+// Only the loader can construct this immutable validated package.
+class LoadedPlan
+{
+  public:
+    [[nodiscard]] const PlanData& data() const { return data_; }
+
+  private:
+    explicit LoadedPlan(PlanData data)
+        : data_(std::move(data))
+    {
+    }
+    PlanData data_;
+    friend LoadedPlan load_plan(const std::string&, const Target&);
 };
 
 Target describe_target();

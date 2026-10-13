@@ -8,19 +8,22 @@
 
 namespace {
 
-void check(cudaError_t status, const char* operation) {
+void check(cudaError_t status, const char* operation)
+{
     if (status != cudaSuccess) {
         throw std::runtime_error(std::string(operation) + ": " + cudaGetErrorString(status));
     }
 }
 
-__global__ void add(int lhs, int rhs, int* result) {
+__global__ void add(int lhs, int rhs, int* result)
+{
     *result = lhs + rhs;
 }
 
-}  // namespace
+} // namespace
 
-int main() {
+int main()
+{
     int device_count = 0;
     const auto status = cudaGetDeviceCount(&device_count);
     if (status == cudaErrorNoDevice || status == cudaErrorInsufficientDriver ||
@@ -42,10 +45,10 @@ int main() {
 
         int result = 0;
         check(cudaMemcpy(&result, device_result.get(), sizeof(int), cudaMemcpyDeviceToHost),
-              "cudaMemcpy");
+            "cudaMemcpy");
         if (result != 42) {
-            throw std::runtime_error("CUDA result mismatch: expected 42, got " +
-                                     std::to_string(result));
+            throw std::runtime_error(
+                "CUDA result mismatch: expected 42, got " + std::to_string(result));
         }
 
         std::cout << "CUDA environment ready: 20 + 22 = " << result << '\n';

@@ -1,5 +1,6 @@
 #include <iostream>
 
-int main() {
+int main()
+{
     std::cout << "C++23 environment ready.\n";
 }

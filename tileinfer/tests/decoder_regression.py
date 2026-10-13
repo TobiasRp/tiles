@@ -22,7 +22,7 @@ from tileplan.probe import probe
 
 def run(executor: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(executor), *args], text=True, capture_output=True, check=False
+        [str(executor), *args], text=True, capture_output=True, check=False, timeout=30
     )
 
 
@@ -191,6 +191,13 @@ def main() -> None:
             "dependency": lambda p: p["tasks"][-1].update(predecessors=[]),
             "cache bounds": lambda p: p["storage"]["kv"][1].update(offset=0),
             "wave assignment": lambda p: p["tasks"][-1].update(wave=0),
+            "float32 epsilon underflow": lambda p: p["model"].update(
+                rms_norm_eps=1e-300
+            ),
+            "float32 theta overflow": lambda p: p["model"].update(rope_theta=1e300),
+            "float32 frequency factor collapse": lambda p: p["model"].update(
+                rope_low_freq_factor=1.0, rope_high_freq_factor=1.0 + 1e-8
+            ),
         }
         for name, mutation in mutations.items():
             bad = copy.deepcopy(original)

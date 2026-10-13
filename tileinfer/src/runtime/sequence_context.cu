@@ -1,5 +1,6 @@
 #include "detail/cuda_check.hpp"
 #include "detail/input_ring_cursor.hpp"
+#include "detail/sequence_test_access.cuh"
 #include "detail/ticket_state.cuh"
 #include "detail/uploaded_plan.cuh"
 #include "runtime.hpp"
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <deque>
 #include <limits>
 #include <memory>
 #include <stdexcept>
@@ -45,7 +47,7 @@ struct SequenceContext::Impl
     cuda::device_buffer<float> scratch;
     cuda::device_buffer<float> kv;
     cuda::device_buffer<float> logits;
-    cuda::device_buffer<float> block_trace;
+    std::optional<cuda::device_buffer<float>> block_trace;
     cuda::device_buffer<TokenId> tokens;
     cuda::device_buffer<TokenId> generated;
     cuda::device_buffer<int> status;
@@ -54,7 +56,7 @@ struct SequenceContext::Impl
     int queued_position = 0;
     std::shared_ptr<Ticket::State> pending_position;
     bool valid = true;
-    std::vector<std::shared_ptr<Ticket::State>> outstanding;
+    std::deque<std::shared_ptr<Ticket::State>> outstanding;
 
     explicit Impl(std::shared_ptr<detail::UploadedPlan> value)
         : model(std::move(value))
@@ -65,7 +67,6 @@ struct SequenceContext::Impl
         , scratch(stream, pool, model->scratch_count, cuda::no_init)
         , kv(stream, pool, model->kv_count, cuda::no_init)
         , logits(stream, pool, model->stack.vocab_size, cuda::no_init)
-        , block_trace(stream, pool, model->stack.layers * model->hidden_size, cuda::no_init)
         , tokens(stream, pool, model->max_context, cuda::no_init)
         , generated(stream, pool, model->max_context, cuda::no_init)
         , status(stream, pool, 2, cuda::no_init)
@@ -99,8 +100,11 @@ struct SequenceContext::Impl
 
     void launch(int position, const TokenId* token_ids, int token_index, bool trace)
     {
+        if (trace && !block_trace)
+            block_trace.emplace(stream, pool,
+                static_cast<std::size_t>(model->stack.layers) * model->hidden_size, cuda::no_init);
         const detail::WorkerBuffers buffers{input.data(), output.data(), scratch.data(), kv.data(),
-            logits.data(), trace ? block_trace.data() : nullptr};
+            logits.data(), trace ? block_trace->data() : nullptr};
         detail::enqueue_worker(
             stream, model->view(), buffers, position, {-1, token_ids, token_index});
     }
@@ -119,7 +123,7 @@ struct SequenceContext::Impl
                 check(event_status, "query outstanding ticket");
             }
             ring_cursor.release(item->input_count);
-            outstanding.erase(outstanding.begin());
+            outstanding.pop_front();
         }
     }
 
@@ -170,13 +174,18 @@ struct SequenceContext::Impl
         if (request.kv) {
             auto& host = ticket->diagnostic->kv.emplace(
                 stream, cuda::pinned_default_memory_pool(), model->kv_count, cuda::no_init);
+            const auto& generation = ticket->generation;
+            detail::enqueue_zero_unused_kv(stream, kv.data(), model->kv_count, model->stack.layers,
+                model->stack.layer_kv_stride, model->kv_heads * model->head_dim, model->max_context,
+                generation ? generation->start_position : ticket->end_position,
+                generation ? status.data() : nullptr);
             cuda::copy_bytes(stream, kv, host);
         }
         if (request.block_outputs) {
             auto& host =
                 ticket->diagnostic->blocks.emplace(stream, cuda::pinned_default_memory_pool(),
                     model->stack.layers * model->hidden_size, cuda::no_init);
-            cuda::copy_bytes(stream, block_trace, host);
+            cuda::copy_bytes(stream, *block_trace, host);
         }
         check(cudaEventRecord(ticket->event, stream.get()), "record ticket");
         ticket->recorded = true;
@@ -188,6 +197,16 @@ SequenceContext::SequenceContext(std::shared_ptr<detail::UploadedPlan> model)
     : impl_(std::make_unique<Impl>(std::move(model)))
 {
 }
+std::size_t detail::SequenceTestAccess::input_capacity(const SequenceContext& context)
+{
+    return context.impl_->input_ring.size();
+}
+
+cuda::stream_ref detail::SequenceTestAccess::stream(SequenceContext& context)
+{
+    return context.impl_->stream;
+}
+
 SequenceContext::~SequenceContext() = default;
 SequenceContext::SequenceContext(SequenceContext&&) noexcept = default;
 SequenceContext& SequenceContext::operator=(SequenceContext&&) noexcept = default;

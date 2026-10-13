@@ -128,6 +128,16 @@ def check_generation(
         or actual["stop_reason"] != "limit"
     ):
         raise AssertionError(actual)
+    invalid_count = run(
+        executor,
+        "generate",
+        str(package),
+        str(input_path),
+        "--max-new-tokens",
+        "2trailing",
+    )
+    if invalid_count.returncode == 0 or "invalid integer" not in invalid_count.stderr:
+        raise AssertionError("CLI accepted a partial integer")
     eos = run(
         executor,
         "generate",
@@ -170,6 +180,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--executor", type=Path, required=True)
     parser.add_argument("--sequence-smoke", type=Path)
+    parser.add_argument("--ring-smoke", type=Path)
     args = parser.parse_args()
     fixture = Path(__file__).parents[2] / "tileplan/tests/fixtures/decoder_m4"
     with tempfile.TemporaryDirectory(prefix="stack-regression-") as directory:
@@ -218,6 +229,11 @@ def main() -> None:
                 context_result = run(args.sequence_smoke, str(package))
                 if context_result.returncode:
                     raise AssertionError(context_result.stderr)
+        if args.ring_smoke:
+            for ring_package in (root / "package-4",):
+                ring_result = run(args.ring_smoke, str(ring_package))
+                if ring_result.returncode:
+                    raise AssertionError(ring_result.stderr)
         original_weight_bytes = report["weight_bytes"]
 
         bf16_package = root / "bf16-stack"
@@ -249,6 +265,10 @@ def main() -> None:
             if context_result.returncode:
                 raise AssertionError(context_result.stderr)
 
+        if args.ring_smoke:
+            ring_result = run(args.ring_smoke, str(bf16_package))
+            if ring_result.returncode:
+                raise AssertionError(ring_result.stderr)
         original = json.loads((package / "plan.json").read_text())
         for name, mutate in {
             "layer stride": lambda plan: plan["storage"]["stack"].update(

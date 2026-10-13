@@ -8,6 +8,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <utility>
+#include <vector>
 
 namespace tileinfer::detail {
 
@@ -26,6 +28,7 @@ class UploadedPlan
     cuda::device_buffer<TaskRecord> tasks;
     cuda::device_buffer<WorkerTaskRange> ranges;
     cuda::device_buffer<TensorRecord> tensors;
+    cuda::device_buffer<float> rotary_frequencies;
     int hidden_size;
     int intermediate_size;
     int kv_heads;
@@ -35,6 +38,7 @@ class UploadedPlan
     int max_context;
     std::size_t scratch_count;
     std::size_t kv_count;
+    std::vector<std::pair<std::size_t, std::size_t>> scratch_regions;
     NumericConfig numeric;
     StackConfig stack;
     WeightDtype weight_dtype;

@@ -6,14 +6,18 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <limits>
 #include <numeric>
 #include <optional>
+#include <set>
 #include <stdexcept>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -40,20 +44,23 @@ json target_json(const tileinfer::Target& t)
 
 json inspect(const tileinfer::LoadedPlan& plan)
 {
-    return {{"plan_sha256", plan.plan_sha256}, {"weights_sha256", plan.weights_sha256},
+    return {{"plan_sha256", plan.data().plan_sha256},
+        {"weights_sha256", plan.data().weights_sha256},
         {"model",
-            {{"hidden_size", plan.hidden_size}, {"intermediate_size", plan.intermediate_size},
-                {"num_attention_heads", plan.query_heads}, {"num_key_value_heads", plan.kv_heads},
-                {"head_dim", plan.head_dim}, {"max_context", plan.max_context}}},
-        {"workers", plan.workers}, {"wave_count", plan.wave_count},
-        {"task_count", plan.tasks.size()}, {"worker_loads", plan.worker_loads},
-        {"scratch_bytes", plan.scratch_bytes}, {"kv_bytes", plan.kv_bytes},
-        {"weight_bytes", plan.weights.size()},
+            {{"hidden_size", plan.data().hidden_size},
+                {"intermediate_size", plan.data().intermediate_size},
+                {"num_attention_heads", plan.data().query_heads},
+                {"num_key_value_heads", plan.data().kv_heads}, {"head_dim", plan.data().head_dim},
+                {"max_context", plan.data().max_context}}},
+        {"workers", plan.data().workers}, {"wave_count", plan.data().wave_count},
+        {"task_count", plan.data().tasks.size()}, {"worker_loads", plan.data().worker_loads},
+        {"scratch_bytes", plan.data().scratch_bytes}, {"kv_bytes", plan.data().kv_bytes},
+        {"weight_bytes", plan.data().weights.size()},
         {"weight_dtype",
-            plan.weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
+            plan.data().weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
         {"model_kind",
-            plan.stack.full_stack ? "llama_decoder_stack_f32" : "llama_decoder_block_f32"},
-        {"layers", plan.stack.layers}, {"vocab_size", plan.stack.vocab_size}};
+            plan.data().stack.full_stack ? "llama_decoder_stack_f32" : "llama_decoder_block_f32"},
+        {"layers", plan.data().stack.layers}, {"vocab_size", plan.data().stack.vocab_size}};
 }
 
 tileinfer::TokenId parse_token_id(const json& item)
@@ -76,7 +83,7 @@ tileinfer::TokenId parse_token_id(const json& item)
 #ifdef TILE_TEST_HARNESS
 json run_block(const tileinfer::LoadedPlan& plan, const std::string& input_path)
 {
-    if (plan.stack.full_stack)
+    if (plan.data().stack.full_stack)
         throw std::runtime_error("expected a decoder block package");
     std::ifstream file(input_path);
     if (!file)
@@ -94,23 +101,23 @@ json run_block(const tileinfer::LoadedPlan& plan, const std::string& input_path)
         const auto scratch = context.scratch_snapshot();
         const auto kv = context.kv_snapshot();
         auto segment = [&](int tensor, int count) {
-            const auto offset = plan.tensors.at(tensor).offset;
+            const auto offset = plan.data().tensors.at(tensor).offset;
             return std::vector<float>(scratch.begin() + offset, scratch.begin() + offset + count);
         };
-        const int kv_width = plan.kv_heads * plan.head_dim;
+        const int kv_width = plan.data().kv_heads * plan.data().head_dim;
         const int p = context.position() - 1;
-        const auto key_offset = plan.tensors.at(10).offset + p * kv_width;
-        const auto value_offset = plan.tensors.at(11).offset + p * kv_width;
+        const auto key_offset = plan.data().tensors.at(10).offset + p * kv_width;
+        const auto value_offset = plan.data().tensors.at(11).offset + p * kv_width;
         const std::vector<float> key(kv.begin() + key_offset, kv.begin() + key_offset + kv_width);
         const std::vector<float> value(
             kv.begin() + value_offset, kv.begin() + value_offset + kv_width);
-        auto residual = segment(14, plan.hidden_size);
-        std::vector<float> ffn(plan.hidden_size);
-        for (int i = 0; i < plan.hidden_size; ++i)
+        auto residual = segment(14, plan.data().hidden_size);
+        std::vector<float> ffn(plan.data().hidden_size);
+        for (int i = 0; i < plan.data().hidden_size; ++i)
             ffn[i] = output[i] - residual[i];
-        steps.push_back({{"position", p}, {"q", segment(9, plan.hidden_size)}, {"k", key},
-            {"v", value}, {"attention", segment(12, plan.hidden_size)}, {"attn_residual", residual},
-            {"ffn", ffn}, {"y", output}});
+        steps.push_back({{"position", p}, {"q", segment(9, plan.data().hidden_size)}, {"k", key},
+            {"v", value}, {"attention", segment(12, plan.data().hidden_size)},
+            {"attn_residual", residual}, {"ffn", ffn}, {"y", output}});
     }
     return {{"steps", steps}, {"position", context.position()}, {"valid", context.valid()}};
 }
@@ -119,7 +126,7 @@ json run_block(const tileinfer::LoadedPlan& plan, const std::string& input_path)
 json run_stack(
     const tileinfer::LoadedPlan& plan, const std::string& input_path, bool trace_override = false)
 {
-    if (!plan.stack.full_stack)
+    if (!plan.data().stack.full_stack)
         throw std::runtime_error("expected a decoder stack package");
     std::ifstream file(input_path);
     if (!file)
@@ -129,7 +136,7 @@ json run_stack(
     auto context = model.create_context();
     const bool trace_blocks = trace_override || request.value("trace_blocks", false);
     json steps = json::array();
-    const int width = plan.kv_heads * plan.head_dim;
+    const int width = plan.data().kv_heads * plan.data().head_dim;
     int final_position = 0;
     for (const auto& item : request.at("tokens")) {
         if (item.is_object() && item.value("reset", false)) {
@@ -146,10 +153,10 @@ json run_stack(
         const auto& kv = snapshot.kv;
         json keys = json::array();
         json values = json::array();
-        for (int layer = 0; layer < plan.stack.layers; ++layer) {
-            const int base = layer * plan.stack.layer_kv_stride + position * width;
-            const int key_offset = base + plan.tensors.at(10).offset;
-            const int value_offset = base + plan.tensors.at(11).offset;
+        for (int layer = 0; layer < plan.data().stack.layers; ++layer) {
+            const int base = layer * plan.data().stack.layer_kv_stride + position * width;
+            const int key_offset = base + plan.data().tensors.at(10).offset;
+            const int value_offset = base + plan.data().tensors.at(11).offset;
             keys.push_back(
                 std::vector<float>(kv.begin() + key_offset, kv.begin() + key_offset + width));
             values.push_back(
@@ -160,9 +167,9 @@ json run_stack(
         if (trace_blocks) {
             const auto& hidden = snapshot.block_outputs;
             json blocks = json::array();
-            for (int layer = 0; layer < plan.stack.layers; ++layer) {
-                const auto begin = hidden.begin() + layer * plan.hidden_size;
-                blocks.push_back(std::vector<float>(begin, begin + plan.hidden_size));
+            for (int layer = 0; layer < plan.data().stack.layers; ++layer) {
+                const auto begin = hidden.begin() + layer * plan.data().hidden_size;
+                blocks.push_back(std::vector<float>(begin, begin + plan.data().hidden_size));
             }
             step["blocks"] = std::move(blocks);
         }
@@ -177,7 +184,7 @@ void state_smoke(const tileinfer::LoadedPlan& plan)
     tileinfer::DiagnosticContext context(plan);
     if (context.position() != 0 || !context.valid())
         throw std::runtime_error("bad new context state");
-    for (int position = 0; position < plan.max_context; ++position) {
+    for (int position = 0; position < plan.data().max_context; ++position) {
         if (context.begin_token() != position)
             throw std::runtime_error("bad token position");
         context.complete_token(true);
@@ -216,34 +223,128 @@ std::vector<tileinfer::TokenId> read_prompt(const std::string& input_path)
     return result;
 }
 
-int option_int(int argc, char** argv, std::string_view key, int start, int fallback)
+int parse_int(std::string_view text)
 {
-    for (int i = start; i < argc; i += 2) {
-        if (i + 1 >= argc)
-            throw std::runtime_error("missing option value");
-        if (std::string_view(argv[i]) == key)
-            return std::stoi(argv[i + 1]);
-    }
-    return fallback;
+    int result = 0;
+    const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), result);
+    if (error != std::errc{} || end != text.data() + text.size())
+        throw std::runtime_error("invalid integer: " + std::string(text));
+    return result;
 }
 
-void validate_options(
-    int argc, char** argv, int start, const std::vector<std::string_view>& allowed)
+enum class Mode
 {
-    for (int i = start; i < argc; i += 2) {
+    help,
+    target,
+    inspect,
+    check,
+    generate,
+    bench,
+    block,
+    state,
+    fixed_bench
+};
+
+struct Command
+{
+    Mode mode;
+    std::string package;
+    std::string input;
+    int count = 0;
+    int warmup = 0;
+    int rounds = 0;
+    int position = 0;
+    int token = 0;
+    int iterations = 0;
+    std::optional<tileinfer::TokenId> eos;
+    bool trace = false;
+    bool profile = false;
+    Command(Mode value, std::string package_path = {}, std::string input_path = {})
+        : mode(value)
+        , package(std::move(package_path))
+        , input(std::move(input_path))
+    {
+    }
+};
+
+Command parse_command(int argc, char** argv)
+{
+    if (argc < 2)
+        throw std::runtime_error("missing mode; use --help");
+    const std::string_view mode = argv[1];
+    if (argc == 2 && mode == "--help")
+        return {Mode::help};
+    if (argc == 2 && mode == "--describe-target-json")
+        return {Mode::target};
+    if (argc == 3 && mode == "--inspect-plan")
+        return {Mode::inspect, argv[2]};
+    if ((mode == "check" || mode == "--run-stack") &&
+        (argc == 4 || (argc == 5 && std::string_view(argv[4]) == "--trace-blocks"))) {
+        Command result{Mode::check, argv[2], argv[3]};
+        result.trace = argc == 5;
+        return result;
+    }
+#ifdef TILE_TEST_HARNESS
+    if (mode == "--run-block" && argc == 4)
+        return {Mode::block, argv[2], argv[3]};
+    if (mode == "--state-smoke" && argc == 3)
+        return {Mode::state, argv[2]};
+    if (mode == "--benchmark-stack" &&
+        (argc == 8 || (argc == 9 && std::string_view(argv[8]) == "--profile"))) {
+        Command result{Mode::fixed_bench, argv[2]};
+        result.position = parse_int(argv[3]);
+        result.token = parse_int(argv[4]);
+        result.warmup = parse_int(argv[5]);
+        result.iterations = parse_int(argv[6]);
+        result.rounds = parse_int(argv[7]);
+        result.profile = argc == 9;
+        if (result.position < 0 || result.token < 0 || result.warmup < 0 ||
+            result.iterations <= 0 || result.rounds <= 0)
+            throw std::runtime_error("invalid benchmark arguments");
+        return result;
+    }
+#endif
+    if ((mode != "generate" && mode != "bench") || argc < 4)
+        throw std::runtime_error("unknown mode or invalid arguments; use --help");
+    const bool generation = mode == "generate";
+    Command result{generation ? Mode::generate : Mode::bench, argv[2], argv[3]};
+    std::set<std::string_view> seen;
+    for (int i = 4; i < argc; i += 2) {
         if (i + 1 >= argc)
             throw std::runtime_error("missing option value");
         const std::string_view key = argv[i];
-        if (std::find(allowed.begin(), allowed.end(), key) == allowed.end())
+        if (!seen.insert(key).second)
+            throw std::runtime_error("duplicate option: " + std::string(key));
+        if (key == (generation ? "--max-new-tokens" : "--new-tokens"))
+            result.count = parse_int(argv[i + 1]);
+        else if (generation && key == "--eos-id") {
+            result.eos = parse_int(argv[i + 1]);
+            if (*result.eos < 0)
+                throw std::runtime_error("EOS token ID must be nonnegative");
+        } else if (generation && key == "--selection") {
+            if (std::string_view(argv[i + 1]) != "greedy")
+                throw std::runtime_error("only greedy selection is supported");
+        } else if (!generation && key == "--warmup")
+            result.warmup = parse_int(argv[i + 1]);
+        else if (!generation && key == "--rounds")
+            result.rounds = parse_int(argv[i + 1]);
+        else
             throw std::runtime_error("unknown option: " + std::string(key));
     }
+    if (!seen.contains(generation ? "--max-new-tokens" : "--new-tokens") ||
+        (!generation && (!seen.contains("--warmup") || !seen.contains("--rounds"))))
+        throw std::runtime_error("missing required option");
+    if (result.count <= 0 || (!generation && (result.warmup < 0 || result.rounds <= 0)))
+        throw std::runtime_error("invalid generation or benchmark arguments");
+    return result;
 }
 
 json generate(const tileinfer::LoadedPlan& plan, const std::string& input_path, int max_new_tokens,
     std::optional<tileinfer::TokenId> eos_id)
 {
     const auto prompt = read_prompt(input_path);
-    if (max_new_tokens <= 0 || max_new_tokens > plan.max_context - static_cast<int>(prompt.size()))
+    if (prompt.size() > static_cast<std::size_t>(plan.data().max_context) || max_new_tokens <= 0 ||
+        max_new_tokens > plan.data().max_context - static_cast<int>(prompt.size()))
         throw std::runtime_error("generation exceeds context capacity");
     tileinfer::DecoderModel model(plan);
     auto context = model.create_context();
@@ -253,8 +354,8 @@ json generate(const tileinfer::LoadedPlan& plan, const std::string& input_path, 
     return {{"prompt_tokens", prompt.size()}, {"generated", result.generated},
         {"generated_count", result.generated.size()}, {"position", result.position},
         {"stop_reason", result.stop_reason == tileinfer::StopReason::eos ? "eos" : "limit"},
-        {"compute_us", result.compute_us}, {"plan_sha256", plan.plan_sha256},
-        {"weights_sha256", plan.weights_sha256}};
+        {"compute_us", result.compute_us}, {"plan_sha256", plan.data().plan_sha256},
+        {"weights_sha256", plan.data().weights_sha256}};
 }
 
 json bench(const tileinfer::LoadedPlan& plan, const std::string& input_path, int new_tokens,
@@ -263,7 +364,8 @@ json bench(const tileinfer::LoadedPlan& plan, const std::string& input_path, int
     if (warmup < 0 || rounds <= 0)
         throw std::runtime_error("invalid benchmark rounds");
     const auto prompt = read_prompt(input_path);
-    if (new_tokens <= 0 || new_tokens > plan.max_context - static_cast<int>(prompt.size()))
+    if (prompt.size() > static_cast<std::size_t>(plan.data().max_context) || new_tokens <= 0 ||
+        new_tokens > plan.data().max_context - static_cast<int>(prompt.size()))
         throw std::runtime_error("benchmark exceeds context capacity");
     tileinfer::DecoderModel model(plan);
     auto context = model.create_context();
@@ -283,9 +385,10 @@ json bench(const tileinfer::LoadedPlan& plan, const std::string& input_path, int
             samples.push_back(result.compute_us);
     }
     const double mean = std::accumulate(samples.begin(), samples.end(), 0.0) / samples.size();
-    return {{"plan_sha256", plan.plan_sha256}, {"weights_sha256", plan.weights_sha256},
+    return {{"plan_sha256", plan.data().plan_sha256},
+        {"weights_sha256", plan.data().weights_sha256},
         {"weight_dtype",
-            plan.weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
+            plan.data().weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
         {"prompt_tokens", prompt.size()}, {"generated_count", new_tokens}, {"selection", "greedy"},
         {"warmup", warmup}, {"rounds", rounds}, {"samples_us", samples}, {"mean_us", mean},
         {"us_per_token", mean / new_tokens}, {"tokens_per_second", new_tokens * 1000000.0 / mean},
@@ -299,94 +402,69 @@ json bench(const tileinfer::LoadedPlan& plan, const std::string& input_path, int
 int main(int argc, char** argv)
 {
     try {
-        if (argc == 2 && std::string_view(argv[1]) == "--help") {
-            std::cout << "tile_runtime generate PACKAGE INPUTS.json --max-new-tokens N "
-                         "[--eos-id ID]\n"
-                         "tile_runtime bench PACKAGE INPUTS.json --new-tokens N "
-                         "--warmup W --rounds R\n"
-                         "tile_runtime check PACKAGE INPUTS.json\n"
-                         "tile_runtime --describe-target-json\n"
-                         "tile_runtime --inspect-plan PACKAGE\n";
+        const Command command = parse_command(argc, argv);
+        if (command.mode == Mode::help) {
+            std::cout
+                << "tile_runtime generate PACKAGE INPUTS.json --max-new-tokens N [--eos-id ID]\n"
+                   "tile_runtime bench PACKAGE INPUTS.json --new-tokens N --warmup W --rounds R\n"
+                   "tile_runtime check PACKAGE INPUTS.json [--trace-blocks]\n"
+                   "tile_runtime --describe-target-json\n"
+                   "tile_runtime --inspect-plan PACKAGE\n";
             return 0;
         }
-        if (argc < 2)
-            throw std::runtime_error("missing mode; use --help");
         const auto target = tileinfer::describe_target();
-        const std::string_view mode = argv[1];
-        if (mode == "--describe-target-json" && argc == 2) {
+        if (command.mode == Mode::target) {
             std::cout << target_json(target).dump(2) << '\n';
-        } else if (mode == "--inspect-plan" && argc == 3) {
-            std::cout << inspect(tileinfer::load_plan(argv[2], target)).dump(2) << '\n';
-        } else if ((mode == "check" || mode == "--run-stack") &&
-                   (argc == 4 || (argc == 5 && std::string_view(argv[4]) == "--trace-blocks"))) {
-            std::cout << run_stack(tileinfer::load_plan(argv[2], target), argv[3], argc == 5).dump()
-                      << '\n';
-#ifdef TILE_TEST_HARNESS
-        } else if (mode == "--run-block" && argc == 4) {
-            std::cout << run_block(tileinfer::load_plan(argv[2], target), argv[3]).dump() << '\n';
-#endif
-        } else if (mode == "generate" && argc >= 6) {
-            validate_options(argc, argv, 4, {"--max-new-tokens", "--eos-id", "--selection"});
-            for (int i = 4; i < argc; i += 2)
-                if (std::string_view(argv[i]) == "--selection" &&
-                    std::string_view(argv[i + 1]) != "greedy")
-                    throw std::runtime_error("only greedy selection is supported");
-            const int count = option_int(argc, argv, "--max-new-tokens", 4, -1);
-            const int eos = option_int(argc, argv, "--eos-id", 4, -1);
-            bool eos_supplied = false;
-            for (int i = 4; i < argc; i += 2)
-                eos_supplied |= std::string_view(argv[i]) == "--eos-id";
-            if (eos_supplied && eos < 0)
-                throw std::runtime_error("EOS token ID must be nonnegative");
-            std::cout << generate(tileinfer::load_plan(argv[2], target), argv[3], count,
-                             eos_supplied ? std::optional<tileinfer::TokenId>(eos) : std::nullopt)
-                             .dump()
-                      << '\n';
-        } else if (mode == "bench" && argc >= 10) {
-            validate_options(argc, argv, 4, {"--new-tokens", "--warmup", "--rounds"});
-            const int count = option_int(argc, argv, "--new-tokens", 4, -1);
-            const int warmup = option_int(argc, argv, "--warmup", 4, -1);
-            const int rounds = option_int(argc, argv, "--rounds", 4, -1);
-            std::cout << bench(
-                             tileinfer::load_plan(argv[2], target), argv[3], count, warmup, rounds)
-                             .dump(2)
-                      << '\n';
-#ifdef TILE_TEST_HARNESS
-        } else if (mode == "--benchmark-stack" &&
-                   (argc == 8 || (argc == 9 && std::string_view(argv[8]) == "--profile"))) {
-            const auto plan = tileinfer::load_plan(argv[2], target);
-            const int position = std::stoi(argv[3]);
-            const int token_id = std::stoi(argv[4]);
-            const int warmup = std::stoi(argv[5]);
-            const int iterations = std::stoi(argv[6]);
-            const int rounds = std::stoi(argv[7]);
-            tileinfer::DiagnosticContext context(plan);
-            const auto result =
-                context.benchmark_token(position, token_id, warmup, iterations, rounds, argc == 9);
-            const double mean =
-                std::accumulate(result.samples_us.begin(), result.samples_us.end(), 0.0) /
-                result.samples_us.size();
-            std::cout << json{{"plan_sha256", plan.plan_sha256},
-                             {"weights_sha256", plan.weights_sha256},
-                             {"weight_dtype", plan.weight_dtype == tileinfer::WeightDtype::bfloat16
-                                                  ? "bfloat16"
-                                                  : "float32"},
-                             {"position", position}, {"context_length", position + 1},
-                             {"token_id", token_id}, {"warmup", warmup}, {"iterations", iterations},
-                             {"rounds", rounds}, {"samples_us", result.samples_us},
-                             {"mean_us", mean}, {"top_token", result.top_token},
-                             {"top_logit", result.top_logit},
-                             {"timing", "CUDA event batch average; kernel only"}}
-                             .dump(2)
-                      << '\n';
-        } else if (mode == "--state-smoke" && argc == 3) {
-            const auto plan = tileinfer::load_plan(argv[2], target);
-            state_smoke(plan);
-            std::cout << "{\"state_smoke\": true}\n";
-#endif
-        } else {
-            throw std::runtime_error("unknown mode; use --help");
+            return 0;
         }
+        const auto plan = tileinfer::load_plan(command.package, target);
+        json result;
+        switch (command.mode) {
+        case Mode::inspect:
+            result = inspect(plan);
+            break;
+        case Mode::check:
+            result = run_stack(plan, command.input, command.trace);
+            break;
+        case Mode::generate:
+            result = generate(plan, command.input, command.count, command.eos);
+            break;
+        case Mode::bench:
+            result = bench(plan, command.input, command.count, command.warmup, command.rounds);
+            break;
+#ifdef TILE_TEST_HARNESS
+        case Mode::block:
+            result = run_block(plan, command.input);
+            break;
+        case Mode::state:
+            state_smoke(plan);
+            result = {{"state_smoke", true}};
+            break;
+        case Mode::fixed_bench: {
+            tileinfer::DiagnosticContext context(plan);
+            const auto measurement = context.benchmark_token(command.position, command.token,
+                command.warmup, command.iterations, command.rounds, command.profile);
+            const double mean =
+                std::accumulate(measurement.samples_us.begin(), measurement.samples_us.end(), 0.0) /
+                measurement.samples_us.size();
+            result = {{"plan_sha256", plan.data().plan_sha256},
+                {"weights_sha256", plan.data().weights_sha256},
+                {"weight_dtype", plan.data().weight_dtype == tileinfer::WeightDtype::bfloat16
+                                     ? "bfloat16"
+                                     : "float32"},
+                {"position", command.position}, {"context_length", command.position + 1},
+                {"token_id", command.token}, {"warmup", command.warmup},
+                {"iterations", command.iterations}, {"rounds", command.rounds},
+                {"samples_us", measurement.samples_us}, {"mean_us", mean},
+                {"top_token", measurement.top_token}, {"top_logit", measurement.top_logit},
+                {"timing", "CUDA event batch average; kernel only"}};
+            break;
+        }
+#endif
+        default:
+            throw std::runtime_error("unsupported command");
+        }
+        std::cout << result.dump() << '\n';
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "tile_runtime: " << error.what() << '\n';

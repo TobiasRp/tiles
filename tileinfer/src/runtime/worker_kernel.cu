@@ -19,10 +19,11 @@ __global__ void decoder_worker(const TaskRecord* tasks, const WorkerTaskRange* r
     const TensorRecord* tensors, int waves, int workers, int position, int hidden_size,
     int intermediate_size, int kv_heads, int head_dim, NumericConfig numeric, StackConfig stack,
     TokenId token_id, const TokenId* device_tokens, int token_index, float* input, float* output,
-    float* scratch, float* kv, const Weight* weights, float* logits, float* block_trace)
+    float* scratch, float* kv, const Weight* weights, float* logits, float* block_trace,
+    const float* rotary_frequencies)
 {
     namespace cg = cooperative_groups;
-    __shared__ float norm_factor;
+    __shared__ ops::SharedStorage shared;
 
     const TokenId current_token = device_tokens == nullptr ? token_id : device_tokens[token_index];
     if (stack.full_stack && current_token < 0)
@@ -42,8 +43,9 @@ __global__ void decoder_worker(const TaskRecord* tasks, const WorkerTaskRange* r
         const ops::Context<Weight> context{
             tensors,
             {current_input, current_output, scratch, layer_kv, layer_weights},
-            {hidden_size, intermediate_size, kv_heads, head_dim, position, numeric},
-            &norm_factor,
+            {hidden_size, intermediate_size, kv_heads, head_dim, position, numeric,
+                rotary_frequencies},
+            &shared,
         };
 
         for (int wave = 0; wave < waves; ++wave) {
@@ -69,10 +71,10 @@ __global__ void decoder_worker(const TaskRecord* tasks, const WorkerTaskRange* r
         const float* last_hidden = stack.layers % 2 == 0 ? input : output;
         float* final_hidden = stack.layers % 2 == 0 ? output : input;
         ops::final_norm(last_hidden, weights + stack.final_norm_offset, final_hidden, hidden_size,
-            numeric.rms_norm_eps, &norm_factor);
+            numeric.rms_norm_eps, &shared.norm_factor);
         cg::this_grid().sync();
-        ops::logits(
-            final_hidden, weights + stack.lm_head_offset, logits, hidden_size, stack.vocab_size);
+        ops::logits(final_hidden, weights + stack.lm_head_offset, logits, hidden_size,
+            stack.vocab_size, shared);
     }
 }
 
@@ -91,7 +93,7 @@ void enqueue_worker_typed(cuda::stream& stream, const WorkerProgramView& program
         program.intermediate_size, program.kv_heads, program.head_dim, program.numeric,
         program.stack, token.immediate, token.ids, token.index, buffers.input, buffers.output,
         buffers.scratch, buffers.kv, static_cast<const Weight*>(program.weights), buffers.logits,
-        buffers.block_trace);
+        buffers.block_trace, program.rotary_frequencies);
 }
 
 void enqueue_worker(cuda::stream& stream, const WorkerProgramView& program,

@@ -13,6 +13,7 @@ struct WorkerProgramView
     const WorkerTaskRange* ranges;
     const TensorRecord* tensors;
     const void* weights;
+    const float* rotary_frequencies;
     int waves;
     int workers;
     int hidden_size;
@@ -45,6 +46,10 @@ struct TokenInput
 
 void enqueue_worker(cuda::stream& stream, const WorkerProgramView& program,
     const WorkerBuffers& buffers, int position, TokenInput token);
+
+// Defines unused diagnostic cache entries without touching the valid prefix.
+void enqueue_zero_unused_kv(cuda::stream& stream, float* kv, std::size_t count, int layers,
+    int layer_stride, int width, int capacity, int prefix, const int* generated_status);
 
 void enqueue_greedy_sampling(cuda::stream& stream, const float* logits, int vocab_size,
     TokenId* chosen, int* status, int step, TokenId eos_id);

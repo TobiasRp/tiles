@@ -11,7 +11,8 @@ namespace tileinfer {
 
 namespace detail {
 class UploadedPlan;
-}
+struct SequenceTestAccess;
+} // namespace detail
 
 // Specifies values to retain before the next token overwrites live buffers.
 struct DiagnosticRequest
@@ -55,6 +56,7 @@ struct Completion
 };
 
 // Retains one queued operation's event and result storage until completion.
+// Its originating context must outlive the ticket, including after completion.
 class Ticket
 {
   public:
@@ -92,6 +94,7 @@ class DecoderModel
 };
 
 // Queues work for one sequence while retaining its stream and K/V cache.
+// Calls on the same context must be serialized by the caller.
 class SequenceContext
 {
   public:
@@ -114,6 +117,7 @@ class SequenceContext
     std::unique_ptr<Impl> impl_;
     explicit SequenceContext(std::shared_ptr<detail::UploadedPlan> model);
     friend class DecoderModel;
+    friend struct detail::SequenceTestAccess;
 };
 
 } // namespace tileinfer
