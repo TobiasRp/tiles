@@ -12,6 +12,30 @@ CUDA worker and a per-layer KV cache.
 
 Tokenization runs in Python; TileInfer works only on token IDs. The base model has no chat template, this is out of scope.
 
+## Generate text on tux
+
+With the pinned checkpoint in `checkpoints/Llama-3.2-1B`, run the standalone
+command from this repository:
+
+```sh
+generate "The capital of France is"
+generate "The capital of France is" --package runs/llama32-54aw5c0k/package
+```
+
+The command is linked in `~/.local/bin` on tux; `./generate.py` also works from
+this repository. Without `--package`, `generate` builds TileInfer, probes its compiled worker,
+imports and verifies a fresh 4K-context TilePlan package, tokenizes the prompt
+with `AutoTokenizer`,
+and prints the decoded continuation. It also prints TileInfer's GPU
+selection-and-decode time and the wall time of the single TileInfer invocation,
+which includes loading and prompt prefill. These are execution times from one
+run, not benchmark results. With `--package`, it uses that package's context
+limit and skips TilePlan's probe, import, and verify steps. You can pass the
+package directory or its enclosing run directory. Use `--max-new-tokens`
+(default 16) to change the output length; `--max-context` (default 4096) applies
+only when creating a package. Each invocation saves its input and output in a
+new ignored `runs/llama32-*` directory.
+
 ## Run Llama 3.2 1B
 
 You need access to the gated model on Hugging Face, then download the pinned

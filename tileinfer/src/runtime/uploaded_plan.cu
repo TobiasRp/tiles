@@ -28,7 +28,6 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
     , stack(plan.stack)
     , weight_dtype(plan.weight_dtype)
 {
-    stream.sync();
     cuda::copy_bytes(stream, plan.weights, weights);
     cuda::copy_bytes(stream, plan.tasks, tasks);
     cuda::copy_bytes(stream, plan.ranges, ranges);
