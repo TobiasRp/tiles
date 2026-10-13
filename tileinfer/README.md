@@ -1,173 +1,119 @@
-# TileInfer decoder runtime
+# TileInfer
 
-TileInfer validates version-3 float32 or BF16-weight decoder packages, as well
-as version-2 float32 packages. It executes either one block from a hidden
-vector or a full stack from a token ID. The compiled cooperative worker uses
-one logical block per SM with 1024 threads per block. A full-stack call performs
-embedding lookup, repeats the validated nine-wave block schedule, then computes
-final RMSNorm and vocabulary logits in one launch. Block scratch is reused
-across layers; each layer has its own K/V cache and packed weight stride.
-The cooperative schedule and barriers are in `src/runtime/worker_kernel.cu`;
-GPU greedy selection is in `src/runtime/sampling.cu`. The arithmetic
-operators and tensor views are in `src/runtime/ops.cuh`;
-named opcodes and storage classes are part of the fixed task ABI.
-Weight-consuming operators and the worker are instantiated for each supported
-weight type. Activations, K/V storage, reductions, and output logits remain
-float32; BF16 weights are converted to float32 as they are read.
+TileInfer executes TilePlan decoder packages in C++23/CUDA20. One cooperative
+worker launch performs embedding lookup, the repeated decoder schedule, final
+normalization, and logits. GPU greedy selection feeds back the next token.
+The current RTX 3050 worker uses 1024 threads per block and one logical worker
+per SM; worker IDs have no physical SM affinity.
 
-`DecoderModel` uploads a validated package once. Each `SequenceContext` owns an
-ordered stream, hidden buffers, and K/V cache. `enqueue_prefill` queues the
-one-token worker over prompt IDs without a host wait between tokens.
-`enqueue_generate` alternates GPU greedy selection and the same worker; only
-the selected IDs and compact status return to the host. A `Ticket` identifies
-queued work. Call `ready` to poll or `wait` to synchronize once and obtain its
-result. Prompt plus generated tokens must fit `max_context`. The public plan
-records are in `src/runtime/plan.hpp`, and the async C++ interface is in
-`src/runtime/runtime.hpp`; both link through `tileinfer_runtime`.
+Weights may be BF16 or float32. Arithmetic, activations, logits, and K/V state
+are float32. The executor supports version-3 packages and legacy version-2
+float32 packages. Regenerate version-3 packages after a worker fingerprint change.
+For a text demo, use [`generate.py`](../generate.py).
 
-`src/runtime/uploaded_plan.cu` owns the shared device weights and task program.
-`src/runtime/sequence_context.cu` owns per-sequence execution and completion;
-`src/runtime/ticket.cu` owns ticket resources. The blocking
-`DiagnosticContext` is declared in `src/runtime/diagnostic.hpp` and linked
-only into the test executable through `tileinfer_diagnostics`.
-
-`check` waits for per-token snapshots. Its input may set
-`"trace_blocks": true`; each step then includes every layer's output hidden
-vector. The normal generation path does not copy logits or the full cache to
-the host after each token. `--run-block` lives only in the test harness for
-isolated arithmetic regressions.
-
-## Build and test on tux
+## Build
 
 ```sh
-cd ~/dev/tiles/tileinfer
+cd tileinfer
 cmake --preset release
 cmake --build --preset release
 ctest --preset release --output-on-failure
 ```
 
-CTest includes the CCCL cooperative-launch gate, package and corruption
-checks, test-only one-block intermediate comparisons, full-stack logits/cache
-comparisons, and greedy generation against PyTorch. The tests cover GQA,
-tail tiles, reset, capacity, tied and untied output embeddings, for both
-weight types. A direct C++ smoke test covers shared-model contexts, dropped
-tickets, EOS position locking, continuation, and reset. Run Compute Sanitizer
-`memcheck`, `racecheck`, and `synccheck`
-on `generate`, `check`, and the test-only block harness after kernel changes.
+## Use the runtime
 
-## Commands
+From `tileinfer/`, with a package and an input JSON such as `{"tokens":[0,7,15]}`:
 
 ```sh
-cd ~/dev/tiles
-tileinfer/build/release/tile_runtime --describe-target-json
-tileinfer/build/release/tile_runtime --inspect-plan PACKAGE
-tileinfer/build/release/tile_runtime generate PACKAGE INPUTS.json --max-new-tokens 16
-tileinfer/build/release/tile_runtime bench PACKAGE INPUTS.json --new-tokens 16 --warmup 1 --rounds 3
-tileinfer/build/release/tile_runtime check PACKAGE INPUTS.json
+build/release/tile_runtime generate PACKAGE INPUTS.json --max-new-tokens 16
+build/release/tile_runtime bench PACKAGE INPUTS.json --new-tokens 16 --warmup 3 --rounds 7
 ```
 
-`generate` and `bench` accept `{"tokens":[0,7,15]}`. `generate` also accepts
-`--eos-id ID`; greedy selection runs on the GPU. It returns generated token
-IDs, stop reason, final position, and GPU selection-plus-decode time. `bench`
-times the same GPU generation loop with EOS disabled, excluding setup,
-prefill, and readback. `check` accepts token IDs plus optional
-`{"reset":true}` markers and returns full per-token logits and K/V values.
-It accepts `--trace-blocks` for layer outputs. `--run-stack` remains a
-compatibility alias for `check`.
-The `tile_runtime_test` binary retains `--run-block`, `--state-smoke`, and
-`--benchmark-stack` for regression and fixed-position profiling scripts.
-The [TilePlan README](../tileplan/README.md) has a complete command sequence
-that creates a package, writes token IDs, and runs generation.
+`generate` accepts `--eos-id`; `bench` disables EOS for constant work.
+`check` returns per-token logits and K/V snapshots, optionally `--trace-blocks`.
+`--inspect-plan` summarizes a package; `--describe-target-json` probes the compiled worker.
 
-`--inspect-plan` reports dimensions, wave count, worker loads, task count,
-scratch and K/V bytes, weight dtype, and package hashes. It checks the
-compiled-kernel fingerprint and cooperative residency before returning. Plans
-contain byte offsets and strides, never addresses.
+The C++ API is in [runtime.hpp](src/runtime/runtime.hpp): `DecoderModel` shares
+uploaded weights; each `SequenceContext` owns its stream and K/V state.
+Prefill and generation return tickets; `wait` retrieves the result.
+[ops.cuh](src/runtime/ops.cuh) contains arithmetic and
+[worker_kernel.cu](src/runtime/worker_kernel.cu) the cooperative wave loop.
+The blocking diagnostics API is linked only into the test harness.
 
+## Measurements on RTX 3050
 
-## Structural validation and worker variant
+Pinned Llama 3.2 1B checkpoint, batch one, TF32 disabled; measured October 13, 2026.
+The TileInfer package uses 64-row tiles. No GPU clocks were locked.
 
-The loader validates the supplied tasks and schedule independently of Python's
-canonical planning policy. Legal worker reassignment and task-list reordering
-are accepted; output coverage, typed operands, producer wave order, and complete
-worker lists remain checked. Python validates graph edges and planning cost
-metadata. `LoadedPlan` is a plain aggregate populated by `load_plan()` for trusted
-C++ callers.
+### Autoregressive generation
 
-GEMV and logits share a warp-per-row CUB reduction. Attention reduces each
-query/key score once per head and uses online softmax with constant shared
-storage, including for heads wider than a block. RoPE inverse frequencies are
-computed and checked once during package loading. Block tracing allocates its
-device buffer on first use. Normalization shares one helper; its reduction
-order remains unchanged.
+Six prompt tokens, 16 generated tokens, three warmup runs and seven measured
+runs per mode, plus graph-capture setup. CUDA events include GPU argmax feedback
+and decoding, excluding loading, prefill, and readback. PyTorch uses eager
+attention and `StaticCache` in both modes. The graph captures the entire 16-token loop;
+each replay starts from a freshly prefilled cache.
 
-The block size was selected using the pinned Llama 3.2 1B checkpoint on the RTX
-3050. It gives each worker 32 row warps instead of four, improving overlap of
-weight loads. Use `--tile-rows 64` for the measured checkpoint configuration;
-the offline `auto` policy is a schedule heuristic, not a measured tuner.
-The compiled worker is reprobed for both weight types, and the CCCL launch gate
-uses the same block size.
+| Implementation | Weights / activations | Average ms/token |
+| --- | --- | ---: |
+| TileInfer | BF16 / float32 | 16.03 |
+| PyTorch eager | float32 / float32 | 25.55 |
+| PyTorch graph replay | float32 / float32 | 24.43 |
+| PyTorch eager | BF16 / BF16 | 14.42 |
+| PyTorch graph replay | BF16 / BF16 | 13.06 |
 
-Regenerate version-3 packages using a fresh probe from this executable: the
-worker fingerprint includes the block size. Version-2 float32 packages retain
-their legacy 128-thread target metadata and execute with the current worker's
-block size and queried occupancy. No dependency or CMake-preset changes are
-needed.
+Float32 PyTorch and TileInfer generated identical IDs. BF16 PyTorch generated
+a different continuation; its eager and graph paths agreed. The BF16 rows use
+BF16 activations and matrix operations, while the float32 reference stores twice as many
+weight bytes as TileInfer.
 
-The October 13 checkpoint measurement averaged **16.017 ms per generated token**
-(62.43 tokens/s), compared with 68.398 ms for the previous 128-thread worker.
-Both used BF16 weights with float32 arithmetic/K/V, the same six-token prompt,
-16 generated tokens, three warmup runs, and seven measured runs. The CUDA-event
-interval includes GPU greedy selection and decoding; model loading, prefill,
-and readback are excluded. The old worker used its selected 16-row tile; the
-new worker selected 64 rows from 16/32/64 across fixed contexts of 1/64/256.
-Those fixed-context timings were 15.447/17.454/23.655 ms for the selected tile.
-No GPU clock lock was applied. Raw protocols, samples, reference comparisons,
-and profiler counters are in `runs/tileinfer-focus-2026-10-13/` on tux.
+### Fixed-context decoder step
 
-## Additional verification
+Repeated token ID 1, three warmups, seven rounds of five calls per context.
+These timings exclude selection and hold the context length fixed. PyTorch
+uses float32 weights/arithmetic, eager attention, and `StaticCache`; graph
+replay captures one decoder step. Eager/graph logits agree, and TileInfer's
+top token/logit matches the reference at every context.
 
-The CPU-only preset now includes package rejection and alternative-schedule
-tests under UBSan. To refresh a build cache from the old checkout path:
+| Context tokens | PyTorch eager (ms) | PyTorch graph (ms) | TileInfer (ms) |
+| ---: | ---: | ---: | ---: |
+| 1 | 25.56 | 24.33 | 15.42 |
+| 64 | 26.04 | 24.49 | 17.48 |
+| 256 | 26.54 | 25.07 | 23.75 |
+
+Raw samples and environment details are in `runs/tileinfer-baselines-2026-10-13/`
+on tux. These are workload measurements, not a general model/shape sweep.
+
+To repeat generation measurements from `tileinfer/`, set `PACKAGE` and `INPUTS`
+to your package and prompt JSON:
 
 ```sh
-cmake --preset cpu-debug --fresh
-cmake --build --preset cpu-debug
-ctest --preset cpu-debug --output-on-failure
+uv run --locked --project ../tileplan --group checkpoint python tests/benchmark_generate.py \
+  --checkpoint ../checkpoints/Llama-3.2-1B --package "$PACKAGE" \
+  --executor build/release/tile_runtime --inputs "$INPUTS" \
+  --new-tokens 16 --warmup 3 --rounds 7 --out ../runs/generation-comparison.json
 ```
 
-The release suite also covers long/extreme-score prefixes, wide attention
-heads, uneven GEMV/logits dimensions, and controlled context-ring wraparound
-and exhaustion. CUDA host code receives `-Wall -Wextra` through NVCC; C++ code
-also receives `-Wpedantic`. CMake warns if `uv` is missing and regressions
-cannot be registered.
+Add `--reference-dtype bfloat16` for the BF16 baseline.
+[benchmark_decode.py](tests/benchmark_decode.py) measures fixed contexts;
+[profile_decode.py](tests/profile_decode.py) collects Nsight counters.
+Both expose their arguments through `--help`.
 
-Run the four-tool device suite with:
+## Checks
+
+CTest covers the CCCL cooperative-launch gate, loader/UBSan validation,
+float32/BF16 numerical references, generation, and context/ring behavior.
+The `cpu-debug` preset runs host-only checks. Run the four Compute Sanitizer
+tools after kernel changes:
 
 ```sh
 cmake --build build/release --target sanitizers
 ```
 
-It generates fresh float32/BF16 packages, keeps logs and a summary under the
-build directory, and runs memcheck, racecheck, synccheck, and initcheck. CUDA
-API-error reporting defaults to disabled for the installed CCCL pinned-pool
-initialization issue; the script accepts `--report-api-errors all`. Initcheck's
-API-copy memory inspection is disabled only for the two intentionally gated
-ring cases because that inspection synchronizes the blocked copies; kernel
-reads remain checked. Ordinary copies and diagnostics retain full initcheck
-memory inspection. Optional K/V snapshots define unused cache entries as zero,
-and scratch snapshots omit uninitialized alignment padding.
-
-A fixed shape/tile measurement protocol separates pilot selection from final
-rounds and rotates case order deterministically:
-
-```sh
-~/.local/bin/uv run --locked --project ../tileplan python tests/sweep_tiles.py \
-  --executor "$PWD/build/release/tile_runtime_test" --out ../runs/tile-sweep
-```
-
-The sweep saves its protocol before measuring, verifies each top token/logit
-against the CPU reference, records all tile candidates and raw batch-average
-samples, then measures the selected tiles in independent final rounds. These
-are fixed-context decoder timings, not autoregressive throughput or individual
-latency percentiles.
+The suite retains its documented CCCL API-error-reporting workaround;
+initcheck disables API-copy inspection only for the two deliberately gated
+ring tests. Kernel memory reads remain checked.
+[llama32_checkpoint.py](tests/llama32_checkpoint.py) compares layer outputs,
+K/V, logits, and greedy choices with float32 Transformers.
+[sweep_tiles.py](tests/sweep_tiles.py) separates synthetic tile-selection pilots
+from independent final rounds. See the [decoder design](../docs/tile_graph_decoder.md)
+for the full numerical and execution contract.
