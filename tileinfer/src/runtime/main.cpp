@@ -1,10 +1,17 @@
 #include "runtime.hpp"
+#ifdef TILE_TEST_HARNESS
+#include "diagnostic.hpp"
+#endif
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <vector>
@@ -49,6 +56,24 @@ json inspect(const tileinfer::LoadedPlan& plan)
         {"layers", plan.stack.layers}, {"vocab_size", plan.stack.vocab_size}};
 }
 
+tileinfer::TokenId parse_token_id(const json& item)
+{
+    if (!item.is_number_integer())
+        throw std::runtime_error("token ID must be an integer");
+    if (item.is_number_unsigned()) {
+        const auto value = item.get<std::uint64_t>();
+        if (value > static_cast<std::uint64_t>(std::numeric_limits<tileinfer::TokenId>::max()))
+            throw std::runtime_error("token ID exceeds TokenId range");
+        return static_cast<tileinfer::TokenId>(value);
+    }
+    const auto value = item.get<std::int64_t>();
+    if (value < std::numeric_limits<tileinfer::TokenId>::min() ||
+        value > std::numeric_limits<tileinfer::TokenId>::max())
+        throw std::runtime_error("token ID exceeds TokenId range");
+    return static_cast<tileinfer::TokenId>(value);
+}
+
+#ifdef TILE_TEST_HARNESS
 json run_block(const tileinfer::LoadedPlan& plan, const std::string& input_path)
 {
     if (plan.stack.full_stack)
@@ -57,7 +82,7 @@ json run_block(const tileinfer::LoadedPlan& plan, const std::string& input_path)
     if (!file)
         throw std::runtime_error("cannot open block inputs");
     const json request = json::parse(file);
-    tileinfer::SequenceContext context(plan);
+    tileinfer::DiagnosticContext context(plan);
     json steps = json::array();
     for (const auto& item : request.at("tokens")) {
         if (item.contains("reset") && item.at("reset") == true) {
@@ -89,8 +114,10 @@ json run_block(const tileinfer::LoadedPlan& plan, const std::string& input_path)
     }
     return {{"steps", steps}, {"position", context.position()}, {"valid", context.valid()}};
 }
+#endif
 
-json run_stack(const tileinfer::LoadedPlan& plan, const std::string& input_path)
+json run_stack(
+    const tileinfer::LoadedPlan& plan, const std::string& input_path, bool trace_override = false)
 {
     if (!plan.stack.full_stack)
         throw std::runtime_error("expected a decoder stack package");
@@ -98,21 +125,25 @@ json run_stack(const tileinfer::LoadedPlan& plan, const std::string& input_path)
     if (!file)
         throw std::runtime_error("cannot open stack inputs");
     const json request = json::parse(file);
-    tileinfer::SequenceContext context(plan);
-    const bool trace_blocks = request.value("trace_blocks", false);
-    if (trace_blocks)
-        context.enable_block_trace();
+    tileinfer::DecoderModel model(plan);
+    auto context = model.create_context();
+    const bool trace_blocks = trace_override || request.value("trace_blocks", false);
     json steps = json::array();
     const int width = plan.kv_heads * plan.head_dim;
+    int final_position = 0;
     for (const auto& item : request.at("tokens")) {
         if (item.is_object() && item.value("reset", false)) {
-            context.reset();
+            auto reset = context.enqueue_reset();
+            final_position = context.wait(reset).position;
             continue;
         }
-        const int token_id = item.get<int>();
-        const auto logits = context.run_token(token_id);
-        const int position = context.position() - 1;
-        const auto kv = context.kv_snapshot();
+        const tileinfer::TokenId token_id = parse_token_id(item);
+        auto ticket = context.enqueue_decode(token_id, {true, true, trace_blocks});
+        const auto completion = context.wait(ticket);
+        const auto snapshot = context.collect(ticket);
+        const int position = completion.position - 1;
+        final_position = completion.position;
+        const auto& kv = snapshot.kv;
         json keys = json::array();
         json values = json::array();
         for (int layer = 0; layer < plan.stack.layers; ++layer) {
@@ -124,10 +155,10 @@ json run_stack(const tileinfer::LoadedPlan& plan, const std::string& input_path)
             values.push_back(
                 std::vector<float>(kv.begin() + value_offset, kv.begin() + value_offset + width));
         }
-        json step = {{"token_id", token_id}, {"position", position}, {"logits", logits},
+        json step = {{"token_id", token_id}, {"position", position}, {"logits", snapshot.logits},
             {"k", keys}, {"v", values}};
         if (trace_blocks) {
-            const auto hidden = context.block_trace_snapshot();
+            const auto& hidden = snapshot.block_outputs;
             json blocks = json::array();
             for (int layer = 0; layer < plan.stack.layers; ++layer) {
                 const auto begin = hidden.begin() + layer * plan.hidden_size;
@@ -137,12 +168,13 @@ json run_stack(const tileinfer::LoadedPlan& plan, const std::string& input_path)
         }
         steps.push_back(std::move(step));
     }
-    return {{"steps", steps}, {"position", context.position()}, {"valid", context.valid()}};
+    return {{"steps", steps}, {"position", final_position}, {"valid", true}};
 }
 
+#ifdef TILE_TEST_HARNESS
 void state_smoke(const tileinfer::LoadedPlan& plan)
 {
-    tileinfer::SequenceContext context(plan);
+    tileinfer::DiagnosticContext context(plan);
     if (context.position() != 0 || !context.valid())
         throw std::runtime_error("bad new context state");
     for (int position = 0; position < plan.max_context; ++position) {
@@ -166,6 +198,101 @@ void state_smoke(const tileinfer::LoadedPlan& plan)
     if (context.position() != 0 || !context.valid())
         throw std::runtime_error("reset failed");
 }
+#endif
+
+std::vector<tileinfer::TokenId> read_prompt(const std::string& input_path)
+{
+    std::ifstream file(input_path);
+    if (!file)
+        throw std::runtime_error("cannot open prompt inputs");
+    const json request = json::parse(file);
+    const auto& tokens = request.at("tokens");
+    if (!tokens.is_array() || tokens.empty())
+        throw std::runtime_error("prompt requires a nonempty token array");
+    std::vector<tileinfer::TokenId> result;
+    result.reserve(tokens.size());
+    for (const auto& item : tokens)
+        result.push_back(parse_token_id(item));
+    return result;
+}
+
+int option_int(int argc, char** argv, std::string_view key, int start, int fallback)
+{
+    for (int i = start; i < argc; i += 2) {
+        if (i + 1 >= argc)
+            throw std::runtime_error("missing option value");
+        if (std::string_view(argv[i]) == key)
+            return std::stoi(argv[i + 1]);
+    }
+    return fallback;
+}
+
+void validate_options(
+    int argc, char** argv, int start, const std::vector<std::string_view>& allowed)
+{
+    for (int i = start; i < argc; i += 2) {
+        if (i + 1 >= argc)
+            throw std::runtime_error("missing option value");
+        const std::string_view key = argv[i];
+        if (std::find(allowed.begin(), allowed.end(), key) == allowed.end())
+            throw std::runtime_error("unknown option: " + std::string(key));
+    }
+}
+
+json generate(const tileinfer::LoadedPlan& plan, const std::string& input_path, int max_new_tokens,
+    std::optional<tileinfer::TokenId> eos_id)
+{
+    const auto prompt = read_prompt(input_path);
+    if (max_new_tokens <= 0 || max_new_tokens > plan.max_context - static_cast<int>(prompt.size()))
+        throw std::runtime_error("generation exceeds context capacity");
+    tileinfer::DecoderModel model(plan);
+    auto context = model.create_context();
+    auto prefill = context.enqueue_prefill(prompt);
+    auto generation = context.enqueue_generate({max_new_tokens, eos_id});
+    const auto result = context.wait(generation);
+    return {{"prompt_tokens", prompt.size()}, {"generated", result.generated},
+        {"generated_count", result.generated.size()}, {"position", result.position},
+        {"stop_reason", result.stop_reason == tileinfer::StopReason::eos ? "eos" : "limit"},
+        {"compute_us", result.compute_us}, {"plan_sha256", plan.plan_sha256},
+        {"weights_sha256", plan.weights_sha256}};
+}
+
+json bench(const tileinfer::LoadedPlan& plan, const std::string& input_path, int new_tokens,
+    int warmup, int rounds)
+{
+    if (warmup < 0 || rounds <= 0)
+        throw std::runtime_error("invalid benchmark rounds");
+    const auto prompt = read_prompt(input_path);
+    if (new_tokens <= 0 || new_tokens > plan.max_context - static_cast<int>(prompt.size()))
+        throw std::runtime_error("benchmark exceeds context capacity");
+    tileinfer::DecoderModel model(plan);
+    auto context = model.create_context();
+    std::vector<double> samples;
+    std::vector<tileinfer::TokenId> expected;
+    for (int round = -warmup; round < rounds; ++round) {
+        auto reset = context.enqueue_reset();
+        auto prefill = context.enqueue_prefill(prompt);
+        context.wait(prefill);
+        auto generation = context.enqueue_generate({new_tokens, std::nullopt});
+        const auto result = context.wait(generation);
+        if (expected.empty())
+            expected = result.generated;
+        else if (expected != result.generated)
+            throw std::runtime_error("benchmark generated different tokens across rounds");
+        if (round >= 0)
+            samples.push_back(result.compute_us);
+    }
+    const double mean = std::accumulate(samples.begin(), samples.end(), 0.0) / samples.size();
+    return {{"plan_sha256", plan.plan_sha256}, {"weights_sha256", plan.weights_sha256},
+        {"weight_dtype",
+            plan.weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
+        {"prompt_tokens", prompt.size()}, {"generated_count", new_tokens}, {"selection", "greedy"},
+        {"warmup", warmup}, {"rounds", rounds}, {"samples_us", samples}, {"mean_us", mean},
+        {"us_per_token", mean / new_tokens}, {"tokens_per_second", new_tokens * 1000000.0 / mean},
+        {"generated", expected},
+        {"timing",
+            "CUDA events around GPU selection and decode; setup, prefill, and readback excluded"}};
+}
 
 } // namespace
 
@@ -173,13 +300,13 @@ int main(int argc, char** argv)
 {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--help") {
-            std::cout << "tile_runtime --describe-target-json\n"
-                         "tile_runtime --inspect-plan PACKAGE\n"
-                         "tile_runtime --state-smoke PACKAGE\n"
-                         "tile_runtime --run-block PACKAGE INPUTS.json\n"
-                         "tile_runtime --run-stack PACKAGE INPUTS.json\n"
-                         "tile_runtime --benchmark-stack PACKAGE POSITION TOKEN_ID WARMUP "
-                         "ITERATIONS ROUNDS [--profile]\n";
+            std::cout << "tile_runtime generate PACKAGE INPUTS.json --max-new-tokens N "
+                         "[--eos-id ID]\n"
+                         "tile_runtime bench PACKAGE INPUTS.json --new-tokens N "
+                         "--warmup W --rounds R\n"
+                         "tile_runtime check PACKAGE INPUTS.json\n"
+                         "tile_runtime --describe-target-json\n"
+                         "tile_runtime --inspect-plan PACKAGE\n";
             return 0;
         }
         if (argc < 2)
@@ -190,10 +317,41 @@ int main(int argc, char** argv)
             std::cout << target_json(target).dump(2) << '\n';
         } else if (mode == "--inspect-plan" && argc == 3) {
             std::cout << inspect(tileinfer::load_plan(argv[2], target)).dump(2) << '\n';
-        } else if (mode == "--run-stack" && argc == 4) {
-            std::cout << run_stack(tileinfer::load_plan(argv[2], target), argv[3]).dump() << '\n';
+        } else if ((mode == "check" || mode == "--run-stack") &&
+                   (argc == 4 || (argc == 5 && std::string_view(argv[4]) == "--trace-blocks"))) {
+            std::cout << run_stack(tileinfer::load_plan(argv[2], target), argv[3], argc == 5).dump()
+                      << '\n';
+#ifdef TILE_TEST_HARNESS
         } else if (mode == "--run-block" && argc == 4) {
             std::cout << run_block(tileinfer::load_plan(argv[2], target), argv[3]).dump() << '\n';
+#endif
+        } else if (mode == "generate" && argc >= 6) {
+            validate_options(argc, argv, 4, {"--max-new-tokens", "--eos-id", "--selection"});
+            for (int i = 4; i < argc; i += 2)
+                if (std::string_view(argv[i]) == "--selection" &&
+                    std::string_view(argv[i + 1]) != "greedy")
+                    throw std::runtime_error("only greedy selection is supported");
+            const int count = option_int(argc, argv, "--max-new-tokens", 4, -1);
+            const int eos = option_int(argc, argv, "--eos-id", 4, -1);
+            bool eos_supplied = false;
+            for (int i = 4; i < argc; i += 2)
+                eos_supplied |= std::string_view(argv[i]) == "--eos-id";
+            if (eos_supplied && eos < 0)
+                throw std::runtime_error("EOS token ID must be nonnegative");
+            std::cout << generate(tileinfer::load_plan(argv[2], target), argv[3], count,
+                             eos_supplied ? std::optional<tileinfer::TokenId>(eos) : std::nullopt)
+                             .dump()
+                      << '\n';
+        } else if (mode == "bench" && argc >= 10) {
+            validate_options(argc, argv, 4, {"--new-tokens", "--warmup", "--rounds"});
+            const int count = option_int(argc, argv, "--new-tokens", 4, -1);
+            const int warmup = option_int(argc, argv, "--warmup", 4, -1);
+            const int rounds = option_int(argc, argv, "--rounds", 4, -1);
+            std::cout << bench(
+                             tileinfer::load_plan(argv[2], target), argv[3], count, warmup, rounds)
+                             .dump(2)
+                      << '\n';
+#ifdef TILE_TEST_HARNESS
         } else if (mode == "--benchmark-stack" &&
                    (argc == 8 || (argc == 9 && std::string_view(argv[8]) == "--profile"))) {
             const auto plan = tileinfer::load_plan(argv[2], target);
@@ -202,7 +360,7 @@ int main(int argc, char** argv)
             const int warmup = std::stoi(argv[5]);
             const int iterations = std::stoi(argv[6]);
             const int rounds = std::stoi(argv[7]);
-            tileinfer::SequenceContext context(plan);
+            tileinfer::DiagnosticContext context(plan);
             const auto result =
                 context.benchmark_token(position, token_id, warmup, iterations, rounds, argc == 9);
             const double mean =
@@ -225,6 +383,7 @@ int main(int argc, char** argv)
             const auto plan = tileinfer::load_plan(argv[2], target);
             state_smoke(plan);
             std::cout << "{\"state_smoke\": true}\n";
+#endif
         } else {
             throw std::runtime_error("unknown mode; use --help");
         }

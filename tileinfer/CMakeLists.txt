@@ -16,11 +16,23 @@ if(BUILD_TESTING AND CLANG_FORMAT_EXECUTABLE)
         COMMAND ${CLANG_FORMAT_EXECUTABLE} --dry-run --Werror
             ${PROJECT_SOURCE_DIR}/src/runtime/main.cpp
             ${PROJECT_SOURCE_DIR}/src/runtime/plan.cpp
+            ${PROJECT_SOURCE_DIR}/src/runtime/plan.hpp
             ${PROJECT_SOURCE_DIR}/src/runtime/runtime.hpp
+            ${PROJECT_SOURCE_DIR}/src/runtime/diagnostic.hpp
             ${PROJECT_SOURCE_DIR}/src/runtime/ops.cuh
-            ${PROJECT_SOURCE_DIR}/src/runtime/worker.cu
+            ${PROJECT_SOURCE_DIR}/src/runtime/detail/cuda_check.hpp
+            ${PROJECT_SOURCE_DIR}/src/runtime/detail/launch.cuh
+            ${PROJECT_SOURCE_DIR}/src/runtime/detail/uploaded_plan.cuh
+            ${PROJECT_SOURCE_DIR}/src/runtime/detail/ticket_state.cuh
+            ${PROJECT_SOURCE_DIR}/src/runtime/worker_kernel.cu
+            ${PROJECT_SOURCE_DIR}/src/runtime/sampling.cu
+            ${PROJECT_SOURCE_DIR}/src/runtime/uploaded_plan.cu
+            ${PROJECT_SOURCE_DIR}/src/runtime/ticket.cu
+            ${PROJECT_SOURCE_DIR}/src/runtime/sequence_context.cu
+            ${PROJECT_SOURCE_DIR}/src/runtime/diagnostic_context.cu
             ${PROJECT_SOURCE_DIR}/tests/cccl_cooperative_smoke.cu
-            ${PROJECT_SOURCE_DIR}/tests/runtime_unit.cpp)
+            ${PROJECT_SOURCE_DIR}/tests/runtime_unit.cpp
+            ${PROJECT_SOURCE_DIR}/tests/sequence_context_smoke.cpp)
     set_tests_properties(clang_format PROPERTIES TIMEOUT 30)
 endif()
 
@@ -49,14 +61,51 @@ if(TILE_INFER_ENABLE_CUDA)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_EXTENSIONS OFF)
 
-    add_executable(tile_runtime src/runtime/main.cpp src/runtime/plan.cpp
-        src/runtime/worker.cu src/runtime/ops.cuh)
-    target_include_directories(tile_runtime PRIVATE third_party ${CUDAToolkit_INCLUDE_DIRS}/cccl)
-    target_link_libraries(tile_runtime PRIVATE CUDA::cudart)
+    add_library(tileinfer_runtime STATIC src/runtime/plan.cpp
+        src/runtime/worker_kernel.cu src/runtime/sampling.cu
+        src/runtime/uploaded_plan.cu src/runtime/ticket.cu
+        src/runtime/sequence_context.cu src/runtime/ops.cuh)
+    target_include_directories(tileinfer_runtime PUBLIC src/runtime)
+    target_include_directories(tileinfer_runtime PRIVATE third_party ${CUDAToolkit_INCLUDE_DIRS}/cccl)
+    target_link_libraries(tileinfer_runtime PUBLIC CUDA::cudart)
+
+    add_library(tileinfer_diagnostics STATIC src/runtime/diagnostic_context.cu)
+    target_include_directories(tileinfer_diagnostics PRIVATE ${CUDAToolkit_INCLUDE_DIRS}/cccl)
+    target_link_libraries(tileinfer_diagnostics PUBLIC tileinfer_runtime)
+
+    add_executable(tile_runtime src/runtime/main.cpp)
+    target_include_directories(tile_runtime PRIVATE third_party)
+    target_link_libraries(tile_runtime PRIVATE tileinfer_runtime)
+    add_executable(tile_runtime_test src/runtime/main.cpp)
+    target_include_directories(tile_runtime_test PRIVATE third_party)
+    target_link_libraries(tile_runtime_test PRIVATE tileinfer_diagnostics)
+    target_compile_definitions(tile_runtime_test PRIVATE TILE_TEST_HARNESS=1)
+    add_executable(sequence_context_smoke tests/sequence_context_smoke.cpp)
+    target_link_libraries(sequence_context_smoke PRIVATE tileinfer_runtime)
     if(MSVC)
+        target_compile_options(tileinfer_runtime PRIVATE /W4)
+        target_compile_options(tileinfer_diagnostics PRIVATE /W4)
         target_compile_options(tile_runtime PRIVATE /W4)
+        target_compile_options(tile_runtime_test PRIVATE /W4)
+        target_compile_options(sequence_context_smoke PRIVATE /W4)
     else()
+        target_compile_options(tileinfer_runtime PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>)
+        target_compile_options(tileinfer_diagnostics PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>)
         target_compile_options(tile_runtime PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>)
+        target_compile_options(tile_runtime_test PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:-Wall>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
+            $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>)
+        target_compile_options(sequence_context_smoke PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:-Wall>
             $<$<COMPILE_LANGUAGE:CXX>:-Wextra>
             $<$<COMPILE_LANGUAGE:CXX>:-Wpedantic>)
@@ -82,12 +131,13 @@ if(TILE_INFER_ENABLE_CUDA)
             add_test(NAME decoder_regression
                 COMMAND ${UV_EXECUTABLE} run --locked --project ${PROJECT_SOURCE_DIR}/../tileplan
                     python ${PROJECT_SOURCE_DIR}/tests/decoder_regression.py
-                    --executor $<TARGET_FILE:tile_runtime>)
+                    --executor $<TARGET_FILE:tile_runtime_test>)
             set_tests_properties(decoder_regression PROPERTIES TIMEOUT 180)
             add_test(NAME stack_regression
                 COMMAND ${UV_EXECUTABLE} run --locked --project ${PROJECT_SOURCE_DIR}/../tileplan
                     python ${PROJECT_SOURCE_DIR}/tests/stack_regression.py
-                    --executor $<TARGET_FILE:tile_runtime>)
+                    --executor $<TARGET_FILE:tile_runtime>
+                    --sequence-smoke $<TARGET_FILE:sequence_context_smoke>)
             set_tests_properties(stack_regression PROPERTIES TIMEOUT 180)
         endif()
     endif()

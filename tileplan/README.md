@@ -48,13 +48,15 @@ mkdir -p "$RUN"
   --tile-rows auto --weight-dtype bfloat16 --out "$RUN/stack"
 printf '%s\n' '{"tokens":[0,7,15,3,47]}' > "$RUN/inputs.json"
 ../tileinfer/build/release/tile_runtime \
-  --run-stack "$RUN/stack" "$RUN/inputs.json" > "$RUN/inference.json"
+  generate "$RUN/stack" "$RUN/inputs.json" --max-new-tokens 1 > "$RUN/generation.json"
 ~/.local/bin/uv run --locked python -m tileplan inspect "$RUN/stack"
 ~/.local/bin/uv run --locked python -m tileplan verify "$RUN/stack"
 ```
 
-`inference.json` contains per-token vocabulary logits and K/V snapshots for
-the synthetic three-layer stack. These IDs have no text tokenizer yet.
+`generation.json` contains the selected next token ID for the synthetic
+three-layer stack. These IDs have no text tokenizer yet. Use
+`tile_runtime check "$RUN/stack" "$RUN/inputs.json"` for full per-token
+logits and K/V diagnostics.
 
 `reference` and `stack-reference` generate new deterministic fixtures.
 Both `build` and `build-stack` accept `--weight-dtype float32|bfloat16`,
@@ -63,7 +65,33 @@ weights to BF16 once and packs their raw 16-bit values. Tensor descriptors
 record each weight's dtype; byte offsets, hashes, and tied aliases are checked
 by both the planner and runtime.
 
-`visualize PACKAGE --out FILE.svg` renders the block task schedule.
+## Visualize the schedule and tensor operations
+
+After building a block or stack package, run `visualize` from the `tileplan`
+directory. For the stack package created above, keep `RUN` set to that run
+directory and write three self-contained SVGs:
+
+```sh
+~/.local/bin/uv run --locked python -m tileplan visualize "$RUN/stack" \
+  --out "$RUN/stack-schedule.svg" \
+  --tensor-graph-out "$RUN/stack-tensor-graph.svg" \
+  --tile-flow-out "$RUN/stack-tile-flow.svg"
+```
+
+- `stack-schedule.svg` shows each tile task's opcode, output region, and logical
+  worker, grouped by wave.
+- `stack-tensor-graph.svg` shows the model's tensor operations, tensor and weight
+  shapes, data flow, residual paths, embedding lookup, and final logits.
+- `stack-tile-flow.svg` follows a small set of actual plan tasks through all
+  nine decoder waves. It shows output slices, computations, workers, and direct
+  dependencies. Gray cards count prerequisite tasks omitted from the example;
+  wave boundaries mark full cooperative-grid barriers. The diagram shows one
+  block template, repeated for each layer in a stack. It illustrates where
+  tile dependencies are narrower than whole operators, but the current
+  barrier-based runtime cannot hand a tile to the next wave early.
+
+Replace `$RUN/stack` with `$RUN/block` to draw a single-block package.
+
 The automatic tile-height search evaluates 2, 4, 8, and 16 rows using
 per-wave maximum estimated worker load plus a per-task dispatch penalty.
 The selected height and all candidate scores are recorded in

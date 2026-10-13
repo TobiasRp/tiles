@@ -41,7 +41,7 @@ def check_sequence(
     }
     input_path = root / "stack_inputs.json"
     input_path.write_text(json.dumps(request))
-    result = run(executor, "--run-stack", str(package), str(input_path))
+    result = run(executor, "check", str(package), str(input_path))
     if result.returncode:
         raise AssertionError(result.stderr)
     report = json.loads(result.stdout)
@@ -82,18 +82,94 @@ def check_sequence(
     input_path.write_text(
         json.dumps({"tokens": [token_ids[0]] * (spec.block.max_context + 1)})
     )
-    result = run(executor, "--run-stack", str(package), str(input_path))
+    result = run(executor, "check", str(package), str(input_path))
     if result.returncode == 0 or "capacity reached" not in result.stderr:
         raise AssertionError("stack capacity check failed")
     input_path.write_text(json.dumps({"tokens": [spec.vocab_size]}))
-    result = run(executor, "--run-stack", str(package), str(input_path))
+    result = run(executor, "check", str(package), str(input_path))
     if result.returncode == 0 or "outside vocabulary" not in result.stderr:
         raise AssertionError("token range check failed")
+
+
+def check_generation(
+    executor: Path,
+    package: Path,
+    root: Path,
+    prompt: list[int],
+    weights: dict,
+    spec: StackSpec,
+) -> None:
+    input_path = root / "generate_inputs.json"
+    input_path.write_text(json.dumps({"tokens": prompt}))
+    cache = StackCache.empty(spec)
+    with torch.inference_mode():
+        for token in prompt:
+            step = decode_token(token, weights, spec, cache)
+        expected = []
+        for _ in range(2):
+            token = int(step["logits"].argmax())
+            expected.append(token)
+            step = decode_token(token, weights, spec, cache)
+    result = run(
+        executor,
+        "generate",
+        str(package),
+        str(input_path),
+        "--max-new-tokens",
+        "2",
+    )
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    actual = json.loads(result.stdout)
+    if (
+        actual["generated"] != expected
+        or actual["generated_count"] != 2
+        or actual["position"] != len(prompt) + 2
+        or actual["stop_reason"] != "limit"
+    ):
+        raise AssertionError(actual)
+    eos = run(
+        executor,
+        "generate",
+        str(package),
+        str(input_path),
+        "--max-new-tokens",
+        "2",
+        "--eos-id",
+        str(expected[0]),
+    )
+    if eos.returncode:
+        raise AssertionError(eos.stderr)
+    stopped = json.loads(eos.stdout)
+    if (
+        stopped["generated"] != expected[:1]
+        or stopped["position"] != len(prompt) + 1
+        or stopped["stop_reason"] != "eos"
+    ):
+        raise AssertionError(stopped)
+    bench = run(
+        executor,
+        "bench",
+        str(package),
+        str(input_path),
+        "--new-tokens",
+        "2",
+        "--warmup",
+        "0",
+        "--rounds",
+        "1",
+    )
+    if bench.returncode:
+        raise AssertionError(bench.stderr)
+    measurement = json.loads(bench.stdout)
+    if measurement["generated"] != expected or measurement["mean_us"] <= 0:
+        raise AssertionError(measurement)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--executor", type=Path, required=True)
+    parser.add_argument("--sequence-smoke", type=Path)
     args = parser.parse_args()
     fixture = Path(__file__).parents[2] / "tileplan/tests/fixtures/decoder_m4"
     with tempfile.TemporaryDirectory(prefix="stack-regression-") as directory:
@@ -137,6 +213,11 @@ def main() -> None:
             if report["layers"] != spec.layers or report["kv_bytes"] != 2304:
                 raise AssertionError(report)
             check_sequence(args.executor, package, root, ids, traces, spec)
+            check_generation(args.executor, package, root, ids[:2], weights, spec)
+            if args.sequence_smoke and tile_rows == 4:
+                context_result = run(args.sequence_smoke, str(package))
+                if context_result.returncode:
+                    raise AssertionError(context_result.stderr)
         original_weight_bytes = report["weight_bytes"]
 
         bf16_package = root / "bf16-stack"
@@ -162,6 +243,11 @@ def main() -> None:
                 decode_token(token, bf16_weights, spec, bf16_cache) for token in ids
             ]
         check_sequence(args.executor, bf16_package, root, ids, bf16_traces, spec)
+        check_generation(args.executor, bf16_package, root, ids[:2], bf16_weights, spec)
+        if args.sequence_smoke:
+            context_result = run(args.sequence_smoke, str(bf16_package))
+            if context_result.returncode:
+                raise AssertionError(context_result.stderr)
 
         original = json.loads((package / "plan.json").read_text())
         for name, mutate in {

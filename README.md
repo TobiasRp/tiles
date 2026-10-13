@@ -13,11 +13,10 @@ The output projection aliases the token embedding. Tokenization runs in Python;
 the CUDA executor accepts token IDs. The base model has no chat template in
 this workflow.
 
-## Run Llama 3.2 1B on `tux`
+## Run Llama 3.2 1B
 
-You need access to the gated model on Hugging Face. Sign in on `tux` so your
-token remains on that machine, then download the pinned revision. The model
-files are kept under `checkpoints/`, which Git ignores.
+You need access to the gated model on Hugging Face, then download the pinned
+revision. The model files are kept under `checkpoints/`, which Git ignores.
 
 ```sh
 ~/.local/bin/uv tool install huggingface_hub
@@ -51,8 +50,8 @@ mkdir -p "$RUN"
 ~/.local/bin/uv run --locked python -m tileplan verify "$RUN/package"
 ```
 
-To run a prompt, tokenize it, feed its IDs to the one-token executor in order,
-and decode the highest-logit next token:
+To generate tokens, tokenize a prompt, then let the executor select and feed
+back each next ID on the GPU:
 
 ```sh
 PROMPT='The capital of France is'
@@ -68,27 +67,26 @@ Path(sys.argv[3]).write_text(json.dumps({"tokens": tokens}))
 PY
 
 ../tileinfer/build/release/tile_runtime \
-  --run-stack "$RUN/package" "$RUN/inputs.json" > "$RUN/inference.json"
+  generate "$RUN/package" "$RUN/inputs.json" --max-new-tokens 16 \
+  > "$RUN/generation.json"
 
-~/.local/bin/uv run --locked --group checkpoint python - "$MODEL" "$RUN/inference.json" <<'PY'
+~/.local/bin/uv run --locked --group checkpoint python - "$MODEL" "$RUN/generation.json" <<'PY'
 import json
 import sys
 from pathlib import Path
 from transformers import AutoTokenizer
 
 tokenizer = AutoTokenizer.from_pretrained(sys.argv[1], local_files_only=True)
-steps = json.loads(Path(sys.argv[2]).read_text())["steps"]
-logits = steps[-1]["logits"]
-next_token = max(range(len(logits)), key=logits.__getitem__)
-print(next_token, repr(tokenizer.decode([next_token])))
+generated = json.loads(Path(sys.argv[2]).read_text())["generated"]
+print(generated, repr(tokenizer.decode(generated)))
 PY
 ```
 
-`inference.json` includes logits and each layer's current K/V values for every
-input token. The CLI starts a fresh context for each invocation; the
-[checkpoint regression](tileinfer/tests/llama32_checkpoint.py) demonstrates
-two greedy feedback steps per prompt. A text generation CLI and fast chunked
-prefill are future work.
+The CLI starts a fresh context for each invocation. `generate` uses the
+one-token worker for prefill, then performs greedy selection and feedback on
+the GPU. `check` returns logits and each layer's current K/V values for every
+input token when diagnostics are needed. Tokenization remains in Python;
+fast chunked prefill is future work.
 
 ## Check correctness
 
@@ -118,12 +116,41 @@ absolute errors were 0.000504 for block outputs and 0.0000801 for logits, and
 all 27 next-token choices matched. The full report is in
 `runs/llama32-import-2026-10-12/comparison-final/report.json` on `tux`.
 
-## Measure decode and profile memory traffic
+## Measure autoregressive generation
 
-The benchmark keeps weights, input token, and KV cache on the GPU. It times
+`bench` times GPU greedy selection plus decode for a fixed number of new
+tokens. It excludes model setup, prompt prefill, and result readback. Each
+round resets and prefills the same prompt; EOS is disabled to keep work
+constant.
+
+```sh
+cd ~/dev/tile-infer/tileplan
+../tileinfer/build/release/tile_runtime \
+  bench "$RUN/package" "$RUN/inputs.json" \
+  --new-tokens 16 --warmup 1 --rounds 3 > "$RUN/generation-benchmark.json"
+```
+
+To compare the same autoregressive sequence with float32 Transformers eager,
+run the reference in a separate process so its model leaves the GPU before
+TileInfer loads its BF16 package:
+
+```sh
+~/.local/bin/uv run --locked --group checkpoint python \
+  ../tileinfer/tests/benchmark_generate.py \
+  --checkpoint "$MODEL" --package "$RUN/package" \
+  --executor ../tileinfer/build/release/tile_runtime \
+  --inputs "$RUN/inputs.json" --new-tokens 16 \
+  --warmup 1 --rounds 3 --out "$RUN/generation-comparison.json"
+```
+
+## Profile an isolated decoder step
+
+The historical fixed-position benchmark keeps weights, input token, and KV
+cache on the GPU. It times
 one-token decode at fixed positions after filling each prefix with token ID 1.
 Every timed call overwrites the same new cache slot, so context length stays
-fixed. The PyTorch eager and CUDA Graph paths use the same float32
+fixed. This is useful for profiling the worker but does not measure
+autoregressive generation. The PyTorch eager and CUDA Graph paths use the same float32
 Transformers model, fixed `StaticCache`, and attention mask. TileInfer uses
 the imported BF16 weight storage with float32 arithmetic. Setup, prefix fill,
 and output readback are outside CUDA-event timings. The script checks the
@@ -133,11 +160,11 @@ top token and top logit against PyTorch at every length.
 cd ~/dev/tile-infer/tileplan
 ~/.local/bin/uv run --locked --group checkpoint python \
   ../tileinfer/tests/benchmark_decode.py \
-  --checkpoint ../checkpoints/Llama-3.2-1B \
-  --package ../runs/llama32-import-2026-10-12/package-4k \
-  --executor ../tileinfer/build/release/tile_runtime \
+  --checkpoint "$MODEL" \
+  --package "$RUN/package" \
+  --executor ../tileinfer/build/release/tile_runtime_test \
   --positions 0 63 255 --warmup 3 --iterations 5 --rounds 3 \
-  --out ../runs/llama32-import-2026-10-12/decode-benchmark.json
+  --out "$RUN/decode-benchmark.json"
 ```
 
 Positions `0 63 255` measure context lengths 1, 64, and 256. To profile one
@@ -148,10 +175,10 @@ so use the benchmark report for timing.
 
 ```sh
 ~/.local/bin/uv run --locked python ../tileinfer/tests/profile_decode.py \
-  --package ../runs/llama32-import-2026-10-12/package-4k \
-  --executor ../tileinfer/build/release/tile_runtime \
+  --package "$RUN/package" \
+  --executor ../tileinfer/build/release/tile_runtime_test \
   --position 63 \
-  --out ../runs/llama32-import-2026-10-12/decode-profile-p63.json
+  --out "$RUN/decode-profile-p63.json"
 ```
 
 For a small deterministic example that needs no checkpoint, see the

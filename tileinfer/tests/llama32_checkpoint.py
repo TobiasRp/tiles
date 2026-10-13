@@ -237,7 +237,7 @@ def main() -> None:
     if not args.reuse_runtime:
         with result_path.open("w") as stream:
             result = subprocess.run(
-                [str(args.executor), "--run-stack", str(args.package), str(input_path)],
+                [str(args.executor), "check", str(args.package), str(input_path)],
                 stdout=stream,
                 stderr=subprocess.PIPE,
                 text=True,

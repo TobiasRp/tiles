@@ -1,6 +1,6 @@
 #pragma once
 
-#include "runtime.hpp"
+#include "plan.hpp"
 
 #include <cuda/std/cmath>
 #include <cuda/std/cstdint>
@@ -239,7 +239,7 @@ __device__ inline void execute(const TaskRecord& task, const Context<Weight>& co
 
 template <typename Weight>
 __device__ inline void embedding_lookup(
-    int token_id, int hidden_size, const Weight* embedding, float* hidden)
+    TokenId token_id, int hidden_size, const Weight* embedding, float* hidden)
 {
     for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < hidden_size;
         index += gridDim.x * blockDim.x)
