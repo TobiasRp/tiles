@@ -24,7 +24,7 @@ class UploadedPlan
     cuda::device_memory_pool_ref& pool = cuda::device_default_memory_pool(device);
     cuda::device_buffer<std::uint8_t> weights;
     cuda::device_buffer<TaskRecord> tasks;
-    cuda::device_buffer<Range> ranges;
+    cuda::device_buffer<WorkerTaskRange> ranges;
     cuda::device_buffer<TensorRecord> tensors;
     int hidden_size;
     int intermediate_size;

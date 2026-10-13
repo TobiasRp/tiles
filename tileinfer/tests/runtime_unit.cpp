@@ -1,3 +1,4 @@
+#include "detail/input_ring_cursor.hpp"
 #include "runtime.hpp"
 
 #include <cstdint>
@@ -15,13 +16,35 @@ static_assert(!std::is_copy_constructible_v<tileinfer::Ticket>);
 static_assert(std::is_standard_layout_v<tileinfer::TaskRecord>);
 static_assert(std::is_trivially_copyable_v<tileinfer::TaskRecord>);
 static_assert(sizeof(tileinfer::TaskRecord) == 40);
-static_assert(sizeof(tileinfer::Range) == 8);
+static_assert(sizeof(tileinfer::WorkerTaskRange) == 8);
 static_assert(sizeof(tileinfer::TensorRecord) == 8);
 static_assert(std::is_trivially_copyable_v<tileinfer::TensorRecord>);
 static_assert(std::is_trivially_copyable_v<tileinfer::StackConfig>);
 
 int main()
 {
+    tileinfer::detail::InputRingCursor ring(8);
+    if (ring.reserve(3) != 0 || ring.reserve(3) != 3)
+        return 3;
+    ring.release(3);
+    if (ring.reserve(4) != 6) // two elements at the tail, then two at the head
+        return 4;
+    bool exhausted = false;
+    try {
+        (void)ring.reserve(2);
+    } catch (const std::runtime_error&) {
+        exhausted = true;
+    }
+    if (!exhausted)
+        return 5;
+    ring.release(3);
+    if (ring.reserve(2) != 2)
+        return 6;
+    ring.release(4);
+    ring.release(2);
+    if (ring.reserve(8) != 0)
+        return 7;
+    ring.release(8);
     if (tileinfer::sha256({}) != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
         return 1;
     if (tileinfer::sha256({static_cast<std::uint8_t>('a'), static_cast<std::uint8_t>('b'),

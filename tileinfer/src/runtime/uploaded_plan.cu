@@ -3,9 +3,12 @@
 #include "runtime.hpp"
 
 #include <cuda_runtime.h>
+#include <cuda/algorithm>
+#include <cuda/std/span>
 
 #include <memory>
 #include <stdexcept>
+#include <string>
 
 namespace tileinfer::detail {
 
@@ -28,18 +31,21 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
     , weight_dtype(plan.weight_dtype)
 {
     stream.sync();
-    check(cudaMemcpyAsync(weights.data(), plan.weights.data(), plan.weights.size(),
-              cudaMemcpyHostToDevice, stream.get()),
-        "copy model weights");
-    check(cudaMemcpyAsync(tasks.data(), plan.tasks.data(), plan.tasks.size() * sizeof(TaskRecord),
-              cudaMemcpyHostToDevice, stream.get()),
-        "copy model tasks");
-    check(cudaMemcpyAsync(ranges.data(), plan.ranges.data(), plan.ranges.size() * sizeof(Range),
-              cudaMemcpyHostToDevice, stream.get()),
-        "copy model ranges");
-    check(cudaMemcpyAsync(tensors.data(), plan.tensors.data(),
-              plan.tensors.size() * sizeof(TensorRecord), cudaMemcpyHostToDevice, stream.get()),
-        "copy model tensors");
+    auto copy = [this](auto source, auto destination, const char* stage) {
+        try {
+            cuda::copy_bytes(stream, source, destination);
+        } catch (const std::exception& error) {
+            throw std::runtime_error(std::string(stage) + ": " + error.what());
+        }
+    };
+    copy(cuda::std::span<const std::uint8_t>(plan.weights.data(), plan.weights.size()),
+        cuda::std::span<std::uint8_t>(weights.data(), weights.size()), "copy model weights");
+    copy(cuda::std::span<const TaskRecord>(plan.tasks.data(), plan.tasks.size()),
+        cuda::std::span<TaskRecord>(tasks.data(), tasks.size()), "copy model tasks");
+    copy(cuda::std::span<const WorkerTaskRange>(plan.ranges.data(), plan.ranges.size()),
+        cuda::std::span<WorkerTaskRange>(ranges.data(), ranges.size()), "copy model ranges");
+    copy(cuda::std::span<const TensorRecord>(plan.tensors.data(), plan.tensors.size()),
+        cuda::std::span<TensorRecord>(tensors.data(), tensors.size()), "copy model tensors");
     stream.sync();
 }
 

@@ -4,52 +4,17 @@
 #include "runtime.hpp"
 
 #include <cuda/__event/timed_event.h>
+#include <cuda/buffer>
+#include <cuda/memory_pool>
+#include <cuda/stream>
 
 #include <cstddef>
 #include <memory>
-
-namespace tileinfer::detail {
-
-// Keeps host storage pinned until its stream-ordered transfer has finished.
-template <typename T>
-class PinnedBuffer
-{
-  public:
-    PinnedBuffer() = default;
-    ~PinnedBuffer()
-    {
-        if (data_ != nullptr)
-            cudaFreeHost(data_);
-    }
-    PinnedBuffer(const PinnedBuffer&) = delete;
-    PinnedBuffer& operator=(const PinnedBuffer&) = delete;
-
-    void allocate(std::size_t count)
-    {
-        if (data_ != nullptr)
-            throw std::runtime_error("pinned buffer already allocated");
-        if (count == 0)
-            return;
-        void* storage = nullptr;
-        check(cudaMallocHost(&storage, count * sizeof(T)), "allocate pinned result");
-        data_ = static_cast<T*>(storage);
-        size_ = count;
-    }
-
-    [[nodiscard]] T* data() const { return data_; }
-    [[nodiscard]] std::size_t size() const { return size_; }
-    T& operator[](std::size_t index) const { return data_[index]; }
-
-  private:
-    T* data_ = nullptr;
-    std::size_t size_ = 0;
-};
-
-} // namespace tileinfer::detail
+#include <optional>
 
 namespace tileinfer {
 
-// Retains the event and all host buffers needed by one queued operation.
+// Retains a request's completion and optional results independently of its handle.
 struct Ticket::State
 {
     enum class Kind
@@ -60,6 +25,33 @@ struct Ticket::State
         reset,
     };
 
+    struct Generation
+    {
+        int start_position;
+        int requested;
+        cuda::host_buffer<TokenId> output;
+        cuda::host_buffer<int> status;
+        cuda::timed_event compute_start;
+        cuda::timed_event compute_end;
+
+        Generation(cuda::stream_ref stream, int start, int count)
+            : start_position(start)
+            , requested(count)
+            , output(stream, cuda::pinned_default_memory_pool(), count, cuda::no_init)
+            , status(stream, cuda::pinned_default_memory_pool(), 2, cuda::no_init)
+            , compute_start(stream)
+            , compute_end(stream)
+        {
+        }
+    };
+
+    struct Diagnostic
+    {
+        std::optional<cuda::host_buffer<float>> logits;
+        std::optional<cuda::host_buffer<float>> kv;
+        std::optional<cuda::host_buffer<float>> blocks;
+    };
+
     explicit State(Kind value);
     ~State();
 
@@ -67,17 +59,11 @@ struct Ticket::State
     bool recorded = false;
     const void* owner = nullptr;
     Kind kind;
-    int start_position = 0;
     int end_position = 0;
-    int requested = 0;
-    detail::PinnedBuffer<TokenId> input_host;
-    detail::PinnedBuffer<TokenId> output_host;
-    detail::PinnedBuffer<int> status_host;
-    detail::PinnedBuffer<float> logits_host;
-    detail::PinnedBuffer<float> kv_host;
-    detail::PinnedBuffer<float> blocks_host;
-    std::unique_ptr<cuda::timed_event> compute_start;
-    std::unique_ptr<cuda::timed_event> compute_end;
+    std::size_t input_begin = 0;
+    std::size_t input_count = 0;
+    std::optional<Generation> generation;
+    std::optional<Diagnostic> diagnostic;
 };
 
 } // namespace tileinfer

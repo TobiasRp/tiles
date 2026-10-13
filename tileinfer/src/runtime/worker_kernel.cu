@@ -15,7 +15,7 @@ using detail::check;
 namespace {
 
 template <typename Weight>
-__global__ void decoder_worker(const TaskRecord* tasks, const Range* ranges,
+__global__ void decoder_worker(const TaskRecord* tasks, const WorkerTaskRange* ranges,
     const TensorRecord* tensors, int waves, int workers, int position, int hidden_size,
     int intermediate_size, int kv_heads, int head_dim, NumericConfig numeric, StackConfig stack,
     TokenId token_id, const TokenId* device_tokens, int token_index, float* input, float* output,
@@ -47,7 +47,7 @@ __global__ void decoder_worker(const TaskRecord* tasks, const Range* ranges,
         };
 
         for (int wave = 0; wave < waves; ++wave) {
-            const Range range = ranges[wave * workers + blockIdx.x];
+            const WorkerTaskRange range = ranges[wave * workers + blockIdx.x];
             for (cuda::std::uint32_t index = range.begin; index < range.begin + range.count;
                 ++index) {
                 ops::execute(tasks[index], context);

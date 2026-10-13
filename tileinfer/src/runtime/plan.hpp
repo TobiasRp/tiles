@@ -121,7 +121,7 @@ struct StackConfig
 };
 
 // Gives one logical worker its contiguous task slice for a wave.
-struct Range
+struct WorkerTaskRange
 {
     std::uint32_t begin;
     std::uint32_t count;
@@ -163,7 +163,7 @@ struct LoadedPlan
     std::uint64_t kv_bytes;
     std::vector<std::uint8_t> weights;
     std::vector<TaskRecord> tasks;
-    std::vector<Range> ranges;
+    std::vector<WorkerTaskRange> ranges;
     std::vector<std::vector<std::int64_t>> worker_loads;
     std::string plan_sha256;
     std::string weights_sha256;

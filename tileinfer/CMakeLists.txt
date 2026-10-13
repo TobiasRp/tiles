@@ -21,6 +21,7 @@ if(BUILD_TESTING AND CLANG_FORMAT_EXECUTABLE)
             ${PROJECT_SOURCE_DIR}/src/runtime/diagnostic.hpp
             ${PROJECT_SOURCE_DIR}/src/runtime/ops.cuh
             ${PROJECT_SOURCE_DIR}/src/runtime/detail/cuda_check.hpp
+            ${PROJECT_SOURCE_DIR}/src/runtime/detail/input_ring_cursor.hpp
             ${PROJECT_SOURCE_DIR}/src/runtime/detail/launch.cuh
             ${PROJECT_SOURCE_DIR}/src/runtime/detail/uploaded_plan.cuh
             ${PROJECT_SOURCE_DIR}/src/runtime/detail/ticket_state.cuh
@@ -31,6 +32,7 @@ if(BUILD_TESTING AND CLANG_FORMAT_EXECUTABLE)
             ${PROJECT_SOURCE_DIR}/src/runtime/sequence_context.cu
             ${PROJECT_SOURCE_DIR}/src/runtime/diagnostic_context.cu
             ${PROJECT_SOURCE_DIR}/tests/cccl_cooperative_smoke.cu
+            ${PROJECT_SOURCE_DIR}/tests/input_ring_copy_smoke.cu
             ${PROJECT_SOURCE_DIR}/tests/runtime_unit.cpp
             ${PROJECT_SOURCE_DIR}/tests/sequence_context_smoke.cpp)
     set_tests_properties(clang_format PROPERTIES TIMEOUT 30)
@@ -118,10 +120,15 @@ if(TILE_INFER_ENABLE_CUDA)
     target_include_directories(cccl_cooperative_smoke PRIVATE ${CUDAToolkit_INCLUDE_DIRS}/cccl)
     target_link_libraries(cccl_cooperative_smoke PRIVATE CUDA::cudart)
 
+    add_executable(input_ring_copy_smoke tests/input_ring_copy_smoke.cu)
+    target_include_directories(input_ring_copy_smoke PRIVATE ${CUDAToolkit_INCLUDE_DIRS}/cccl)
+    target_link_libraries(input_ring_copy_smoke PRIVATE CUDA::cudart)
+
     if(BUILD_TESTING)
         add_test(NAME tile_runtime_help COMMAND tile_runtime --help)
         add_test(NAME cuda_smoke COMMAND cuda_smoke)
         add_test(NAME cccl_cooperative_smoke COMMAND cccl_cooperative_smoke)
+        add_test(NAME input_ring_copy_smoke COMMAND input_ring_copy_smoke)
         set_tests_properties(tile_runtime_help PROPERTIES TIMEOUT 30)
         set_tests_properties(cuda_smoke PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77)
         set_tests_properties(cccl_cooperative_smoke PROPERTIES TIMEOUT 30)

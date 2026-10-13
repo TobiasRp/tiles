@@ -10,7 +10,7 @@ namespace tileinfer::detail {
 struct WorkerProgramView
 {
     const TaskRecord* tasks;
-    const Range* ranges;
+    const WorkerTaskRange* ranges;
     const TensorRecord* tensors;
     const void* weights;
     int waves;

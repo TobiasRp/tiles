@@ -43,6 +43,13 @@ int main(int argc, char** argv)
         require(second_result.generated == other_expected,
             "shared model contexts did not keep independent sequence state");
         require(first.ready(first_generation), "completed ticket is not ready");
+        bool wrong_context = false;
+        try {
+            (void)second.ready(first_generation);
+        } catch (const std::runtime_error&) {
+            wrong_context = true;
+        }
+        require(wrong_context, "cross-context ticket was accepted");
 
         first.enqueue_reset();
         first.enqueue_prefill(prompt);
@@ -70,6 +77,32 @@ int main(int argc, char** argv)
         first.enqueue_reset();
         auto final_prefill = first.enqueue_prefill(prompt);
         require(first.wait(final_prefill).position == 2, "reset did not restore the empty prefix");
+
+        auto queued = model.create_context();
+        auto reference = model.create_context();
+        const std::array<tileinfer::TokenId, 1> single{0};
+        auto retained = queued.enqueue_prefill(single, {.logits = true});
+        queued.enqueue_prefill(single);
+        queued.enqueue_decode(1);
+        auto queued_generation = queued.enqueue_generate({2, std::nullopt});
+        reference.enqueue_prefill(single);
+        reference.enqueue_prefill(single);
+        reference.enqueue_decode(1);
+        auto reference_generation = reference.enqueue_generate({2, std::nullopt});
+        require(queued.wait(queued_generation).generated ==
+                    reference.wait(reference_generation).generated,
+            "queued prefills and decode changed generated IDs");
+        const auto first_snapshot = queued.collect(retained);
+        require(!first_snapshot.logits.empty() &&
+                    queued.collect(retained).logits == first_snapshot.logits,
+            "retained diagnostic result changed after ring reuse");
+        require(queued.wait(retained).position == 1 && queued.ready(retained),
+            "retained ticket expired after later requests");
+
+        queued.enqueue_reset();
+        auto after_reuse = queued.enqueue_prefill(prompt);
+        require(queued.wait(after_reuse).position == 2 && queued.wait(retained).position == 1,
+            "ring reuse changed a retained ticket");
         std::cout << "sequence context smoke passed\n";
         return 0;
     } catch (const std::exception& error) {

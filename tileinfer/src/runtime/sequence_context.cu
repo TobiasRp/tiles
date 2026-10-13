@@ -1,23 +1,50 @@
 #include "detail/cuda_check.hpp"
+#include "detail/input_ring_cursor.hpp"
 #include "detail/ticket_state.cuh"
 #include "detail/uploaded_plan.cuh"
 #include "runtime.hpp"
 
 #include <cuda_runtime.h>
+#include <cuda/algorithm>
 #include <cuda/buffer>
 #include <cuda/memory_pool>
+#include <cuda/std/span>
 #include <cuda/stream>
 
 #include <algorithm>
 #include <chrono>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
 namespace tileinfer {
 using detail::check;
+
+namespace {
+template <typename Source, typename Destination>
+void copy_bytes(cuda::stream_ref stream, Source source, Destination destination, const char* stage)
+{
+    try {
+        cuda::copy_bytes(stream, source, destination);
+    } catch (const std::exception& error) {
+        throw std::runtime_error(std::string(stage) + ": " + error.what());
+    }
+}
+
+std::size_t input_ring_size(int max_context)
+{
+    // One maximum prompt and 64 additional queued one-token inputs.
+    const auto maximum = static_cast<std::size_t>(max_context);
+    if (maximum > std::numeric_limits<std::size_t>::max() - 64 ||
+        maximum + 64 > std::numeric_limits<std::size_t>::max() / sizeof(TokenId))
+        throw std::runtime_error("input ring size overflow");
+    return maximum + 64;
+}
+} // namespace
 
 struct SequenceContext::Impl
 {
@@ -33,6 +60,8 @@ struct SequenceContext::Impl
     cuda::device_buffer<TokenId> tokens;
     cuda::device_buffer<TokenId> generated;
     cuda::device_buffer<int> status;
+    cuda::host_buffer<TokenId> input_ring;
+    detail::InputRingCursor ring_cursor;
     int queued_position = 0;
     std::shared_ptr<Ticket::State> pending_position;
     bool valid = true;
@@ -51,8 +80,10 @@ struct SequenceContext::Impl
         , tokens(stream, pool, model->max_context, cuda::no_init)
         , generated(stream, pool, model->max_context, cuda::no_init)
         , status(stream, pool, 2, cuda::no_init)
+        , input_ring(stream, cuda::pinned_default_memory_pool(),
+              input_ring_size(model->max_context), cuda::no_init)
+        , ring_cursor(input_ring.size())
     {
-        stream.sync();
     }
 
     ~Impl() { stream.sync(); }
@@ -85,44 +116,80 @@ struct SequenceContext::Impl
             stream, model->view(), buffers, position, {-1, token_ids, token_index});
     }
 
+    // Stream order makes the first unfinished event the ring's reclamation boundary.
+    void reclaim_completed()
+    {
+        while (!outstanding.empty()) {
+            const auto& item = outstanding.front();
+            const cudaError_t event_status = cudaEventQuery(item->event);
+            if (event_status == cudaErrorNotReady)
+                break;
+            if (event_status != cudaSuccess) {
+                valid = false;
+                check(event_status, "query outstanding ticket");
+            }
+            ring_cursor.release(item->input_count);
+            outstanding.erase(outstanding.begin());
+        }
+    }
+
     std::shared_ptr<Ticket::State> new_ticket(Ticket::State::Kind kind)
     {
+        reclaim_completed();
         auto result = std::make_shared<Ticket::State>(kind);
         result->owner = this;
-        std::erase_if(outstanding, [this](const auto& item) {
-            const cudaError_t status = cudaEventQuery(item->event);
-            if (status == cudaSuccess)
-                return true;
-            if (status == cudaErrorNotReady)
-                return false;
-            valid = false;
-            check(status, "query outstanding ticket");
-            return false;
-        });
         return result;
     }
 
-    void finish_ticket(const std::shared_ptr<Ticket::State>& ticket, DiagnosticRequest diagnostics)
+    std::size_t reserve_input(const std::shared_ptr<Ticket::State>& ticket, std::size_t count)
     {
-        if (diagnostics.logits) {
-            ticket->logits_host.allocate(model->stack.vocab_size);
-            check(cudaMemcpyAsync(ticket->logits_host.data(), logits.data(),
-                      ticket->logits_host.size() * sizeof(float), cudaMemcpyDeviceToHost,
-                      stream.get()),
-                "copy diagnostic logits");
+        const std::size_t begin = ring_cursor.reserve(count);
+        ticket->input_begin = begin;
+        ticket->input_count = count;
+        return begin;
+    }
+
+    void copy_input(std::size_t begin, std::size_t count)
+    {
+        const std::size_t tail = std::min(count, input_ring.size() - begin);
+        copy_bytes(stream, cuda::std::span<const TokenId>(input_ring.data() + begin, tail),
+            cuda::std::span<TokenId>(tokens.data(), tail), "copy input tokens (tail)");
+        if (tail < count)
+            copy_bytes(stream, cuda::std::span<const TokenId>(input_ring.data(), count - tail),
+                cuda::std::span<TokenId>(tokens.data() + tail, count - tail),
+                "copy input tokens (head)");
+    }
+
+    void failed_input_enqueue(const std::shared_ptr<Ticket::State>& ticket)
+    {
+        stream.sync();
+        reclaim_completed();
+        ring_cursor.release(ticket->input_count);
+        ticket->input_count = 0;
+    }
+
+    void finish_ticket(const std::shared_ptr<Ticket::State>& ticket, DiagnosticRequest request)
+    {
+        if (request.logits || request.kv || request.block_outputs)
+            ticket->diagnostic.emplace();
+        if (request.logits) {
+            auto& host = ticket->diagnostic->logits.emplace(
+                stream, cuda::pinned_default_memory_pool(), model->stack.vocab_size, cuda::no_init);
+            copy_bytes(stream, cuda::std::span<const float>(logits.data(), host.size()),
+                cuda::std::span<float>(host.data(), host.size()), "copy diagnostic logits");
         }
-        if (diagnostics.kv) {
-            ticket->kv_host.allocate(model->kv_count);
-            check(cudaMemcpyAsync(ticket->kv_host.data(), kv.data(),
-                      ticket->kv_host.size() * sizeof(float), cudaMemcpyDeviceToHost, stream.get()),
-                "copy diagnostic cache");
+        if (request.kv) {
+            auto& host = ticket->diagnostic->kv.emplace(
+                stream, cuda::pinned_default_memory_pool(), model->kv_count, cuda::no_init);
+            copy_bytes(stream, cuda::std::span<const float>(kv.data(), host.size()),
+                cuda::std::span<float>(host.data(), host.size()), "copy diagnostic cache");
         }
-        if (diagnostics.block_outputs) {
-            ticket->blocks_host.allocate(model->stack.layers * model->hidden_size);
-            check(cudaMemcpyAsync(ticket->blocks_host.data(), block_trace.data(),
-                      ticket->blocks_host.size() * sizeof(float), cudaMemcpyDeviceToHost,
-                      stream.get()),
-                "copy diagnostic blocks");
+        if (request.block_outputs) {
+            auto& host =
+                ticket->diagnostic->blocks.emplace(stream, cuda::pinned_default_memory_pool(),
+                    model->stack.layers * model->hidden_size, cuda::no_init);
+            copy_bytes(stream, cuda::std::span<const float>(block_trace.data(), host.size()),
+                cuda::std::span<float>(host.data(), host.size()), "copy diagnostic blocks");
         }
         check(cudaEventRecord(ticket->event, stream.get()), "record ticket");
         ticket->recorded = true;
@@ -144,26 +211,30 @@ Ticket SequenceContext::enqueue_prefill(
     impl_->require_ready();
     if (token_ids.empty())
         throw std::runtime_error("prefill requires at least one token");
+    if (token_ids.size() > static_cast<std::size_t>(impl_->model->max_context))
+        throw std::runtime_error("sequence context capacity reached");
     impl_->validate_capacity(static_cast<int>(token_ids.size()));
     for (const TokenId id : token_ids)
         impl_->validate_token(id);
     auto ticket = impl_->new_ticket(Ticket::State::Kind::prefill);
-    ticket->start_position = impl_->queued_position;
-    ticket->end_position = impl_->queued_position + static_cast<int>(token_ids.size());
+    const int start_position = impl_->queued_position;
+    ticket->end_position = start_position + static_cast<int>(token_ids.size());
+    const std::size_t begin = impl_->reserve_input(ticket, token_ids.size());
     try {
-        ticket->input_host.allocate(token_ids.size());
-        std::memcpy(ticket->input_host.data(), token_ids.data(), token_ids.size_bytes());
-        check(cudaMemcpyAsync(impl_->tokens.data(), ticket->input_host.data(),
-                  token_ids.size_bytes(), cudaMemcpyHostToDevice, impl_->stream.get()),
-            "copy prefill tokens");
+        const std::size_t tail = std::min(token_ids.size(), impl_->input_ring.size() - begin);
+        std::memcpy(impl_->input_ring.data() + begin, token_ids.data(), tail * sizeof(TokenId));
+        if (tail < token_ids.size())
+            std::memcpy(impl_->input_ring.data(), token_ids.data() + tail,
+                (token_ids.size() - tail) * sizeof(TokenId));
+        impl_->copy_input(begin, token_ids.size());
         for (size_t i = 0; i < token_ids.size(); ++i)
-            impl_->launch(ticket->start_position + static_cast<int>(i), impl_->tokens.data(),
+            impl_->launch(start_position + static_cast<int>(i), impl_->tokens.data(),
                 static_cast<int>(i), diagnostics.block_outputs && i + 1 == token_ids.size());
         impl_->finish_ticket(ticket, diagnostics);
         impl_->queued_position = ticket->end_position;
     } catch (...) {
         impl_->valid = false;
-        impl_->stream.sync();
+        impl_->failed_input_enqueue(ticket);
         throw;
     }
     return Ticket(std::move(ticket));
@@ -175,20 +246,18 @@ Ticket SequenceContext::enqueue_decode(TokenId token_id, DiagnosticRequest diagn
     impl_->validate_token(token_id);
     impl_->validate_capacity(1);
     auto ticket = impl_->new_ticket(Ticket::State::Kind::decode);
-    ticket->start_position = impl_->queued_position;
-    ticket->end_position = impl_->queued_position + 1;
+    const int start_position = impl_->queued_position;
+    ticket->end_position = start_position + 1;
+    const std::size_t begin = impl_->reserve_input(ticket, 1);
     try {
-        ticket->input_host.allocate(1);
-        ticket->input_host[0] = token_id;
-        check(cudaMemcpyAsync(impl_->tokens.data(), ticket->input_host.data(), sizeof(TokenId),
-                  cudaMemcpyHostToDevice, impl_->stream.get()),
-            "copy decode token");
-        impl_->launch(ticket->start_position, impl_->tokens.data(), 0, diagnostics.block_outputs);
+        impl_->input_ring.data()[begin] = token_id;
+        impl_->copy_input(begin, 1);
+        impl_->launch(start_position, impl_->tokens.data(), 0, diagnostics.block_outputs);
         impl_->finish_ticket(ticket, diagnostics);
         impl_->queued_position = ticket->end_position;
     } catch (...) {
         impl_->valid = false;
-        impl_->stream.sync();
+        impl_->failed_input_enqueue(ticket);
         throw;
     }
     return Ticket(std::move(ticket));
@@ -205,32 +274,28 @@ Ticket SequenceContext::enqueue_generate(GenerateOptions options, DiagnosticRequ
     if (options.eos_id)
         impl_->validate_token(*options.eos_id);
     auto ticket = impl_->new_ticket(Ticket::State::Kind::generate);
-    ticket->start_position = impl_->queued_position;
     ticket->end_position = impl_->queued_position + options.max_new_tokens;
-    ticket->requested = options.max_new_tokens;
     try {
-        ticket->output_host.allocate(ticket->requested);
-        ticket->status_host.allocate(2);
+        auto& generation = ticket->generation.emplace(
+            impl_->stream, impl_->queued_position, options.max_new_tokens);
         check(cudaMemsetAsync(impl_->status.data(), 0, 2 * sizeof(int), impl_->stream.get()),
             "reset selection state");
-        ticket->compute_start = std::make_unique<cuda::timed_event>(impl_->stream);
-        ticket->compute_end = std::make_unique<cuda::timed_event>(impl_->stream);
-        ticket->compute_start->record(impl_->stream);
+        generation.compute_start.record(impl_->stream);
         const TokenId eos = options.eos_id.value_or(-1);
-        for (int step = 0; step < ticket->requested; ++step) {
-            detail::enqueue_greedy(impl_->stream, impl_->logits.data(),
+        for (int step = 0; step < generation.requested; ++step) {
+            detail::enqueue_greedy_sampling(impl_->stream, impl_->logits.data(),
                 impl_->model->stack.vocab_size, impl_->generated.data(), impl_->status.data(), step,
                 eos);
-            impl_->launch(ticket->start_position + step, impl_->generated.data(), step,
+            impl_->launch(generation.start_position + step, impl_->generated.data(), step,
                 diagnostics.block_outputs);
         }
-        ticket->compute_end->record(impl_->stream);
-        check(cudaMemcpyAsync(ticket->output_host.data(), impl_->generated.data(),
-                  ticket->requested * sizeof(TokenId), cudaMemcpyDeviceToHost, impl_->stream.get()),
+        generation.compute_end.record(impl_->stream);
+        copy_bytes(impl_->stream,
+            cuda::std::span<const TokenId>(impl_->generated.data(), generation.requested),
+            cuda::std::span<TokenId>(generation.output.data(), generation.requested),
             "copy generated IDs");
-        check(cudaMemcpyAsync(ticket->status_host.data(), impl_->status.data(), 2 * sizeof(int),
-                  cudaMemcpyDeviceToHost, impl_->stream.get()),
-            "copy generation status");
+        copy_bytes(impl_->stream, cuda::std::span<const int>(impl_->status.data(), 2),
+            cuda::std::span<int>(generation.status.data(), 2), "copy generation status");
         impl_->finish_ticket(ticket, diagnostics);
         impl_->queued_position = ticket->end_position;
         if (options.eos_id)
@@ -289,17 +354,17 @@ Completion SequenceContext::wait(const Ticket& ticket)
     }
     Completion result{};
     result.position = ticket.state_->end_position;
-    if (ticket.state_->kind == Ticket::State::Kind::generate) {
+    if (ticket.state_->generation) {
+        const auto& generation = *ticket.state_->generation;
         result.compute_us = cuda::std::chrono::duration<double, cuda::std::micro>(
-            *ticket.state_->compute_end - *ticket.state_->compute_start)
+            generation.compute_end - generation.compute_start)
                                 .count();
-        const int count = ticket.state_->status_host[0];
-        if (count < 0 || count > ticket.state_->requested)
+        const int count = generation.status.data()[0];
+        if (count < 0 || count > generation.requested)
             throw std::runtime_error("invalid generated token count");
-        result.generated.assign(
-            ticket.state_->output_host.data(), ticket.state_->output_host.data() + count);
-        result.position = ticket.state_->start_position + count;
-        result.stop_reason = ticket.state_->status_host[1] ? StopReason::eos : StopReason::limit;
+        result.generated.assign(generation.output.data(), generation.output.data() + count);
+        result.position = generation.start_position + count;
+        result.stop_reason = generation.status.data()[1] ? StopReason::eos : StopReason::limit;
         if (impl_->pending_position == ticket.state_) {
             impl_->queued_position = result.position;
             impl_->pending_position.reset();
@@ -312,15 +377,17 @@ Diagnostics SequenceContext::collect(const Ticket& ticket)
 {
     wait(ticket);
     Diagnostics result;
-    if (ticket.state_->logits_host.data())
-        result.logits.assign(ticket.state_->logits_host.data(),
-            ticket.state_->logits_host.data() + ticket.state_->logits_host.size());
-    if (ticket.state_->kv_host.data())
-        result.kv.assign(ticket.state_->kv_host.data(),
-            ticket.state_->kv_host.data() + ticket.state_->kv_host.size());
-    if (ticket.state_->blocks_host.data())
-        result.block_outputs.assign(ticket.state_->blocks_host.data(),
-            ticket.state_->blocks_host.data() + ticket.state_->blocks_host.size());
+    if (ticket.state_->diagnostic) {
+        const auto& diagnostic = *ticket.state_->diagnostic;
+        if (diagnostic.logits)
+            result.logits.assign(
+                diagnostic.logits->data(), diagnostic.logits->data() + diagnostic.logits->size());
+        if (diagnostic.kv)
+            result.kv.assign(diagnostic.kv->data(), diagnostic.kv->data() + diagnostic.kv->size());
+        if (diagnostic.blocks)
+            result.block_outputs.assign(
+                diagnostic.blocks->data(), diagnostic.blocks->data() + diagnostic.blocks->size());
+    }
     return result;
 }
 

@@ -5,18 +5,34 @@
 #include <cuda/__event/timed_event.h>
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
+#include <cuda/algorithm>
 #include <cuda/buffer>
 #include <cuda/memory_pool>
+#include <cuda/std/span>
 #include <cuda/stream>
 
 #include <algorithm>
 #include <chrono>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <vector>
 
 namespace tileinfer {
 using detail::check;
+
+namespace {
+void copy_floats(cuda::stream_ref stream, const float* source, float* destination,
+    std::size_t count, const char* stage)
+{
+    try {
+        cuda::copy_bytes(stream, cuda::std::span<const float>(source, count),
+            cuda::std::span<float>(destination, count));
+    } catch (const std::exception& error) {
+        throw std::runtime_error(std::string(stage) + ": " + error.what());
+    }
+}
+} // namespace
 
 struct DiagnosticContext::Impl
 {
@@ -110,14 +126,12 @@ std::vector<float> DiagnosticContext::run_hidden(const std::vector<float>& hidde
         throw std::runtime_error("hidden input has wrong size");
     const int p = begin_token();
     try {
-        check(cudaMemcpyAsync(impl_->input.data(), hidden.data(), hidden.size() * sizeof(float),
-                  cudaMemcpyHostToDevice, impl_->stream.get()),
-            "copy hidden input");
+        copy_floats(
+            impl_->stream, hidden.data(), impl_->input.data(), hidden.size(), "copy hidden input");
         impl_->launch(p, -1);
         impl_->stream.sync();
         std::vector<float> result(impl_->model.hidden_size);
-        check(cudaMemcpyAsync(result.data(), impl_->output.data(), result.size() * sizeof(float),
-                  cudaMemcpyDeviceToHost, impl_->stream.get()),
+        copy_floats(impl_->stream, impl_->output.data(), result.data(), result.size(),
             "copy hidden output");
         impl_->stream.sync();
         complete_token(true);
@@ -139,9 +153,8 @@ std::vector<float> DiagnosticContext::run_token(TokenId token_id)
         impl_->launch(p, token_id);
         impl_->stream.sync();
         std::vector<float> result(impl_->model.stack.vocab_size);
-        check(cudaMemcpyAsync(result.data(), impl_->logits.data(), result.size() * sizeof(float),
-                  cudaMemcpyDeviceToHost, impl_->stream.get()),
-            "copy logits");
+        copy_floats(
+            impl_->stream, impl_->logits.data(), result.data(), result.size(), "copy logits");
         impl_->stream.sync();
         complete_token(true);
         return result;
@@ -191,8 +204,7 @@ BenchmarkResult DiagnosticContext::benchmark_token(
         if (profile)
             check(cudaProfilerStop(), "stop profiler");
         std::vector<float> logits(impl_->model.stack.vocab_size);
-        check(cudaMemcpyAsync(logits.data(), impl_->logits.data(), logits.size() * sizeof(float),
-                  cudaMemcpyDeviceToHost, impl_->stream.get()),
+        copy_floats(impl_->stream, impl_->logits.data(), logits.data(), logits.size(),
             "copy benchmark logits");
         impl_->stream.sync();
         const auto top = std::max_element(logits.begin(), logits.end());
@@ -214,9 +226,8 @@ std::vector<float> DiagnosticContext::block_trace_snapshot() const
         throw std::runtime_error("block trace is not enabled");
     impl_->stream.sync();
     std::vector<float> result(impl_->block_trace.size());
-    check(cudaMemcpyAsync(result.data(), impl_->block_trace.data(), result.size() * sizeof(float),
-              cudaMemcpyDeviceToHost, impl_->stream.get()),
-        "copy block trace");
+    copy_floats(
+        impl_->stream, impl_->block_trace.data(), result.data(), result.size(), "copy block trace");
     impl_->stream.sync();
     return result;
 }
@@ -225,9 +236,7 @@ std::vector<float> DiagnosticContext::scratch_snapshot() const
 {
     impl_->stream.sync();
     std::vector<float> result(impl_->scratch.size());
-    check(cudaMemcpyAsync(result.data(), impl_->scratch.data(), result.size() * sizeof(float),
-              cudaMemcpyDeviceToHost, impl_->stream.get()),
-        "copy scratch");
+    copy_floats(impl_->stream, impl_->scratch.data(), result.data(), result.size(), "copy scratch");
     impl_->stream.sync();
     return result;
 }
@@ -236,9 +245,7 @@ std::vector<float> DiagnosticContext::kv_snapshot() const
 {
     impl_->stream.sync();
     std::vector<float> result(impl_->kv.size());
-    check(cudaMemcpyAsync(result.data(), impl_->kv.data(), result.size() * sizeof(float),
-              cudaMemcpyDeviceToHost, impl_->stream.get()),
-        "copy kv");
+    copy_floats(impl_->stream, impl_->kv.data(), result.data(), result.size(), "copy kv");
     impl_->stream.sync();
     return result;
 }
