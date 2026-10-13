@@ -113,8 +113,8 @@ organization does not introduce expiration or change the public API.
   destination has enough space. Keep the source and destination allocations
   alive until the stream-ordered copy completes.
 - `cuda::copy_bytes` reports failures with C++ exceptions instead of a
-  `cudaError_t`. Preserve useful operation context when reporting errors and
-  keep the existing invalid-context handling for failed enqueues. A pinned
+  `cudaError_t`. Let them propagate to the existing invalid-context handling
+  for failed enqueues. A pinned
   host source is necessary for the asynchronous input path; copies involving
   pageable `std::vector` storage in model setup or diagnostics may block.
   Do not use a source-access configuration that changes the ring's

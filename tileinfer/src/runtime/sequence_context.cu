@@ -17,7 +17,6 @@
 #include <limits>
 #include <memory>
 #include <stdexcept>
-#include <string>
 #include <utility>
 #include <vector>
 
@@ -25,16 +24,6 @@ namespace tileinfer {
 using detail::check;
 
 namespace {
-template <typename Source, typename Destination>
-void copy_bytes(cuda::stream_ref stream, Source source, Destination destination, const char* stage)
-{
-    try {
-        cuda::copy_bytes(stream, source, destination);
-    } catch (const std::exception& error) {
-        throw std::runtime_error(std::string(stage) + ": " + error.what());
-    }
-}
-
 std::size_t input_ring_size(int max_context)
 {
     // One maximum prompt and 64 additional queued one-token inputs.
@@ -116,7 +105,8 @@ struct SequenceContext::Impl
             stream, model->view(), buffers, position, {-1, token_ids, token_index});
     }
 
-    // Stream order makes the first unfinished event the ring's reclamation boundary.
+    // Stream order makes the first unfinished event the ring's reclamation
+    // boundary.
     void reclaim_completed()
     {
         while (!outstanding.empty()) {
@@ -152,12 +142,12 @@ struct SequenceContext::Impl
     void copy_input(std::size_t begin, std::size_t count)
     {
         const std::size_t tail = std::min(count, input_ring.size() - begin);
-        copy_bytes(stream, cuda::std::span<const TokenId>(input_ring.data() + begin, tail),
-            cuda::std::span<TokenId>(tokens.data(), tail), "copy input tokens (tail)");
+        cuda::copy_bytes(
+            stream, cuda::std::span<const TokenId>(input_ring.data() + begin, tail), tokens);
         if (tail < count)
-            copy_bytes(stream, cuda::std::span<const TokenId>(input_ring.data(), count - tail),
-                cuda::std::span<TokenId>(tokens.data() + tail, count - tail),
-                "copy input tokens (head)");
+            cuda::copy_bytes(stream,
+                cuda::std::span<const TokenId>(input_ring.data(), count - tail),
+                cuda::std::span<TokenId>(tokens.data() + tail, count - tail));
     }
 
     void failed_input_enqueue(const std::shared_ptr<Ticket::State>& ticket)
@@ -175,21 +165,18 @@ struct SequenceContext::Impl
         if (request.logits) {
             auto& host = ticket->diagnostic->logits.emplace(
                 stream, cuda::pinned_default_memory_pool(), model->stack.vocab_size, cuda::no_init);
-            copy_bytes(stream, cuda::std::span<const float>(logits.data(), host.size()),
-                cuda::std::span<float>(host.data(), host.size()), "copy diagnostic logits");
+            cuda::copy_bytes(stream, logits, host);
         }
         if (request.kv) {
             auto& host = ticket->diagnostic->kv.emplace(
                 stream, cuda::pinned_default_memory_pool(), model->kv_count, cuda::no_init);
-            copy_bytes(stream, cuda::std::span<const float>(kv.data(), host.size()),
-                cuda::std::span<float>(host.data(), host.size()), "copy diagnostic cache");
+            cuda::copy_bytes(stream, kv, host);
         }
         if (request.block_outputs) {
             auto& host =
                 ticket->diagnostic->blocks.emplace(stream, cuda::pinned_default_memory_pool(),
                     model->stack.layers * model->hidden_size, cuda::no_init);
-            copy_bytes(stream, cuda::std::span<const float>(block_trace.data(), host.size()),
-                cuda::std::span<float>(host.data(), host.size()), "copy diagnostic blocks");
+            cuda::copy_bytes(stream, block_trace, host);
         }
         check(cudaEventRecord(ticket->event, stream.get()), "record ticket");
         ticket->recorded = true;
@@ -290,12 +277,10 @@ Ticket SequenceContext::enqueue_generate(GenerateOptions options, DiagnosticRequ
                 diagnostics.block_outputs);
         }
         generation.compute_end.record(impl_->stream);
-        copy_bytes(impl_->stream,
+        cuda::copy_bytes(impl_->stream,
             cuda::std::span<const TokenId>(impl_->generated.data(), generation.requested),
-            cuda::std::span<TokenId>(generation.output.data(), generation.requested),
-            "copy generated IDs");
-        copy_bytes(impl_->stream, cuda::std::span<const int>(impl_->status.data(), 2),
-            cuda::std::span<int>(generation.status.data(), 2), "copy generation status");
+            generation.output);
+        cuda::copy_bytes(impl_->stream, impl_->status, generation.status);
         impl_->finish_ticket(ticket, diagnostics);
         impl_->queued_position = ticket->end_position;
         if (options.eos_id)

@@ -4,11 +4,9 @@
 
 #include <cuda_runtime.h>
 #include <cuda/algorithm>
-#include <cuda/std/span>
 
 #include <memory>
 #include <stdexcept>
-#include <string>
 
 namespace tileinfer::detail {
 
@@ -31,21 +29,10 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
     , weight_dtype(plan.weight_dtype)
 {
     stream.sync();
-    auto copy = [this](auto source, auto destination, const char* stage) {
-        try {
-            cuda::copy_bytes(stream, source, destination);
-        } catch (const std::exception& error) {
-            throw std::runtime_error(std::string(stage) + ": " + error.what());
-        }
-    };
-    copy(cuda::std::span<const std::uint8_t>(plan.weights.data(), plan.weights.size()),
-        cuda::std::span<std::uint8_t>(weights.data(), weights.size()), "copy model weights");
-    copy(cuda::std::span<const TaskRecord>(plan.tasks.data(), plan.tasks.size()),
-        cuda::std::span<TaskRecord>(tasks.data(), tasks.size()), "copy model tasks");
-    copy(cuda::std::span<const WorkerTaskRange>(plan.ranges.data(), plan.ranges.size()),
-        cuda::std::span<WorkerTaskRange>(ranges.data(), ranges.size()), "copy model ranges");
-    copy(cuda::std::span<const TensorRecord>(plan.tensors.data(), plan.tensors.size()),
-        cuda::std::span<TensorRecord>(tensors.data(), tensors.size()), "copy model tensors");
+    cuda::copy_bytes(stream, plan.weights, weights);
+    cuda::copy_bytes(stream, plan.tasks, tasks);
+    cuda::copy_bytes(stream, plan.ranges, ranges);
+    cuda::copy_bytes(stream, plan.tensors, tensors);
     stream.sync();
 }
 

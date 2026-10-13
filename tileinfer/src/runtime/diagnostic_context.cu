@@ -8,31 +8,16 @@
 #include <cuda/algorithm>
 #include <cuda/buffer>
 #include <cuda/memory_pool>
-#include <cuda/std/span>
 #include <cuda/stream>
 
 #include <algorithm>
 #include <chrono>
 #include <stdexcept>
-#include <string>
 #include <string_view>
 #include <vector>
 
 namespace tileinfer {
 using detail::check;
-
-namespace {
-void copy_floats(cuda::stream_ref stream, const float* source, float* destination,
-    std::size_t count, const char* stage)
-{
-    try {
-        cuda::copy_bytes(stream, cuda::std::span<const float>(source, count),
-            cuda::std::span<float>(destination, count));
-    } catch (const std::exception& error) {
-        throw std::runtime_error(std::string(stage) + ": " + error.what());
-    }
-}
-} // namespace
 
 struct DiagnosticContext::Impl
 {
@@ -126,13 +111,11 @@ std::vector<float> DiagnosticContext::run_hidden(const std::vector<float>& hidde
         throw std::runtime_error("hidden input has wrong size");
     const int p = begin_token();
     try {
-        copy_floats(
-            impl_->stream, hidden.data(), impl_->input.data(), hidden.size(), "copy hidden input");
+        cuda::copy_bytes(impl_->stream, hidden, impl_->input);
         impl_->launch(p, -1);
         impl_->stream.sync();
         std::vector<float> result(impl_->model.hidden_size);
-        copy_floats(impl_->stream, impl_->output.data(), result.data(), result.size(),
-            "copy hidden output");
+        cuda::copy_bytes(impl_->stream, impl_->output, result);
         impl_->stream.sync();
         complete_token(true);
         return result;
@@ -153,8 +136,7 @@ std::vector<float> DiagnosticContext::run_token(TokenId token_id)
         impl_->launch(p, token_id);
         impl_->stream.sync();
         std::vector<float> result(impl_->model.stack.vocab_size);
-        copy_floats(
-            impl_->stream, impl_->logits.data(), result.data(), result.size(), "copy logits");
+        cuda::copy_bytes(impl_->stream, impl_->logits, result);
         impl_->stream.sync();
         complete_token(true);
         return result;
@@ -204,8 +186,7 @@ BenchmarkResult DiagnosticContext::benchmark_token(
         if (profile)
             check(cudaProfilerStop(), "stop profiler");
         std::vector<float> logits(impl_->model.stack.vocab_size);
-        copy_floats(impl_->stream, impl_->logits.data(), logits.data(), logits.size(),
-            "copy benchmark logits");
+        cuda::copy_bytes(impl_->stream, impl_->logits, logits);
         impl_->stream.sync();
         const auto top = std::max_element(logits.begin(), logits.end());
         return {std::move(samples), static_cast<int>(top - logits.begin()), *top};
@@ -226,8 +207,7 @@ std::vector<float> DiagnosticContext::block_trace_snapshot() const
         throw std::runtime_error("block trace is not enabled");
     impl_->stream.sync();
     std::vector<float> result(impl_->block_trace.size());
-    copy_floats(
-        impl_->stream, impl_->block_trace.data(), result.data(), result.size(), "copy block trace");
+    cuda::copy_bytes(impl_->stream, impl_->block_trace, result);
     impl_->stream.sync();
     return result;
 }
@@ -236,7 +216,7 @@ std::vector<float> DiagnosticContext::scratch_snapshot() const
 {
     impl_->stream.sync();
     std::vector<float> result(impl_->scratch.size());
-    copy_floats(impl_->stream, impl_->scratch.data(), result.data(), result.size(), "copy scratch");
+    cuda::copy_bytes(impl_->stream, impl_->scratch, result);
     impl_->stream.sync();
     return result;
 }
@@ -245,7 +225,7 @@ std::vector<float> DiagnosticContext::kv_snapshot() const
 {
     impl_->stream.sync();
     std::vector<float> result(impl_->kv.size());
-    copy_floats(impl_->stream, impl_->kv.data(), result.data(), result.size(), "copy kv");
+    cuda::copy_bytes(impl_->stream, impl_->kv, result);
     impl_->stream.sync();
     return result;
 }
