@@ -3,8 +3,8 @@
 TileInfer validates version-3 float32 or BF16-weight decoder packages, as well
 as version-2 float32 packages. It executes either one block from a hidden
 vector or a full stack from a token ID. The compiled cooperative worker uses
-one logical block per SM. A full-stack call performs embedding lookup, repeats
-the validated nine-wave block schedule, then computes
+one logical block per SM with 1024 threads per block. A full-stack call performs
+embedding lookup, repeats the validated nine-wave block schedule, then computes
 final RMSNorm and vocabulary logits in one launch. Block scratch is reused
 across layers; each layer has its own K/V cache and packed weight stride.
 The cooperative schedule and barriers are in `src/runtime/worker_kernel.cu`;
@@ -89,10 +89,10 @@ contain byte offsets and strides, never addresses.
 
 The loader validates the supplied tasks and schedule independently of Python's
 canonical planning policy. Legal worker reassignment and task-list reordering
-are accepted; output coverage, typed operands, producer dependencies (including
-transitive dependencies), wave order, and complete worker lists remain checked.
-`LoadedPlan` can only be constructed by `load_plan`; callers inspect immutable
-metadata with `plan.data()`.
+are accepted; output coverage, typed operands, producer wave order, and complete
+worker lists remain checked. Python validates graph edges and planning cost
+metadata. `LoadedPlan` is a plain aggregate populated by `load_plan()` for trusted
+C++ callers.
 
 GEMV and logits share a warp-per-row CUB reduction. Attention reduces each
 query/key score once per head and uses online softmax with constant shared
@@ -101,10 +101,29 @@ computed and checked once during package loading. Block tracing allocates its
 device buffer on first use. Normalization shares one helper; its reduction
 order remains unchanged.
 
-The current worker fingerprint differs from the earlier serial worker.
-Regenerate version-3 packages using a fresh probe from this executable.
-Version-2 float32 package compatibility remains available. No dependency or
-CMake-preset changes are needed.
+The block size was selected using the pinned Llama 3.2 1B checkpoint on the RTX
+3050. It gives each worker 32 row warps instead of four, improving overlap of
+weight loads. Use `--tile-rows 64` for the measured checkpoint configuration;
+the offline `auto` policy is a schedule heuristic, not a measured tuner.
+The compiled worker is reprobed for both weight types, and the CCCL launch gate
+uses the same block size.
+
+Regenerate version-3 packages using a fresh probe from this executable: the
+worker fingerprint includes the block size. Version-2 float32 packages retain
+their legacy 128-thread target metadata and execute with the current worker's
+block size and queried occupancy. No dependency or CMake-preset changes are
+needed.
+
+The October 13 checkpoint measurement averaged **16.017 ms per generated token**
+(62.43 tokens/s), compared with 68.398 ms for the previous 128-thread worker.
+Both used BF16 weights with float32 arithmetic/K/V, the same six-token prompt,
+16 generated tokens, three warmup runs, and seven measured runs. The CUDA-event
+interval includes GPU greedy selection and decoding; model loading, prefill,
+and readback are excluded. The old worker used its selected 16-row tile; the
+new worker selected 64 rows from 16/32/64 across fixed contexts of 1/64/256.
+Those fixed-context timings were 15.447/17.454/23.655 ms for the selected tile.
+No GPU clock lock was applied. Raw protocols, samples, reference comparisons,
+and profiler counters are in `runs/tileinfer-focus-2026-10-13/` on tux.
 
 ## Additional verification
 

@@ -20,6 +20,6 @@ struct PlanShape
 
 // Checks the supplied program without choosing tiles, waves, or workers.
 void validate_program(
-    const nlohmann::json& document, const PlanShape& shape, int workers, PlanData& result);
+    const nlohmann::json& document, const PlanShape& shape, int workers, LoadedPlan& result);
 
 } // namespace tileinfer::detail

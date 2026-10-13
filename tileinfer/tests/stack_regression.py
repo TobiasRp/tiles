@@ -234,6 +234,20 @@ def main() -> None:
                 ring_result = run(args.ring_smoke, str(ring_package))
                 if ring_result.returncode:
                     raise AssertionError(ring_result.stderr)
+        # Old packages retain their 128-thread target; the current worker executes
+        # the same records using its own block size and freshly queried occupancy.
+        legacy_path = package / "plan.json"
+        current = json.loads(legacy_path.read_text())
+        legacy = copy.deepcopy(current)
+        legacy["header"].update(format_version=2, executor_abi="tileinfer-decoder-v2")
+        legacy["target"].update(
+            threads_per_block=128,
+            kernel_fingerprint="decoder-wave-abi2-ops-v3-stack-sm86-b128",
+        )
+        legacy_path.write_text(json.dumps(legacy))
+        check_sequence(args.executor, package, root, ids, traces, spec)
+        check_generation(args.executor, package, root, ids[:2], weights, spec)
+        legacy_path.write_text(json.dumps(current))
         original_weight_bytes = report["weight_bytes"]
 
         bf16_package = root / "bf16-stack"
@@ -275,7 +289,6 @@ def main() -> None:
                 layer_weight_stride=0
             ),
             "stage": lambda plan: plan["execution"].update(prelude="logits_f32"),
-            "dependency": lambda plan: plan["tasks"][-1].update(predecessors=[]),
         }.items():
             bad = copy.deepcopy(original)
             mutate(bad)

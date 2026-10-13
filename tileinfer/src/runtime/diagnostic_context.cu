@@ -1,3 +1,4 @@
+#include "detail/cleanup.hpp"
 #include "detail/cuda_check.hpp"
 #include "detail/uploaded_plan.cuh"
 #include "diagnostic.hpp"
@@ -46,6 +47,11 @@ struct DiagnosticContext::Impl
         , logits(stream, pool, std::max(1, model.stack.vocab_size), cuda::no_init)
     {
         stream.sync();
+    }
+
+    ~Impl()
+    {
+        detail::cleanup_noexcept([&] { stream.sync(); });
     }
 
     void launch(int position, TokenId token_id)
@@ -110,17 +116,18 @@ std::vector<float> DiagnosticContext::run_hidden(const std::vector<float>& hidde
         throw std::runtime_error("stack package requires a token ID");
     if (hidden.size() != static_cast<size_t>(impl_->model.hidden_size))
         throw std::runtime_error("hidden input has wrong size");
+    std::vector<float> result(impl_->model.hidden_size);
     const int p = begin_token();
     try {
         cuda::copy_bytes(impl_->stream, hidden, impl_->input);
         impl_->launch(p, -1);
         impl_->stream.sync();
-        std::vector<float> result(impl_->model.hidden_size);
         cuda::copy_bytes(impl_->stream, impl_->output, result);
         impl_->stream.sync();
         complete_token(true);
         return result;
     } catch (...) {
+        detail::cleanup_noexcept([&] { impl_->stream.sync(); });
         complete_token(false);
         throw;
     }
@@ -132,16 +139,17 @@ std::vector<float> DiagnosticContext::run_token(TokenId token_id)
         throw std::runtime_error("block package requires a hidden vector");
     if (token_id < 0 || token_id >= impl_->model.stack.vocab_size)
         throw std::runtime_error("token ID outside vocabulary");
+    std::vector<float> result(impl_->model.stack.vocab_size);
     const int p = begin_token();
     try {
         impl_->launch(p, token_id);
         impl_->stream.sync();
-        std::vector<float> result(impl_->model.stack.vocab_size);
         cuda::copy_bytes(impl_->stream, impl_->logits, result);
         impl_->stream.sync();
         complete_token(true);
         return result;
     } catch (...) {
+        detail::cleanup_noexcept([&] { impl_->stream.sync(); });
         complete_token(false);
         throw;
     }

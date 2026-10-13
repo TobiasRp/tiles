@@ -5,8 +5,6 @@
 #include <algorithm>
 #include <array>
 #include <limits>
-#include <numeric>
-#include <set>
 #include <stdexcept>
 #include <tuple>
 #include <vector>
@@ -46,7 +44,6 @@ struct CheckedTask
     int wave;
     int worker;
     std::int64_t work;
-    std::set<int> predecessors;
     std::vector<Region> reads;
     std::vector<Region> writes;
 };
@@ -68,15 +65,11 @@ int width(Id tensor, const PlanShape& s)
     }
 }
 
-CheckedTask check_task(const json& task, const PlanShape& s, int workers, int waves, int count)
+CheckedTask check_task(const json& task, const PlanShape& s, int workers, int waves)
 {
     CheckedTask result{};
     result.wave = index(task.at("wave"), waves);
     result.worker = index(task.at("worker"), workers);
-    require(task.at("predecessors").is_array(), "invalid predecessor list");
-    for (const auto& predecessor : task.at("predecessors"))
-        require(
-            result.predecessors.insert(index(predecessor, count)).second, "duplicate predecessor");
     const auto& op = task.at("operands");
     const auto code = task.at("opcode").get<std::string>();
     json expected;
@@ -203,15 +196,13 @@ CheckedTask check_task(const json& task, const PlanShape& s, int workers, int wa
     for (const auto& [key, value] : expected.items())
         if (value.is_number_integer())
             require(op.at(key).is_number_integer(), "operand must be an integer");
-    require(task.at("estimated_work").is_number_integer(), "work estimate must be an integer");
     require(op == expected && task.at("output") == outputs,
         "invalid task operands or output ownership");
-    require(task.at("estimated_work") == result.work, "invalid task work estimate");
     return result;
 }
 } // namespace
 
-void validate_program(const json& document, const PlanShape& s, int workers, PlanData& result)
+void validate_program(const json& document, const PlanShape& s, int workers, LoadedPlan& result)
 {
     const auto& input = document.at("tasks");
     const auto& waves = document.at("waves");
@@ -231,7 +222,7 @@ void validate_program(const json& document, const PlanShape& s, int workers, Pla
         const int id = index(task.at("id"), count);
         require(!seen[id], "duplicate task ID");
         seen[id] = true;
-        tasks[id] = check_task(task, s, workers, result.wave_count, count);
+        tasks[id] = check_task(task, s, workers, result.wave_count);
     }
     struct Writer
     {
@@ -255,19 +246,8 @@ void validate_program(const json& document, const PlanShape& s, int workers, Pla
         }
         require(end == width(tensor, s), "incomplete output ownership");
     }
-    std::vector<int> order(count);
-    std::iota(order.begin(), order.end(), 0);
-    std::sort(
-        order.begin(), order.end(), [&](int a, int b) { return tasks[a].wave < tasks[b].wave; });
-    std::vector<std::set<int>> ancestors(count);
-    for (int id : order) {
-        for (int predecessor : tasks[id].predecessors) {
-            require(
-                tasks[predecessor].wave < tasks[id].wave, "dependency is not in an earlier wave");
-            ancestors[id].insert(predecessor);
-            ancestors[id].insert(ancestors[predecessor].begin(), ancestors[predecessor].end());
-        }
-    }
+    // Grid barriers enforce data dependencies. Graph edges and cost metadata
+    // belong to the Python planner; the executor checks actual read/write order.
     for (int id = 0; id < count; ++id) {
         const auto& task = tasks[id];
         for (const auto region : task.reads) {
@@ -277,9 +257,7 @@ void validate_program(const json& document, const PlanShape& s, int workers, Pla
                 if (writer.begin >= region.end)
                     break;
                 if (writer.end > region.begin)
-                    require(
-                        ancestors[id].contains(writer.task) && tasks[writer.task].wave < task.wave,
-                        "missing producer dependency or read before write");
+                    require(tasks[writer.task].wave < task.wave, "read before producer wave");
             }
         }
     }
@@ -308,10 +286,6 @@ void validate_program(const json& document, const PlanShape& s, int workers, Pla
             result.ranges.push_back({static_cast<std::uint32_t>(begin),
                 static_cast<std::uint32_t>(result.tasks.size() - begin)});
         }
-        require(entry.at("estimated_work").is_array(), "invalid worker work estimate");
-        for (const auto& load : entry.at("estimated_work"))
-            require(load.is_number_integer(), "worker work estimate must be an integer");
-        require(entry.at("estimated_work") == loads, "invalid worker work estimate");
         result.worker_loads.push_back(std::move(loads));
     }
     require(std::all_of(seen.begin(), seen.end(), [](bool value) { return value; }),

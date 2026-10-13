@@ -27,6 +27,15 @@ def rearrange(plan: dict) -> None:
     plan["tasks"].reverse()
 
 
+def delay_producer(plan: dict) -> None:
+    """Keep schedule membership valid but race the input normalization with GEMV."""
+    task = plan["tasks"][0]
+    worker = task["worker"]
+    plan["waves"][task["wave"]]["workers"][worker].remove(task["id"])
+    task["wave"] += 1
+    plan["waves"][task["wave"]]["workers"][worker].append(task["id"])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--loader", type=Path, required=True)
@@ -74,6 +83,15 @@ def main() -> None:
                     cases += 1
 
                 check(original, True, "canonical")
+                execution_only = copy.deepcopy(original)
+                for task in execution_only["tasks"]:
+                    task.pop("predecessors")
+                    task.pop("estimated_work")
+                for wave in execution_only["waves"]:
+                    wave.pop("estimated_work")
+                check(
+                    execution_only, True, "planner metadata is not needed for execution"
+                )
                 legal = copy.deepcopy(original)
                 rearrange(legal)
                 check(legal, True, "alternative assignment and ordering")
@@ -87,8 +105,10 @@ def main() -> None:
                     legacy["target"]["kernel_fingerprint"] = (
                         "decoder-wave-abi2-ops-v3-stack-sm86-b128"
                     )
+                    legacy["target"]["threads_per_block"] = 128
                     check(legacy, True, "version 2 compatibility")
                 mutations = {
+                    "read before producer": delay_producer,
                     "derived frequency overflow": lambda p: p["model"].update(
                         rope_factor=1e-45
                     ),
@@ -100,7 +120,6 @@ def main() -> None:
                     "extra operand": lambda p: p["tasks"][0]["operands"].update(
                         extra=0
                     ),
-                    "dependency": lambda p: p["tasks"][-1].update(predecessors=[]),
                     "ID": lambda p: p["tasks"][1].update(id=0),
                     "wave": lambda p: p["tasks"][-1].update(wave=0),
                     "overlap": lambda p: p["tasks"].append(

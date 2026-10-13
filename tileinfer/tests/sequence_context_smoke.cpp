@@ -20,8 +20,7 @@ int main(int argc, char** argv)
     try {
         require(argc == 2, "expected a stack package path");
         const auto plan = tileinfer::load_plan(argv[1], tileinfer::describe_target());
-        require(plan.data().stack.full_stack && plan.data().max_context >= 5,
-            "expected a small stack package");
+        require(plan.stack.full_stack && plan.max_context >= 5, "expected a small stack package");
         tileinfer::DecoderModel model(plan);
         const std::array<tileinfer::TokenId, 2> prompt{0, 1};
         const std::array<tileinfer::TokenId, 2> other_prompt{1, 0};

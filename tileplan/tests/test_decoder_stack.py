@@ -35,7 +35,7 @@ OPCODES = [
 ]
 
 
-def target() -> dict:
+def target(threads: int = 128) -> dict:
     return normalize(
         {
             "device": {
@@ -48,7 +48,7 @@ def target() -> dict:
                 "abi": ABI,
                 "opcodes": OPCODES,
                 "active_blocks_per_sm": 2,
-                "threads_per_block": 128,
+                "threads_per_block": threads,
                 "fingerprint": "fixture-stack-kernel",
             },
         }
@@ -81,7 +81,8 @@ class DecoderStackTest(unittest.TestCase):
     def test_compact_package_alias_and_validation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "target.json").write_text(json.dumps(target()))
+            compiled_target = target(256)
+            (root / "target.json").write_text(json.dumps(compiled_target))
             package = root / "package"
             build_stack(
                 FIXTURE / "model.json",
@@ -91,6 +92,7 @@ class DecoderStackTest(unittest.TestCase):
                 package,
             )
             plan, packed, _ = read_package(package)
+            self.assertEqual(plan["target"]["threads_per_block"], 256)
             self.assertEqual(plan["model"]["layers"], 3)
             self.assertEqual(plan["execution"]["repeat_block_count"], 3)
             self.assertEqual(plan["storage"]["scratch_bytes"], 1664)
@@ -107,6 +109,8 @@ class DecoderStackTest(unittest.TestCase):
             for mutate in (
                 lambda item: item["storage"]["stack"].update(layer_kv_stride=0),
                 lambda item: item["execution"].update(repeat_block_count=2),
+                lambda item: item["target"].update(threads_per_block=0),
+                lambda item: item["target"].update(threads_per_block=True),
                 lambda item: item["tasks"][-1].update(predecessors=[]),
             ):
                 bad = copy.deepcopy(plan)

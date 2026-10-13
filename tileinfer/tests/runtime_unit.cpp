@@ -1,8 +1,10 @@
+#include "detail/cleanup.hpp"
 #include "detail/input_ring_cursor.hpp"
 #include "runtime.hpp"
 
 #include <cstdint>
 #include <stdexcept>
+#include <string_view>
 #include <type_traits>
 
 static_assert(static_cast<std::uint32_t>(tileinfer::Opcode::rms_norm_f32) == 1);
@@ -23,6 +25,21 @@ static_assert(std::is_trivially_copyable_v<tileinfer::StackConfig>);
 
 int main()
 {
+    // A failed cleanup during unwinding must preserve the original failure.
+    struct Owner
+    {
+        ~Owner()
+        {
+            tileinfer::detail::cleanup_noexcept([] { throw std::runtime_error("cleanup"); });
+        }
+    };
+    try {
+        Owner owner;
+        throw std::runtime_error("original");
+    } catch (const std::runtime_error& error) {
+        if (std::string_view(error.what()) != "original")
+            return 8;
+    }
     tileinfer::detail::InputRingCursor ring(8);
     if (ring.reserve(3) != 0 || ring.reserve(3) != 3)
         return 3;

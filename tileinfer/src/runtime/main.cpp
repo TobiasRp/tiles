@@ -44,23 +44,20 @@ json target_json(const tileinfer::Target& t)
 
 json inspect(const tileinfer::LoadedPlan& plan)
 {
-    return {{"plan_sha256", plan.data().plan_sha256},
-        {"weights_sha256", plan.data().weights_sha256},
+    return {{"plan_sha256", plan.plan_sha256}, {"weights_sha256", plan.weights_sha256},
         {"model",
-            {{"hidden_size", plan.data().hidden_size},
-                {"intermediate_size", plan.data().intermediate_size},
-                {"num_attention_heads", plan.data().query_heads},
-                {"num_key_value_heads", plan.data().kv_heads}, {"head_dim", plan.data().head_dim},
-                {"max_context", plan.data().max_context}}},
-        {"workers", plan.data().workers}, {"wave_count", plan.data().wave_count},
-        {"task_count", plan.data().tasks.size()}, {"worker_loads", plan.data().worker_loads},
-        {"scratch_bytes", plan.data().scratch_bytes}, {"kv_bytes", plan.data().kv_bytes},
-        {"weight_bytes", plan.data().weights.size()},
+            {{"hidden_size", plan.hidden_size}, {"intermediate_size", plan.intermediate_size},
+                {"num_attention_heads", plan.query_heads}, {"num_key_value_heads", plan.kv_heads},
+                {"head_dim", plan.head_dim}, {"max_context", plan.max_context}}},
+        {"workers", plan.workers}, {"wave_count", plan.wave_count},
+        {"task_count", plan.tasks.size()}, {"worker_loads", plan.worker_loads},
+        {"scratch_bytes", plan.scratch_bytes}, {"kv_bytes", plan.kv_bytes},
+        {"weight_bytes", plan.weights.size()},
         {"weight_dtype",
-            plan.data().weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
+            plan.weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
         {"model_kind",
-            plan.data().stack.full_stack ? "llama_decoder_stack_f32" : "llama_decoder_block_f32"},
-        {"layers", plan.data().stack.layers}, {"vocab_size", plan.data().stack.vocab_size}};
+            plan.stack.full_stack ? "llama_decoder_stack_f32" : "llama_decoder_block_f32"},
+        {"layers", plan.stack.layers}, {"vocab_size", plan.stack.vocab_size}};
 }
 
 tileinfer::TokenId parse_token_id(const json& item)
@@ -83,7 +80,7 @@ tileinfer::TokenId parse_token_id(const json& item)
 #ifdef TILE_TEST_HARNESS
 json run_block(const tileinfer::LoadedPlan& plan, const std::string& input_path)
 {
-    if (plan.data().stack.full_stack)
+    if (plan.stack.full_stack)
         throw std::runtime_error("expected a decoder block package");
     std::ifstream file(input_path);
     if (!file)
@@ -101,23 +98,23 @@ json run_block(const tileinfer::LoadedPlan& plan, const std::string& input_path)
         const auto scratch = context.scratch_snapshot();
         const auto kv = context.kv_snapshot();
         auto segment = [&](int tensor, int count) {
-            const auto offset = plan.data().tensors.at(tensor).offset;
+            const auto offset = plan.tensors.at(tensor).offset;
             return std::vector<float>(scratch.begin() + offset, scratch.begin() + offset + count);
         };
-        const int kv_width = plan.data().kv_heads * plan.data().head_dim;
+        const int kv_width = plan.kv_heads * plan.head_dim;
         const int p = context.position() - 1;
-        const auto key_offset = plan.data().tensors.at(10).offset + p * kv_width;
-        const auto value_offset = plan.data().tensors.at(11).offset + p * kv_width;
+        const auto key_offset = plan.tensors.at(10).offset + p * kv_width;
+        const auto value_offset = plan.tensors.at(11).offset + p * kv_width;
         const std::vector<float> key(kv.begin() + key_offset, kv.begin() + key_offset + kv_width);
         const std::vector<float> value(
             kv.begin() + value_offset, kv.begin() + value_offset + kv_width);
-        auto residual = segment(14, plan.data().hidden_size);
-        std::vector<float> ffn(plan.data().hidden_size);
-        for (int i = 0; i < plan.data().hidden_size; ++i)
+        auto residual = segment(14, plan.hidden_size);
+        std::vector<float> ffn(plan.hidden_size);
+        for (int i = 0; i < plan.hidden_size; ++i)
             ffn[i] = output[i] - residual[i];
-        steps.push_back({{"position", p}, {"q", segment(9, plan.data().hidden_size)}, {"k", key},
-            {"v", value}, {"attention", segment(12, plan.data().hidden_size)},
-            {"attn_residual", residual}, {"ffn", ffn}, {"y", output}});
+        steps.push_back({{"position", p}, {"q", segment(9, plan.hidden_size)}, {"k", key},
+            {"v", value}, {"attention", segment(12, plan.hidden_size)}, {"attn_residual", residual},
+            {"ffn", ffn}, {"y", output}});
     }
     return {{"steps", steps}, {"position", context.position()}, {"valid", context.valid()}};
 }
@@ -126,7 +123,7 @@ json run_block(const tileinfer::LoadedPlan& plan, const std::string& input_path)
 json run_stack(
     const tileinfer::LoadedPlan& plan, const std::string& input_path, bool trace_override = false)
 {
-    if (!plan.data().stack.full_stack)
+    if (!plan.stack.full_stack)
         throw std::runtime_error("expected a decoder stack package");
     std::ifstream file(input_path);
     if (!file)
@@ -136,7 +133,7 @@ json run_stack(
     auto context = model.create_context();
     const bool trace_blocks = trace_override || request.value("trace_blocks", false);
     json steps = json::array();
-    const int width = plan.data().kv_heads * plan.data().head_dim;
+    const int width = plan.kv_heads * plan.head_dim;
     int final_position = 0;
     for (const auto& item : request.at("tokens")) {
         if (item.is_object() && item.value("reset", false)) {
@@ -153,10 +150,10 @@ json run_stack(
         const auto& kv = snapshot.kv;
         json keys = json::array();
         json values = json::array();
-        for (int layer = 0; layer < plan.data().stack.layers; ++layer) {
-            const int base = layer * plan.data().stack.layer_kv_stride + position * width;
-            const int key_offset = base + plan.data().tensors.at(10).offset;
-            const int value_offset = base + plan.data().tensors.at(11).offset;
+        for (int layer = 0; layer < plan.stack.layers; ++layer) {
+            const int base = layer * plan.stack.layer_kv_stride + position * width;
+            const int key_offset = base + plan.tensors.at(10).offset;
+            const int value_offset = base + plan.tensors.at(11).offset;
             keys.push_back(
                 std::vector<float>(kv.begin() + key_offset, kv.begin() + key_offset + width));
             values.push_back(
@@ -167,9 +164,9 @@ json run_stack(
         if (trace_blocks) {
             const auto& hidden = snapshot.block_outputs;
             json blocks = json::array();
-            for (int layer = 0; layer < plan.data().stack.layers; ++layer) {
-                const auto begin = hidden.begin() + layer * plan.data().hidden_size;
-                blocks.push_back(std::vector<float>(begin, begin + plan.data().hidden_size));
+            for (int layer = 0; layer < plan.stack.layers; ++layer) {
+                const auto begin = hidden.begin() + layer * plan.hidden_size;
+                blocks.push_back(std::vector<float>(begin, begin + plan.hidden_size));
             }
             step["blocks"] = std::move(blocks);
         }
@@ -184,7 +181,7 @@ void state_smoke(const tileinfer::LoadedPlan& plan)
     tileinfer::DiagnosticContext context(plan);
     if (context.position() != 0 || !context.valid())
         throw std::runtime_error("bad new context state");
-    for (int position = 0; position < plan.data().max_context; ++position) {
+    for (int position = 0; position < plan.max_context; ++position) {
         if (context.begin_token() != position)
             throw std::runtime_error("bad token position");
         context.complete_token(true);
@@ -343,8 +340,8 @@ json generate(const tileinfer::LoadedPlan& plan, const std::string& input_path, 
     std::optional<tileinfer::TokenId> eos_id)
 {
     const auto prompt = read_prompt(input_path);
-    if (prompt.size() > static_cast<std::size_t>(plan.data().max_context) || max_new_tokens <= 0 ||
-        max_new_tokens > plan.data().max_context - static_cast<int>(prompt.size()))
+    if (prompt.size() > static_cast<std::size_t>(plan.max_context) || max_new_tokens <= 0 ||
+        max_new_tokens > plan.max_context - static_cast<int>(prompt.size()))
         throw std::runtime_error("generation exceeds context capacity");
     tileinfer::DecoderModel model(plan);
     auto context = model.create_context();
@@ -354,8 +351,8 @@ json generate(const tileinfer::LoadedPlan& plan, const std::string& input_path, 
     return {{"prompt_tokens", prompt.size()}, {"generated", result.generated},
         {"generated_count", result.generated.size()}, {"position", result.position},
         {"stop_reason", result.stop_reason == tileinfer::StopReason::eos ? "eos" : "limit"},
-        {"compute_us", result.compute_us}, {"plan_sha256", plan.data().plan_sha256},
-        {"weights_sha256", plan.data().weights_sha256}};
+        {"compute_us", result.compute_us}, {"plan_sha256", plan.plan_sha256},
+        {"weights_sha256", plan.weights_sha256}};
 }
 
 json bench(const tileinfer::LoadedPlan& plan, const std::string& input_path, int new_tokens,
@@ -364,8 +361,8 @@ json bench(const tileinfer::LoadedPlan& plan, const std::string& input_path, int
     if (warmup < 0 || rounds <= 0)
         throw std::runtime_error("invalid benchmark rounds");
     const auto prompt = read_prompt(input_path);
-    if (prompt.size() > static_cast<std::size_t>(plan.data().max_context) || new_tokens <= 0 ||
-        new_tokens > plan.data().max_context - static_cast<int>(prompt.size()))
+    if (prompt.size() > static_cast<std::size_t>(plan.max_context) || new_tokens <= 0 ||
+        new_tokens > plan.max_context - static_cast<int>(prompt.size()))
         throw std::runtime_error("benchmark exceeds context capacity");
     tileinfer::DecoderModel model(plan);
     auto context = model.create_context();
@@ -385,10 +382,9 @@ json bench(const tileinfer::LoadedPlan& plan, const std::string& input_path, int
             samples.push_back(result.compute_us);
     }
     const double mean = std::accumulate(samples.begin(), samples.end(), 0.0) / samples.size();
-    return {{"plan_sha256", plan.data().plan_sha256},
-        {"weights_sha256", plan.data().weights_sha256},
+    return {{"plan_sha256", plan.plan_sha256}, {"weights_sha256", plan.weights_sha256},
         {"weight_dtype",
-            plan.data().weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
+            plan.weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
         {"prompt_tokens", prompt.size()}, {"generated_count", new_tokens}, {"selection", "greedy"},
         {"warmup", warmup}, {"rounds", rounds}, {"samples_us", samples}, {"mean_us", mean},
         {"us_per_token", mean / new_tokens}, {"tokens_per_second", new_tokens * 1000000.0 / mean},
@@ -447,11 +443,9 @@ int main(int argc, char** argv)
             const double mean =
                 std::accumulate(measurement.samples_us.begin(), measurement.samples_us.end(), 0.0) /
                 measurement.samples_us.size();
-            result = {{"plan_sha256", plan.data().plan_sha256},
-                {"weights_sha256", plan.data().weights_sha256},
-                {"weight_dtype", plan.data().weight_dtype == tileinfer::WeightDtype::bfloat16
-                                     ? "bfloat16"
-                                     : "float32"},
+            result = {{"plan_sha256", plan.plan_sha256}, {"weights_sha256", plan.weights_sha256},
+                {"weight_dtype",
+                    plan.weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
                 {"position", command.position}, {"context_length", command.position + 1},
                 {"token_id", command.token}, {"warmup", command.warmup},
                 {"iterations", command.iterations}, {"rounds", command.rounds},

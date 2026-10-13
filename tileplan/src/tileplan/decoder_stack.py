@@ -372,7 +372,8 @@ def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
         and workers > 0
         and workers == plan["target"]["sm_count"]
         and plan["target"]["cooperative_launch"] is True
-        and plan["target"]["threads_per_block"] == 128,
+        and type(plan["target"]["threads_per_block"]) is int
+        and plan["target"]["threads_per_block"] > 0,
         "invalid stack target",
     )
     base_regions, layer_weights_bytes = _regions(block, WEIGHTS, 64, weight_bytes)

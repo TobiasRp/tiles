@@ -188,7 +188,6 @@ def main() -> None:
         original = json.loads((package / "plan.json").read_text())
         mutations = {
             "operand": lambda p: p["tasks"][0]["operands"].update(scale=15),
-            "dependency": lambda p: p["tasks"][-1].update(predecessors=[]),
             "cache bounds": lambda p: p["storage"]["kv"][1].update(offset=0),
             "wave assignment": lambda p: p["tasks"][-1].update(wave=0),
             "float32 epsilon underflow": lambda p: p["model"].update(

@@ -241,7 +241,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
     require(target.at("compute_capability") == json::array({device.major, device.minor}) &&
                 target.at("sm_count") == device.sm_count && workers == device.sm_count &&
                 target.at("cooperative_launch") == true && device.cooperative_launch &&
-                target.at("threads_per_block") == kThreads &&
+                target.at("threads_per_block") == (legacy ? 128 : kThreads) &&
                 (legacy ? (target.at("kernel_fingerprint") == kLegacyFingerprint ||
                               target.at("kernel_fingerprint") == kLegacyProbeFingerprint)
                         : target.at("kernel_fingerprint") == kFingerprint) &&
@@ -313,7 +313,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
                 integrity.at("weights_sha256") == weights_sha256,
         "decoder weight checksum mismatch");
 
-    PlanData result{};
+    LoadedPlan result{};
     result.weight_dtype = weight_dtype == "bfloat16" ? WeightDtype::bfloat16 : WeightDtype::float32;
     result.hidden_size = s.d;
     result.intermediate_size = s.f;
@@ -357,7 +357,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
         require(std::isfinite(frequency) && frequency >= 0, "invalid derived rotary frequency");
         result.rotary_frequencies.push_back(frequency);
     }
-    return LoadedPlan(std::move(result));
+    return result;
 }
 
 } // namespace tileinfer

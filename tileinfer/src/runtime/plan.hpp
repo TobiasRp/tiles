@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <limits>
 #include <string>
-#include <utility>
 #include <vector>
 
 namespace tileinfer {
@@ -12,10 +11,10 @@ namespace tileinfer {
 // Identifies a vocabulary entry with the same representation on host and device.
 using TokenId = std::int32_t;
 
-inline constexpr int kThreads = 128;
+inline constexpr int kThreads = 1024;
 inline constexpr const char* kAbi = "tileinfer-decoder-v3";
 inline constexpr const char* kFingerprint =
-    "decoder-wave-abi3-warp-gemv-head-attention-rope-table-v1-sm86-b128";
+    "decoder-wave-abi3-warp-gemv-head-attention-rope-table-v1-sm86-b1024";
 inline constexpr const char* kLegacyAbi = "tileinfer-decoder-v2";
 inline constexpr const char* kLegacyFingerprint = "decoder-wave-abi2-ops-v3-stack-sm86-b128";
 inline constexpr const char* kLegacyProbeFingerprint = "decoder-wave-abi2-probe-v1-sm86-b128";
@@ -158,8 +157,8 @@ struct Target
     int runtime_version;
 };
 
-// Holds checked host metadata and weights before device upload.
-struct PlanData
+// Host package data. Populate with load_plan() before uploading; callers are trusted.
+struct LoadedPlan
 {
     WeightDtype weight_dtype;
     int hidden_size;
@@ -182,21 +181,6 @@ struct PlanData
     std::vector<std::vector<std::int64_t>> worker_loads;
     std::string plan_sha256;
     std::string weights_sha256;
-};
-
-// Only the loader can construct this immutable validated package.
-class LoadedPlan
-{
-  public:
-    [[nodiscard]] const PlanData& data() const { return data_; }
-
-  private:
-    explicit LoadedPlan(PlanData data)
-        : data_(std::move(data))
-    {
-    }
-    PlanData data_;
-    friend LoadedPlan load_plan(const std::string&, const Target&);
 };
 
 Target describe_target();

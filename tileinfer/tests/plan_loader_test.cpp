@@ -6,9 +6,7 @@
 #include <string_view>
 #include <type_traits>
 
-static_assert(!std::is_default_constructible_v<tileinfer::LoadedPlan>);
-static_assert(std::is_same_v<decltype(std::declval<tileinfer::LoadedPlan&>().data()),
-    const tileinfer::PlanData&>);
+static_assert(std::is_aggregate_v<tileinfer::LoadedPlan>);
 
 int main(int argc, char** argv)
 {
@@ -38,8 +36,7 @@ int main(int argc, char** argv)
         }
         if (argc != 2)
             throw std::runtime_error("expected a package path");
-        const auto loaded = tileinfer::load_plan(argv[1], target);
-        const auto& plan = loaded.data();
+        const auto plan = tileinfer::load_plan(argv[1], target);
         std::cout << json{{"tasks", plan.tasks.size()}, {"waves", plan.wave_count},
                          {"loads", plan.worker_loads},
                          {"rope_pairs", plan.rotary_frequencies.size()}}

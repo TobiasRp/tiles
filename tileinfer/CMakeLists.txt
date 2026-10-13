@@ -97,6 +97,7 @@ if(TILE_INFER_ENABLE_CUDA)
             target_include_directories(${target} PRIVATE ${CUDAToolkit_INCLUDE_DIRS}/cccl)
             target_link_libraries(${target} PRIVATE CUDA::cudart)
         endforeach()
+        target_include_directories(cccl_cooperative_smoke PRIVATE src/runtime)
         foreach(target tileinfer_diagnostics tile_runtime_test sequence_context_smoke sequence_ring_smoke
                 cuda_smoke cccl_cooperative_smoke input_ring_copy_smoke)
             tileinfer_warnings(${target})

@@ -1,3 +1,5 @@
+#include "plan.hpp"
+
 #include <cooperative_groups.h>
 #include <cuda/__event/timed_event.h>
 #include <cuda_runtime.h>
@@ -39,7 +41,7 @@ int main()
             stream, pool, static_cast<size_t>(props.multiProcessorCount), cuda::no_init};
         cuda::device_buffer<int> results{
             stream, pool, static_cast<size_t>(props.multiProcessorCount), cuda::no_init};
-        auto config = cuda::make_config(cuda::block_dims<128>(),
+        auto config = cuda::make_config(cuda::block_dims<tileinfer::kThreads>(),
             cuda::grid_dims(props.multiProcessorCount), cuda::cooperative_launch{});
         cuda::timed_event start{stream}, end{stream};
         start.record(stream);
@@ -55,7 +57,8 @@ int main()
         for (int result : host)
             if (result != expected)
                 throw std::runtime_error("grid sync mismatch");
-        std::cout << "CCCL cooperative gate passed: " << props.multiProcessorCount << " blocks, "
+        std::cout << "CCCL cooperative gate passed: " << props.multiProcessorCount << " blocks of "
+                  << tileinfer::kThreads << " threads, "
                   << cuda::std::chrono::duration<double, cuda::std::milli>(end - start).count()
                   << " ms\n";
     } catch (const std::exception& error) {

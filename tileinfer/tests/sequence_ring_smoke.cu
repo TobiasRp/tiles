@@ -78,7 +78,7 @@ int main(int argc, char** argv)
     try {
         require(argc == 2, "expected stack package");
         const auto loaded = tileinfer::load_plan(argv[1], tileinfer::describe_target());
-        const auto& plan = loaded.data();
+        const auto& plan = loaded;
         require(plan.max_context >= 5, "ring test requires five-token capacity");
         tileinfer::DecoderModel model(loaded);
         auto queued = model.create_context();

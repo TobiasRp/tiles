@@ -1,3 +1,4 @@
+#include "detail/cleanup.hpp"
 #include "detail/cuda_check.hpp"
 #include "detail/input_ring_cursor.hpp"
 #include "detail/sequence_test_access.cuh"
@@ -76,7 +77,10 @@ struct SequenceContext::Impl
     {
     }
 
-    ~Impl() { stream.sync(); }
+    ~Impl()
+    {
+        detail::cleanup_noexcept([&] { stream.sync(); });
+    }
 
     void require_ready() const
     {
@@ -240,7 +244,7 @@ Ticket SequenceContext::enqueue_prefill(
         impl_->queued_position = ticket->end_position;
     } catch (...) {
         impl_->valid = false;
-        impl_->failed_input_enqueue(ticket);
+        detail::cleanup_noexcept([&] { impl_->failed_input_enqueue(ticket); });
         throw;
     }
     return Ticket(std::move(ticket));
@@ -263,7 +267,7 @@ Ticket SequenceContext::enqueue_decode(TokenId token_id, DiagnosticRequest diagn
         impl_->queued_position = ticket->end_position;
     } catch (...) {
         impl_->valid = false;
-        impl_->failed_input_enqueue(ticket);
+        detail::cleanup_noexcept([&] { impl_->failed_input_enqueue(ticket); });
         throw;
     }
     return Ticket(std::move(ticket));
@@ -306,7 +310,7 @@ Ticket SequenceContext::enqueue_generate(GenerateOptions options, DiagnosticRequ
             impl_->pending_position = ticket;
     } catch (...) {
         impl_->valid = false;
-        impl_->stream.sync();
+        detail::cleanup_noexcept([&] { impl_->stream.sync(); });
         throw;
     }
     return Ticket(std::move(ticket));
@@ -326,7 +330,7 @@ Ticket SequenceContext::enqueue_reset()
         impl_->valid = true;
     } catch (...) {
         impl_->valid = false;
-        impl_->stream.sync();
+        detail::cleanup_noexcept([&] { impl_->stream.sync(); });
         throw;
     }
     return Ticket(std::move(ticket));
