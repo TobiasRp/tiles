@@ -1,17 +1,16 @@
-# tile-infer
+# Tiles
 
 Tile inference prototype targeting the
 [Llama 3.2 1B **base** model](https://huggingface.co/meta-llama/Llama-3.2-1B)
-on an 8 GB RTX 3050. [TilePlan](tileplan/README.md) turns the pinned Hugging
-Face checkpoint into a validated, tiled execution package. [TileInfer](tileinfer/README.md)
-executes one token at a time with a persistent CUDA worker and a per-layer KV
-cache.
+on an 8 GB RTX 3050.
 
-The checkpoint stays in BF16 storage; loads convert weights to float32 for
-arithmetic. Activations, accumulation, logits, and the KV cache are float32.
-The output projection aliases the token embedding. Tokenization runs in Python;
-the CUDA executor accepts token IDs. The base model has no chat template in
-this workflow.
+[TilePlan](tileplan/README.md) turns the pinned Hugging Face checkpoint into a tiled
+DAG representation.
+
+[TileInfer](tileinfer/README.md) executes one token at a time with a persistent
+CUDA worker and a per-layer KV cache.
+
+Tokenization runs in Python; TileInfer works only on token IDs. The base model has no chat template, this is out of scope.
 
 ## Run Llama 3.2 1B
 
