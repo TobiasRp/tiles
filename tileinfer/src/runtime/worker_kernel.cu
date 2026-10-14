@@ -14,14 +14,19 @@ namespace tileinfer {
 using detail::check;
 namespace {
 
-template <typename Weight>
-__global__ void decoder_worker(const TaskRecord* tasks, const WorkerTaskRange* ranges,
-    const TensorRecord* tensors, int waves, int workers, int position, int hidden_size,
-    int intermediate_size, int kv_heads, int head_dim, NumericConfig numeric, StackConfig stack,
-    TokenId token_id, const TokenId* device_tokens, int token_index, float* input, float* output,
-    float* scratch, float* kv, const Weight* weights, float* logits, float* block_trace,
-    const float* rotary_frequencies)
+template <typename Scalar, bool UseMma = false>
+__global__ __launch_bounds__(kThreads, 1) void decoder_worker(const TaskRecord* tasks,
+    const WorkerTaskRange* ranges, const TensorRecord* tensors, int waves, int workers,
+    int position, int hidden_size, int intermediate_size, int kv_heads, int head_dim,
+    NumericConfig numeric, StackConfig stack, TokenId token_id, const TokenId* device_tokens,
+    int token_index, void* raw_input, void* raw_output, void* raw_scratch, void* raw_kv,
+    const Scalar* weights, float* logits, float* block_trace, const float* rotary_frequencies,
+    int max_context, void* attention_scores, float* ffn_trace)
 {
+    auto* input = static_cast<Scalar*>(raw_input);
+    auto* output = static_cast<Scalar*>(raw_output);
+    auto* scratch = static_cast<Scalar*>(raw_scratch);
+    auto* kv = static_cast<Scalar*>(raw_kv);
     namespace cg = cooperative_groups;
     __shared__ ops::SharedStorage shared;
 
@@ -35,15 +40,16 @@ __global__ void decoder_worker(const TaskRecord* tasks, const WorkerTaskRange* r
     }
 
     for (int layer = 0; layer < stack.layers; ++layer) {
-        float* current_input = layer % 2 == 0 ? input : output;
-        float* current_output = layer % 2 == 0 ? output : input;
-        float* layer_kv = kv + layer * stack.layer_kv_stride;
-        const Weight* layer_weights =
+        Scalar* current_input = layer % 2 == 0 ? input : output;
+        Scalar* current_output = layer % 2 == 0 ? output : input;
+        Scalar* layer_kv = kv + layer * stack.layer_kv_stride;
+        const Scalar* layer_weights =
             weights + stack.layer_weights_offset + layer * stack.layer_weight_stride;
-        const ops::Context<Weight> context{
+        const ops::Context<Scalar> context{
             tensors,
-            {current_input, current_output, scratch, layer_kv, layer_weights},
-            {hidden_size, intermediate_size, kv_heads, head_dim, position, numeric,
+            {current_input, current_output, scratch, layer_kv, layer_weights,
+                static_cast<Scalar*>(attention_scores), ffn_trace},
+            {hidden_size, intermediate_size, kv_heads, head_dim, position, max_context, numeric,
                 rotary_frequencies},
             &shared,
         };
@@ -52,7 +58,7 @@ __global__ void decoder_worker(const TaskRecord* tasks, const WorkerTaskRange* r
             const WorkerTaskRange range = ranges[wave * workers + blockIdx.x];
             for (cuda::std::uint32_t index = range.begin; index < range.begin + range.count;
                 ++index) {
-                ops::execute(tasks[index], context);
+                ops::execute<Scalar, UseMma>(tasks[index], context);
                 __syncthreads();
             }
             if (wave + 1 < waves)
@@ -68,13 +74,13 @@ __global__ void decoder_worker(const TaskRecord* tasks, const WorkerTaskRange* r
     }
 
     if (stack.full_stack) {
-        const float* last_hidden = stack.layers % 2 == 0 ? input : output;
-        float* final_hidden = stack.layers % 2 == 0 ? output : input;
-        ops::final_norm(last_hidden, weights + stack.final_norm_offset, final_hidden, hidden_size,
-            numeric.rms_norm_eps, &shared.norm_factor);
+        const Scalar* last_hidden = stack.layers % 2 == 0 ? input : output;
+        Scalar* final_hidden = stack.layers % 2 == 0 ? output : input;
+        ops::final_rms_norm(last_hidden, weights + stack.final_norm_offset, final_hidden,
+            hidden_size, numeric.rms_norm_eps, &shared.inverse_rms, shared.norm_partials);
         cg::this_grid().sync();
-        ops::logits(final_hidden, weights + stack.lm_head_offset, logits, hidden_size,
-            stack.vocab_size, shared);
+        ops::logits<Scalar, UseMma>(final_hidden, weights + stack.lm_head_offset, logits,
+            hidden_size, stack.vocab_size, shared);
     }
 }
 
@@ -82,26 +88,30 @@ __global__ void decoder_worker(const TaskRecord* tasks, const WorkerTaskRange* r
 
 namespace detail {
 
-template <typename Weight>
+template <typename Scalar, bool UseMma = false>
 void enqueue_worker_typed(cuda::stream& stream, const WorkerProgramView& program,
     const WorkerBuffers& buffers, int position, TokenInput token)
 {
     auto config = cuda::make_config(
         cuda::block_dims<kThreads>(), cuda::grid_dims(program.workers), cuda::cooperative_launch{});
-    cuda::launch(stream, config, decoder_worker<Weight>, program.tasks, program.ranges,
+    cuda::launch(stream, config, decoder_worker<Scalar, UseMma>, program.tasks, program.ranges,
         program.tensors, program.waves, program.workers, position, program.hidden_size,
         program.intermediate_size, program.kv_heads, program.head_dim, program.numeric,
         program.stack, token.immediate, token.ids, token.index, buffers.input, buffers.output,
-        buffers.scratch, buffers.kv, static_cast<const Weight*>(program.weights), buffers.logits,
-        buffers.block_trace, program.rotary_frequencies);
+        buffers.scratch, buffers.kv, static_cast<const Scalar*>(program.weights), buffers.logits,
+        buffers.block_trace, program.rotary_frequencies, program.max_context,
+        buffers.attention_scores, buffers.ffn_trace);
 }
 
 void enqueue_worker(cuda::stream& stream, const WorkerProgramView& program,
     const WorkerBuffers& buffers, int position, TokenInput token)
 {
-    if (program.weight_dtype == WeightDtype::bfloat16)
-        enqueue_worker_typed<__nv_bfloat16>(stream, program, buffers, position, token);
-    else
+    if (program.weight_dtype == WeightDtype::bfloat16) {
+        if (program.matrix_mma)
+            enqueue_worker_typed<__nv_bfloat16, true>(stream, program, buffers, position, token);
+        else
+            enqueue_worker_typed<__nv_bfloat16>(stream, program, buffers, position, token);
+    } else
         enqueue_worker_typed<float>(stream, program, buffers, position, token);
 }
 
@@ -125,6 +135,19 @@ Target describe_target()
     check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
               &bf16_occupancy, decoder_worker<__nv_bfloat16>, kThreads, 0),
         "BF16 worker occupancy");
+    cudaFuncAttributes mma_attributes{};
+    check(cudaFuncGetAttributes(&mma_attributes, decoder_worker<__nv_bfloat16, true>),
+        "BF16 MMA worker attributes");
+    int mma_occupancy = 0;
+    check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
+              &mma_occupancy, decoder_worker<__nv_bfloat16, true>, kThreads, 0),
+        "BF16 MMA worker occupancy");
+    const auto bf16_simt_attributes = bf16_attributes;
+    const int bf16_simt_occupancy = bf16_occupancy;
+    bf16_occupancy = std::min(bf16_occupancy, mma_occupancy);
+    bf16_attributes.numRegs = std::max(bf16_attributes.numRegs, mma_attributes.numRegs);
+    bf16_attributes.sharedSizeBytes =
+        std::max(bf16_attributes.sharedSizeBytes, mma_attributes.sharedSizeBytes);
     int driver = 0, runtime = 0;
     check(cudaDriverGetVersion(&driver), "driver version");
     check(cudaRuntimeGetVersion(&runtime), "runtime version");
@@ -133,7 +156,13 @@ Target describe_target()
         std::max(attributes.numRegs, bf16_attributes.numRegs),
         std::max(static_cast<int>(attributes.sharedSizeBytes),
             static_cast<int>(bf16_attributes.sharedSizeBytes)),
-        props.maxThreadsPerMultiProcessor, props.totalGlobalMem, driver, runtime};
+        props.maxThreadsPerMultiProcessor, props.totalGlobalMem, driver, runtime,
+        {{"float32-simt", attributes.numRegs, static_cast<int>(attributes.sharedSizeBytes),
+             f32_occupancy},
+            {"bfloat16-simt", bf16_simt_attributes.numRegs,
+                static_cast<int>(bf16_simt_attributes.sharedSizeBytes), bf16_simt_occupancy},
+            {"bfloat16-mma", mma_attributes.numRegs,
+                static_cast<int>(mma_attributes.sharedSizeBytes), mma_occupancy}}};
 }
 
 } // namespace tileinfer

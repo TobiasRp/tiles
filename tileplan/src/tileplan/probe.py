@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-ABI = "tileinfer-decoder-v3"
+ABI = "tileinfer-decoder-v4"
 OPCODES = {
     "rms_norm_f32",
     "gemv_f32",
@@ -13,6 +13,8 @@ OPCODES = {
     "attention_prefix_f32",
     "silu_product_f32",
 }
+
+OPCODES |= {opcode.replace("_f32", "_bf16") for opcode in OPCODES}
 
 
 def normalize(raw: dict) -> dict:

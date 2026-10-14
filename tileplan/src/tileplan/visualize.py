@@ -15,6 +15,10 @@ COLORS = {
     "silu_product_f32": "#e9d5ff",
 }
 
+COLORS.update(
+    {key.replace("_f32", "_bf16"): value for key, value in list(COLORS.items())}
+)
+
 
 def render_schedule_svg(plan: dict, *, plan_sha256: str, note: str = "") -> str:
     tasks = {task["id"]: task for task in plan["tasks"]}
@@ -34,7 +38,10 @@ def render_schedule_svg(plan: dict, *, plan_sha256: str, note: str = "") -> str:
         )
     height = top + sum(wave_heights) + 52
     model, storage = plan["model"], plan["storage"]
-    stack = plan["header"]["model_kind"] == "llama_decoder_stack_f32"
+    stack = plan["header"]["model_kind"] in (
+        "llama_decoder_stack_f32",
+        "llama_decoder_stack",
+    )
     title = (
         f"Full decoder: {model['layers']} layers"
         if stack
@@ -139,7 +146,10 @@ def render_schedule_svg(plan: dict, *, plan_sha256: str, note: str = "") -> str:
 def render_tensor_graph_svg(plan: dict, *, plan_sha256: str) -> str:
     """Draw the semantic decoder DAG, independent of its row-tile schedule."""
     model = plan["model"]
-    stack = plan["header"]["model_kind"] == "llama_decoder_stack_f32"
+    stack = plan["header"]["model_kind"] in (
+        "llama_decoder_stack_f32",
+        "llama_decoder_stack",
+    )
     layers = model["layers"]
     d = model["hidden_size"]
     f = model["intermediate_size"]

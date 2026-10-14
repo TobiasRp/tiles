@@ -10,7 +10,6 @@ import numpy as np
 import torch
 from loader_regression import rearrange
 from stack_regression import check_generation, check_sequence
-
 from tileplan.decoder_plan import build
 from tileplan.decoder_reference import (
     DecoderSpec,
@@ -61,13 +60,19 @@ def main() -> None:
             weights["Wk"] *= 8
             np.savez(
                 fixture / "weights.npz",
-                **{name: value.numpy() for name, value in weights.items()},
+                **{
+                    name: value.float().cpu().numpy() for name, value in weights.items()
+                },
             )
             tokens = fixed_tokens(spec).repeat((spec.max_context + 4) // 5, 1)[
                 : spec.max_context
             ]
-            for dtype in ("float32", "bfloat16"):
-                package = root / f"block-{number}-{dtype}"
+            for dtype, matrix_kernel in (
+                ("float32", "simt"),
+                ("bfloat16", "simt"),
+                ("bfloat16", "mma"),
+            ):
+                package = root / f"block-{number}-{dtype}-{matrix_kernel}"
                 build(
                     fixture / "model.json",
                     fixture / "weights.npz",
@@ -75,21 +80,25 @@ def main() -> None:
                     7,
                     package,
                     dtype,
+                    matrix_kernel,
                 )
                 path = package / "plan.json"
                 plan = json.loads(path.read_text())
                 rearrange(plan)
                 path.write_text(json.dumps(plan))
                 quantized = {
-                    name: value.to(torch.bfloat16).float()
+                    name: value.to(device="cuda", dtype=torch.bfloat16)
                     if dtype == "bfloat16"
                     else value
                     for name, value in weights.items()
                 }
-                cache = ReferenceCache.empty(spec)
+                cache = ReferenceCache.empty(
+                    spec, quantized["Wq"].dtype, quantized["Wq"].device
+                )
                 with torch.inference_mode():
                     expected = [
-                        decode_one(token, quantized, spec, cache) for token in tokens
+                        decode_one(token.to(quantized["Wq"]), quantized, spec, cache)
+                        for token in tokens
                     ]
                 inputs = root / "block-inputs.json"
                 inputs.write_text(
@@ -102,7 +111,11 @@ def main() -> None:
                 )
                 cache.reset()
                 with torch.inference_mode():
-                    expected.append(decode_one(tokens[1], quantized, spec, cache))
+                    expected.append(
+                        decode_one(
+                            tokens[1].to(quantized["Wq"]), quantized, spec, cache
+                        )
+                    )
                 run = subprocess.run(
                     [
                         str(args.block_executor),
@@ -131,9 +144,9 @@ def main() -> None:
                     ):
                         np.testing.assert_allclose(
                             step[field],
-                            reference[field].numpy().reshape(-1),
-                            atol=spec.atol,
-                            rtol=spec.rtol,
+                            reference[field].float().cpu().numpy().reshape(-1),
+                            atol=1e-2 if dtype == "bfloat16" else spec.atol,
+                            rtol=1e-2 if dtype == "bfloat16" else spec.rtol,
                             err_msg=f"{number}/{dtype}/{index}/{field}",
                         )
         spec = StackSpec(
@@ -143,8 +156,12 @@ def main() -> None:
         generate_stack_fixture(fixture, spec)
         weights = fixed_stack_weights(spec)
         ids = [0, 1, 52, 7]
-        for dtype in ("float32", "bfloat16"):
-            package = root / f"stack-{dtype}"
+        for dtype, matrix_kernel in (
+            ("float32", "simt"),
+            ("bfloat16", "simt"),
+            ("bfloat16", "mma"),
+        ):
+            package = root / f"stack-{dtype}-{matrix_kernel}"
             build_stack(
                 fixture / "model.json",
                 fixture / "weights.npz",
@@ -152,16 +169,58 @@ def main() -> None:
                 7,
                 package,
                 dtype,
+                matrix_kernel,
             )
             quantized = {
-                name: value.to(torch.bfloat16).float() if dtype == "bfloat16" else value
+                name: value.to(device="cuda", dtype=torch.bfloat16)
+                if dtype == "bfloat16"
+                else value
                 for name, value in weights.items()
             }
-            cache = StackCache.empty(spec)
+            cache = StackCache.empty(
+                spec, quantized["embedding"].dtype, quantized["embedding"].device
+            )
             with torch.inference_mode():
                 traces = [decode_token(token, quantized, spec, cache) for token in ids]
             check_sequence(args.executor, package, root, ids, traces, spec)
             check_generation(args.executor, package, root, ids[:2], quantized, spec)
+            # Zero logits tie across the whole vocabulary. Sampling must keep
+            # the smallest token ID in every precision/matrix implementation.
+            tied_weights = root / "ties-weights.npz"
+            np.savez(
+                tied_weights,
+                **{
+                    name: np.zeros_like(value.numpy())
+                    for name, value in weights.items()
+                },
+            )
+            tied_package = root / f"ties-{dtype}-{matrix_kernel}"
+            build_stack(
+                fixture / "model.json",
+                tied_weights,
+                root / "target.json",
+                7,
+                tied_package,
+                dtype,
+                matrix_kernel,
+            )
+            tied_input = root / "ties-input.json"
+            tied_input.write_text(json.dumps({"tokens": [1]}))
+            tied = json.loads(
+                subprocess.check_output(
+                    [
+                        str(args.executor),
+                        "generate",
+                        str(tied_package),
+                        str(tied_input),
+                        "--max-new-tokens",
+                        "2",
+                    ],
+                    text=True,
+                )
+            )
+            if tied["generated"] != [0, 0]:
+                raise AssertionError("greedy tie did not select the smallest token ID")
     print(
         "long/extreme-score attention, wide heads, GEMV/logits tails, and legal schedules passed"
     )

@@ -38,6 +38,8 @@ class UploadedPlan
     int max_context;
     std::size_t scratch_count;
     std::size_t kv_count;
+    std::size_t attention_count;
+    bool matrix_mma;
     std::vector<std::pair<std::size_t, std::size_t>> scratch_regions;
     NumericConfig numeric;
     StackConfig stack;

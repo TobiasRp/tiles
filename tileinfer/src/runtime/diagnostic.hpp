@@ -37,6 +37,7 @@ class DiagnosticContext
     [[nodiscard]] std::vector<float> block_trace_snapshot() const;
     [[nodiscard]] std::vector<float> scratch_snapshot() const;
     [[nodiscard]] std::vector<float> kv_snapshot() const;
+    [[nodiscard]] std::vector<float> ffn_snapshot() const;
 
   private:
     struct Impl;

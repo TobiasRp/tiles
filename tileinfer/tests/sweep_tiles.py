@@ -11,7 +11,6 @@ from typing import TypedDict
 
 import numpy as np
 import torch
-
 from tileplan.decoder_reference import DecoderSpec
 from tileplan.decoder_stack import (
     StackCache,
@@ -64,7 +63,7 @@ def main() -> None:
         "selection": "minimum geometric mean of pilot means across all three positions",
         "order": "seeded permutation per phase, seed 20261013",
         "metric": "CUDA-event batch average at fixed context; no individual tail percentiles",
-        "reference": "CPU PyTorch; stored float32 or BF16 weights converted to float32",
+        "reference": "PyTorch CUDA for BF16, CPU for float32; matching activation/cache precision",
     }
     (args.out / "protocol.json").write_text(json.dumps(protocol, indent=2) + "\n")
     packages = {}
@@ -87,10 +86,14 @@ def main() -> None:
         weights = fixed_stack_weights(spec)
         for dtype in DTYPES:
             quantized = {
-                name: value.to(torch.bfloat16).float() if dtype == "bfloat16" else value
+                name: value.to(device="cuda", dtype=torch.bfloat16)
+                if dtype == "bfloat16"
+                else value
                 for name, value in weights.items()
             }
-            cache = StackCache.empty(spec)
+            cache = StackCache.empty(
+                spec, quantized["embedding"].dtype, quantized["embedding"].device
+            )
             with torch.inference_mode():
                 for position in range(max(POSITIONS) + 1):
                     step = decode_token(1, quantized, spec, cache)
@@ -139,7 +142,10 @@ def main() -> None:
         result = json.loads(run.stdout)
         token, logit = expected[hidden, dtype, position]
         if result["top_token"] != token or not np.isclose(
-            result["top_logit"], logit, atol=2e-5, rtol=2e-5
+            result["top_logit"],
+            logit,
+            atol=1e-2 if dtype == "bfloat16" else 2e-5,
+            rtol=1e-2 if dtype == "bfloat16" else 2e-5,
         ):
             raise AssertionError(
                 (key, result["top_token"], result["top_logit"], token, logit)

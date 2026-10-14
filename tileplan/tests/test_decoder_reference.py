@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
 from tileplan.decoder_reference import (
     DecoderSpec,
     ReferenceCache,

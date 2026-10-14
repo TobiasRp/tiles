@@ -6,10 +6,20 @@ normalization, and logits. GPU greedy selection feeds back the next token.
 The current RTX 3050 worker uses 1024 threads per block and one logical worker
 per SM; worker IDs have no physical SM affinity.
 
-Weights may be BF16 or float32. Arithmetic, activations, logits, and K/V state
-are float32. The executor supports version-3 packages and legacy version-2
-float32 packages. Regenerate version-3 packages after a worker fingerprint change.
-For a text demo, use [`generate.py`](../generate.py).
+Version-4 packages use either float32 or BF16 weights, activations, and K/V.
+BF16 matrix operands accumulate in float32; RMSNorm statistics, softmax, RoPE
+frequency/trigonometric work, and SiLU internals retain float32 math. BF16
+rounding follows the pinned PyTorch eager operator boundaries. Public logits
+and diagnostics widen the modeled values to float32. Both SIMT and native
+BF16 MMA matrix routines are available for projections and the language-model
+head; attention uses SIMT in both variants. SIMT remains the default after the
+controlled comparison; see [current results](../docs/bf16_compute_results.md).
+
+Version-2/3 pure-float32 packages remain readable. The former BF16-weight/
+float32-activation path is removed; regenerate those packages as version 4.
+For a text demo, use [`generate.py`](../generate.py), which creates BF16/SIMT
+packages by default. The runtime follows the precision and matrix kernel stored
+in each package.
 
 ## Build
 
@@ -40,7 +50,12 @@ Prefill and generation return tickets; `wait` retrieves the result.
 [worker_kernel.cu](src/runtime/worker_kernel.cu) the cooperative wave loop.
 The blocking diagnostics API is linked only into the test harness.
 
-## Measurements on RTX 3050
+## Historical measurements on RTX 3050
+
+These tables describe the superseded version-3 BF16-weight/float32-activation
+implementation. They do not measure the version-4 BF16-compute path. Current
+validation and controlled arithmetic-variant comparisons are described in
+[the BF16 implementation results](../docs/bf16_compute_results.md).
 
 Pinned Llama 3.2 1B checkpoint, batch one, TF32 disabled; measured October 13, 2026.
 The TileInfer package uses 64-row tiles. No GPU clocks were locked.
@@ -55,7 +70,7 @@ each replay starts from a freshly prefilled cache.
 
 | Implementation | Weights / activations | Average ms/token |
 | --- | --- | ---: |
-| TileInfer | BF16 / float32 | 16.03 |
+| TileInfer v3 (retired) | BF16 / float32 | 16.03 |
 | PyTorch eager | float32 / float32 | 25.55 |
 | PyTorch graph replay | float32 / float32 | 24.43 |
 | PyTorch eager | BF16 / BF16 | 14.42 |
@@ -93,7 +108,8 @@ uv run --locked --project ../tileplan --group checkpoint python tests/benchmark_
   --new-tokens 16 --warmup 3 --rounds 7 --out ../runs/generation-comparison.json
 ```
 
-Add `--reference-dtype bfloat16` for the BF16 baseline.
+The reference precision now follows the package; an explicit
+`--reference-dtype` must match it.
 [benchmark_decode.py](tests/benchmark_decode.py) measures fixed contexts;
 [profile_decode.py](tests/profile_decode.py) collects Nsight counters.
 Both expose their arguments through `--help`.
@@ -102,6 +118,9 @@ Both expose their arguments through `--help`.
 
 CTest covers the CCCL cooperative-launch gate, loader/UBSan validation,
 float32/BF16 numerical references, generation, and context/ring behavior.
+[ops_unit.py](tests/ops_unit.py) tests the actual device GEMV, attention, norm,
+rotary, SiLU/product, embedding, and logits routines in isolation, including
+BF16 MMA, tails, ownership, ties-to-even, and exact BF16 norm cases.
 The `cpu-debug` preset runs host-only checks. Run the four Compute Sanitizer
 tools after kernel changes:
 
@@ -110,10 +129,13 @@ cmake --build build/release --target sanitizers
 ```
 
 The suite retains its documented CCCL API-error-reporting workaround;
-initcheck disables API-copy inspection only for the two deliberately gated
+initcheck disables API-copy inspection only for the deliberately gated
 ring tests. Kernel memory reads remain checked.
 [llama32_checkpoint.py](tests/llama32_checkpoint.py) compares layer outputs,
-K/V, logits, and greedy choices with float32 Transformers.
+K/V, logits, and greedy choices with matching-precision Transformers.
+[benchmark_bf16_kernels.py](tests/benchmark_bf16_kernels.py) freezes BF16
+SIMT/MMA and tile candidates, selects tiles from pilots, then measures
+independent final rounds against eager/graph PyTorch on the pinned checkpoint.
 [sweep_tiles.py](tests/sweep_tiles.py) separates synthetic tile-selection pilots
 from independent final rounds. See the [decoder design](../docs/tile_graph_decoder.md)
 for the full numerical and execution contract.

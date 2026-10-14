@@ -1,6 +1,9 @@
 # Autoregressive TileInfer: runtime and CLI design
 
-Status: implemented and GPU-validated on `tux` on 2026-10-13.
+Status: implemented and GPU-validated on `tux` on 2026-10-13. The validation
+section below records the original version-3 implementation. Version 4 replaces
+its BF16-weight/float32-activation arithmetic; see the
+[BF16 implementation results](bf16_compute_results.md) for current precision and checks.
 
 ## Why change the current path
 
@@ -118,7 +121,7 @@ The fixed-position benchmark is still useful for diagnosing the worker: it holds
 
 No plan-format change is required for this interface proposal. The worker signature and device-side selection are runtime changes; any compiled-worker change still requires an occupancy reprobe and, if its fingerprint changes, regenerated packages.
 
-## Validation of the implementation
+## Historical validation of the version-3 implementation
 
 - The current worker was reprobed on the RTX 3050, and all eight CTest checks passed, including CUDA smoke, the isolated block regression, and the full-stack regression with float32 and BF16 generation.
 - Compute Sanitizer memcheck, racecheck, and synccheck reported zero errors on generation with EOS, `check`, and the test-only block path. A direct C++ smoke test also exercised queued tickets, EOS position locking, continuation, and reset under memcheck.

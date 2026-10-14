@@ -1,4 +1,4 @@
-"""Version-2 decoder package builder and independent package checks."""
+"""Version-4 decoder package builder and independent package checks."""
 
 import json
 import os
@@ -14,8 +14,8 @@ import torch
 from .decoder_reference import WEIGHT_SHAPES, DecoderSpec
 from .probe import ABI, read_target
 
-FORMAT = 3
-GENERATOR = "tileplan-decoder-0.3"
+FORMAT = 4
+GENERATOR = "tileplan-decoder-0.4"
 WEIGHT_DTYPES = {"float32": 4, "bfloat16": 2}
 TENSOR_NAMES = (
     "x",
@@ -61,6 +61,57 @@ REQUIRED_OPCODES = {
 def _require(condition: bool, message: str) -> None:
     if not condition:
         raise ValueError(message)
+
+
+def numeric_policy(dtype: str) -> dict:
+    _weight_size(dtype)
+    return {
+        "numeric_policy": "hf-llama-eager-bf16-v1"
+        if dtype == "bfloat16"
+        else "decoder-f32-v1",
+        "weight_dtype": dtype,
+        "activation_dtype": dtype,
+        "kv_dtype": dtype,
+        "accumulation_dtype": "float32",
+        "logits_compute_dtype": dtype,
+        "api_output_dtype": "float32",
+    }
+
+
+def _model_fields(model: dict, dtype: str) -> dict:
+    return {
+        **{k: v for k, v in model.items() if k != "dtype"},
+        **numeric_policy(dtype),
+        "matrix_kernel": "simt",
+    }
+
+
+def _validate_policy(header: dict, model: dict) -> str:
+    version = header["format_version"]
+    dtype = model.get("weight_dtype", "float32")
+    if version in (2, 3):
+        _require(
+            dtype == "float32",
+            "BF16-weight/float32-activation packages are retired; regenerate as version 4",
+        )
+        _require(model["dtype"] == "float32", "invalid legacy dtype")
+    else:
+        kernel = model.get("matrix_kernel")
+        _require(
+            kernel == "simt" or (kernel == "mma" and dtype == "bfloat16"),
+            "unsupported matrix kernel",
+        )
+        expected = numeric_policy(dtype)
+        _require(
+            "dtype" not in model
+            and all(model.get(k) == v for k, v in expected.items()),
+            "inconsistent numeric policy",
+        )
+    return dtype
+
+
+def _attention_bytes(spec: DecoderSpec, dtype: str) -> int:
+    return spec.num_attention_heads * spec.max_context * 2 if dtype == "bfloat16" else 0
 
 
 def _json_bytes(value: dict) -> bytes:
@@ -118,7 +169,7 @@ def _descriptors(spec: DecoderSpec, weight_dtype: str = "float32") -> list[dict]
             "name": name,
             "shape": list(_shape(spec, name)),
             "strides": _strides(_shape(spec, name)),
-            "dtype": weight_dtype if name in WEIGHTS else "float32",
+            "dtype": weight_dtype,
             "storage": _storage_class(name),
         }
         for name in TENSOR_NAMES
@@ -191,7 +242,7 @@ def read_weights(path: Path, spec: DecoderSpec) -> dict[str, np.ndarray]:
     return weights
 
 
-def _graph(spec: DecoderSpec, tile_rows: int) -> list[dict]:
+def _graph(spec: DecoderSpec, tile_rows: int, dtype: str = "float32") -> list[dict]:
     """Canonical region ownership and minimal data dependencies."""
     d, f, dh = spec.hidden_size, spec.intermediate_size, spec.head_dim
     kv_width = spec.num_key_value_heads * dh
@@ -209,7 +260,9 @@ def _graph(spec: DecoderSpec, tile_rows: int) -> list[dict]:
         tasks.append(
             {
                 "id": task_id,
-                "opcode": opcode,
+                "opcode": opcode.replace("_f32", "_bf16")
+                if dtype == "bfloat16"
+                else opcode,
                 "operands": operands,
                 "output": output,
                 "predecessors": sorted(set(predecessors)),
@@ -423,6 +476,7 @@ def make_plan(
     target: dict,
     tile_rows: int,
     weight_dtype: str = "float32",
+    matrix_kernel: str = "simt",
 ) -> tuple[dict, bytes]:
     _require(type(tile_rows) is int and tile_rows > 0, "tile_rows must be positive")
     _require(set(weights) == set(WEIGHTS), "weight names mismatch")
@@ -434,16 +488,18 @@ def make_plan(
             f"invalid weight {name}",
         )
     packed, weight_regions = _pack_weights(spec, weights, weight_dtype)
-    scratch_regions, scratch_bytes = _regions(spec, SCRATCH, 16)
-    kv_regions, kv_bytes = _regions(spec, ("K", "V"), 16)
-    tasks = _graph(spec, tile_rows)
+    scratch_regions, scratch_bytes = _regions(
+        spec, SCRATCH, 16, _weight_size(weight_dtype)
+    )
+    kv_regions, kv_bytes = _regions(spec, ("K", "V"), 16, _weight_size(weight_dtype))
+    tasks = _graph(spec, tile_rows, weight_dtype)
     waves = _schedule(tasks, target["launch"]["worker_count"])
     plan = {
         "header": {
             "format_version": FORMAT,
             "executor_abi": ABI,
             "generator": GENERATOR,
-            "model_kind": "llama_decoder_block_f32",
+            "model_kind": "llama_decoder_block",
         },
         "target": {
             "compute_capability": target["device"]["compute_capability"],
@@ -454,16 +510,17 @@ def make_plan(
             "kernel_fingerprint": target["executor"]["fingerprint"],
         },
         "model": {
-            **spec.as_dict(),
-            "weight_dtype": weight_dtype,
+            **_model_fields(spec.as_dict(), weight_dtype),
+            "matrix_kernel": matrix_kernel,
             "layers": 1,
             "tile_rows": tile_rows,
             "tensors": _descriptors(spec, weight_dtype),
         },
         "storage": {
-            "input_bytes": spec.hidden_size * 4,
-            "output_bytes": spec.hidden_size * 4,
+            "input_bytes": spec.hidden_size * _weight_size(weight_dtype),
+            "output_bytes": spec.hidden_size * _weight_size(weight_dtype),
             "scratch_bytes": scratch_bytes,
+            "attention_bytes": _attention_bytes(spec, weight_dtype),
             "scratch": scratch_regions,
             "kv_bytes": kv_bytes,
             "kv": kv_regions,
@@ -486,19 +543,26 @@ def validate(plan: dict, packed: bytes) -> None:
     header, target, model, storage = (
         plan[name] for name in ("header", "target", "model", "storage")
     )
-    legacy = header["format_version"] == 2
+    legacy = header["format_version"] in (2, 3)
     _require(
         (
-            (legacy and header["executor_abi"] == "tileinfer-decoder-v2")
+            (
+                legacy
+                and header["executor_abi"]
+                == f"tileinfer-decoder-v{header['format_version']}"
+            )
             or (header["format_version"] == FORMAT and header["executor_abi"] == ABI)
         )
-        and header["model_kind"] == "llama_decoder_block_f32",
+        and header["model_kind"]
+        == ("llama_decoder_block_f32" if legacy else "llama_decoder_block"),
         "unsupported decoder header",
     )
-    weight_dtype = "float32" if legacy else model["weight_dtype"]
+    weight_dtype = _validate_policy(header, model)
     weight_bytes = _weight_size(weight_dtype)
     names = {field.name for field in fields(DecoderSpec)}
-    spec = DecoderSpec(**{name: model[name] for name in names})
+    spec = DecoderSpec(
+        **{name: model[name] for name in names if name != "dtype" or legacy}
+    )
     _require(
         model["head_to_kv"] == spec.head_to_kv and model["layers"] == 1,
         "unsupported model/head mapping",
@@ -522,8 +586,11 @@ def validate(plan: dict, packed: bytes) -> None:
         "invalid target",
     )
     _require(
-        storage["input_bytes"] == spec.hidden_size * 4
-        and storage["output_bytes"] == spec.hidden_size * 4,
+        storage["input_bytes"] == spec.hidden_size * weight_bytes
+        and storage["output_bytes"] == spec.hidden_size * weight_bytes
+        and (
+            legacy or storage["attention_bytes"] == _attention_bytes(spec, weight_dtype)
+        ),
         "invalid IO storage",
     )
     for names_in_class, key, alignment in (
@@ -535,7 +602,7 @@ def validate(plan: dict, packed: bytes) -> None:
             spec,
             names_in_class,
             alignment,
-            weight_bytes if key == "weights" else 4,
+            weight_bytes,
         )
         _require(
             storage[key] == expected
@@ -548,7 +615,7 @@ def validate(plan: dict, packed: bytes) -> None:
         == {"weights_bytes": len(packed), "weights_sha256": sha256(packed).hexdigest()},
         "weight length or checksum mismatch",
     )
-    expected_tasks = _graph(spec, tile_rows)
+    expected_tasks = _graph(spec, tile_rows, weight_dtype)
     expected_waves = _schedule(expected_tasks, workers)
     _require(
         plan["tasks"] == expected_tasks and plan["waves"] == expected_waves,
@@ -563,6 +630,7 @@ def build(
     tile_rows: int | str,
     out: Path,
     weight_dtype: str = "float32",
+    matrix_kernel: str = "simt",
 ) -> dict:
     spec = read_model(model_path)
     weights = read_weights(weights_path, spec)
@@ -572,7 +640,9 @@ def build(
         tile_rows, candidates = choose_tile_rows(spec, target["launch"]["worker_count"])
     elif isinstance(tile_rows, str):
         tile_rows = int(tile_rows)
-    plan, packed = make_plan(spec, weights, target, tile_rows, weight_dtype)
+    plan, packed = make_plan(
+        spec, weights, target, tile_rows, weight_dtype, matrix_kernel
+    )
     if out.exists():
         raise FileExistsError(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -596,7 +666,10 @@ def read_package(package: Path) -> tuple[dict, bytes, str]:
     data = (package / "plan.json").read_bytes()
     plan = json.loads(data)
     packed = (package / "weights.bin").read_bytes()
-    if plan.get("header", {}).get("model_kind") == "llama_decoder_stack_f32":
+    if plan.get("header", {}).get("model_kind") in (
+        "llama_decoder_stack_f32",
+        "llama_decoder_stack",
+    ):
         from .decoder_stack import validate_stack
 
         validate_stack(plan, packed)
@@ -609,9 +682,14 @@ def summary(plan: dict, digest: str) -> dict:
     storage = plan["storage"]
     waves = plan["waves"]
     weight_dtype = plan["model"].get("weight_dtype", "float32")
-    if plan["header"]["model_kind"] == "llama_decoder_stack_f32":
+    if plan["header"]["model_kind"] in (
+        "llama_decoder_stack_f32",
+        "llama_decoder_stack",
+    ):
         return {
-            "weight_dtype": weight_dtype,
+            **numeric_policy(weight_dtype),
+            "matrix_kernel": plan["model"].get("matrix_kernel", "simt"),
+            "attention_bytes": storage.get("attention_bytes", 0),
             "plan_sha256": digest,
             "weights_sha256": plan["integrity"]["weights_sha256"],
             "layers": plan["model"]["layers"],
@@ -625,7 +703,9 @@ def summary(plan: dict, digest: str) -> dict:
             "worker_loads": [wave["estimated_work"] for wave in waves],
         }
     return {
-        "weight_dtype": weight_dtype,
+        **numeric_policy(weight_dtype),
+        "matrix_kernel": plan["model"].get("matrix_kernel", "simt"),
+        "attention_bytes": storage.get("attention_bytes", 0),
         "plan_sha256": digest,
         "weights_sha256": plan["integrity"]["weights_sha256"],
         "model": {
@@ -642,7 +722,7 @@ def summary(plan: dict, digest: str) -> dict:
         },
         "task_counts": {
             opcode: sum(task["opcode"] == opcode for task in plan["tasks"])
-            for opcode in sorted(REQUIRED_OPCODES)
+            for opcode in sorted({task["opcode"] for task in plan["tasks"]})
         },
         "wave_count": len(waves),
         "worker_loads": [wave["estimated_work"] for wave in waves],
@@ -652,7 +732,8 @@ def summary(plan: dict, digest: str) -> dict:
         "scratch_bytes": storage["scratch_bytes"],
         "kv_bytes": storage["kv_bytes"],
         "weight_bytes": storage["weight_bytes"],
-        "peak_bytes": sum(
+        "peak_bytes": storage.get("attention_bytes", 0)
+        + sum(
             storage[name]
             for name in (
                 "input_bytes",

@@ -21,7 +21,7 @@ def render_tile_flow_svg(plan: dict, *, plan_sha256: str) -> str:
 
     def first(opcode: str, *, weight: str | None = None) -> dict:
         for task in tasks:
-            if task["opcode"] == opcode and (
+            if task["opcode"].replace("_bf16", "_f32") == opcode and (
                 weight is None or task["operands"].get("weight") == ids[weight]
             ):
                 return task
@@ -41,19 +41,21 @@ def render_tile_flow_svg(plan: dict, *, plan_sha256: str) -> str:
     cache = next(
         task
         for task in tasks
-        if task["opcode"] == "rope_cache_f32" and task["operands"]["kv_head"] == kv_head
+        if task["opcode"].replace("_bf16", "_f32") == "rope_cache_f32"
+        and task["operands"]["kv_head"] == kv_head
     )
     attention = next(
         task
         for task in tasks
-        if task["opcode"] == "attention_prefix_f32"
+        if task["opcode"].replace("_bf16", "_f32") == "attention_prefix_f32"
         and task["operands"]["head"] == query_head
     )
     output_projection = first("gemv_f32", weight="Wo")
     ffn_norm = next(
         task
         for task in tasks
-        if task["opcode"] == "rms_norm_f32" and task["operands"]["output"] == ids["z"]
+        if task["opcode"].replace("_bf16", "_f32") == "rms_norm_f32"
+        and task["operands"]["output"] == ids["z"]
     )
     product = first("silu_product_f32")
     down = first("gemv_f32", weight="Wdown")
@@ -90,7 +92,7 @@ def render_tile_flow_svg(plan: dict, *, plan_sha256: str) -> str:
         return ", ".join(parts)
 
     def computation(task: dict) -> str:
-        opcode = task["opcode"]
+        opcode = task["opcode"].replace("_bf16", "_f32")
         operands = task["operands"]
         if opcode == "rms_norm_f32":
             source = tensors[operands["input"]]["name"]

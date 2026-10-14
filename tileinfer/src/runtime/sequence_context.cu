@@ -1,3 +1,4 @@
+#include "detail/activation_buffer.cuh"
 #include "detail/cleanup.hpp"
 #include "detail/cuda_check.hpp"
 #include "detail/input_ring_cursor.hpp"
@@ -43,10 +44,11 @@ struct SequenceContext::Impl
     std::shared_ptr<detail::UploadedPlan> model;
     cuda::stream stream;
     cuda::device_memory_pool_ref& pool;
-    cuda::device_buffer<float> input;
-    cuda::device_buffer<float> output;
-    cuda::device_buffer<float> scratch;
-    cuda::device_buffer<float> kv;
+    detail::ActivationBuffer input;
+    detail::ActivationBuffer output;
+    detail::ActivationBuffer scratch;
+    detail::ActivationBuffer kv;
+    detail::ActivationBuffer attention_scores;
     cuda::device_buffer<float> logits;
     std::optional<cuda::device_buffer<float>> block_trace;
     cuda::device_buffer<TokenId> tokens;
@@ -63,10 +65,11 @@ struct SequenceContext::Impl
         : model(std::move(value))
         , stream(model->device)
         , pool(cuda::device_default_memory_pool(model->device))
-        , input(stream, pool, model->hidden_size, cuda::no_init)
-        , output(stream, pool, model->hidden_size, cuda::no_init)
-        , scratch(stream, pool, model->scratch_count, cuda::no_init)
-        , kv(stream, pool, model->kv_count, cuda::no_init)
+        , input(stream, pool, model->hidden_size, model->weight_dtype)
+        , output(stream, pool, model->hidden_size, model->weight_dtype)
+        , scratch(stream, pool, model->scratch_count, model->weight_dtype)
+        , kv(stream, pool, model->kv_count, model->weight_dtype)
+        , attention_scores(stream, pool, model->attention_count, model->weight_dtype)
         , logits(stream, pool, model->stack.vocab_size, cuda::no_init)
         , tokens(stream, pool, model->max_context, cuda::no_init)
         , generated(stream, pool, model->max_context, cuda::no_init)
@@ -108,7 +111,7 @@ struct SequenceContext::Impl
             block_trace.emplace(stream, pool,
                 static_cast<std::size_t>(model->stack.layers) * model->hidden_size, cuda::no_init);
         const detail::WorkerBuffers buffers{input.data(), output.data(), scratch.data(), kv.data(),
-            logits.data(), trace ? block_trace->data() : nullptr};
+            logits.data(), trace ? block_trace->data() : nullptr, attention_scores.data()};
         detail::enqueue_worker(
             stream, model->view(), buffers, position, {-1, token_ids, token_index});
     }
@@ -179,11 +182,12 @@ struct SequenceContext::Impl
             auto& host = ticket->diagnostic->kv.emplace(
                 stream, cuda::pinned_default_memory_pool(), model->kv_count, cuda::no_init);
             const auto& generation = ticket->generation;
-            detail::enqueue_zero_unused_kv(stream, kv.data(), model->kv_count, model->stack.layers,
-                model->stack.layer_kv_stride, model->kv_heads * model->head_dim, model->max_context,
+            detail::enqueue_zero_unused_kv(stream, kv.data(), model->weight_dtype, model->kv_count,
+                model->stack.layers, model->stack.layer_kv_stride,
+                model->kv_heads * model->head_dim, model->max_context,
                 generation ? generation->start_position : ticket->end_position,
                 generation ? status.data() : nullptr);
-            cuda::copy_bytes(stream, kv, host);
+            kv.copy_to(stream, host);
         }
         if (request.block_outputs) {
             auto& host =

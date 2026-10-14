@@ -119,12 +119,12 @@ def _check_inputs(
     spec: DecoderSpec, weights: dict[str, torch.Tensor], tokens: torch.Tensor
 ) -> None:
     if (
-        tokens.dtype != torch.float32
+        tokens.dtype not in (torch.float32, torch.bfloat16)
         or tokens.ndim != 2
         or tokens.shape[1] != spec.hidden_size
     ):
         raise ValueError(
-            "tokens must have shape [positions, hidden_size] and float32 dtype"
+            "tokens must have shape [positions, hidden_size] and float32 or BF16 dtype"
         )
     if not 0 < tokens.shape[0] <= spec.max_context:
         raise ValueError("token count exceeds context capacity")
@@ -132,7 +132,7 @@ def _check_inputs(
         raise ValueError("decoder weight names do not match the specification")
     for name, shape_fn in WEIGHT_SHAPES.items():
         weight = weights[name]
-        if weight.shape != shape_fn(spec) or weight.dtype != torch.float32:
+        if weight.shape != shape_fn(spec) or weight.dtype != tokens.dtype:
             raise ValueError(f"invalid {name} shape or dtype")
 
 
@@ -160,9 +160,11 @@ def apply_rope(
     values: torch.Tensor, positions: torch.Tensor, spec: DecoderSpec
 ) -> torch.Tensor:
     """Rotate [heads, head_dim] or [positions, heads, head_dim] in HF split halves."""
-    angles = positions.to(torch.float32).unsqueeze(-1) * rope_inverse_frequencies(spec)
-    cosine = angles.cos().unsqueeze(-2)
-    sine = angles.sin().unsqueeze(-2)
+    angles = positions.to(device=values.device, dtype=torch.float32).unsqueeze(
+        -1
+    ) * rope_inverse_frequencies(spec).to(values.device)
+    cosine = angles.cos().to(values.dtype).unsqueeze(-2)
+    sine = angles.sin().to(values.dtype).unsqueeze(-2)
     first, second = values.chunk(2, dim=-1)
     return torch.cat(
         (first * cosine - second * sine, second * cosine + first * sine), dim=-1
@@ -170,7 +172,10 @@ def apply_rope(
 
 
 def _rms_norm(x: torch.Tensor, scale: torch.Tensor, eps: float) -> torch.Tensor:
-    return x * torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + eps) * scale
+    normalized = x.float() * torch.rsqrt(
+        x.float().square().mean(dim=-1, keepdim=True) + eps
+    )
+    return normalized.to(x.dtype) * scale
 
 
 @dataclass
@@ -180,11 +185,16 @@ class ReferenceCache:
     position: int = 0
 
     @classmethod
-    def empty(cls, spec: DecoderSpec) -> ReferenceCache:
+    def empty(
+        cls,
+        spec: DecoderSpec,
+        dtype: torch.dtype = torch.float32,
+        device: str | torch.device = "cpu",
+    ) -> ReferenceCache:
         shape = (1, spec.max_context, spec.num_key_value_heads, spec.head_dim)
         return cls(
-            torch.zeros(shape, dtype=torch.float32),
-            torch.zeros(shape, dtype=torch.float32),
+            torch.zeros(shape, dtype=dtype, device=device),
+            torch.zeros(shape, dtype=dtype, device=device),
         )
 
     def reset(self) -> None:
@@ -198,12 +208,17 @@ def decode_one(
     cache: ReferenceCache,
 ) -> dict[str, torch.Tensor]:
     """Append one token; return intermediate values for later GPU comparison."""
-    if x.shape != (spec.hidden_size,) or x.dtype != torch.float32:
-        raise ValueError("expected one float32 hidden vector")
+    if x.shape != (spec.hidden_size,) or x.dtype not in (torch.float32, torch.bfloat16):
+        raise ValueError("expected one float32 or BF16 hidden vector")
     if cache.position >= spec.max_context:
         raise ValueError("context capacity reached")
     expected_shape = (1, spec.max_context, spec.num_key_value_heads, spec.head_dim)
-    if cache.k.shape != expected_shape or cache.v.shape != expected_shape:
+    if (
+        cache.k.shape != expected_shape
+        or cache.v.shape != expected_shape
+        or cache.k.dtype != x.dtype
+        or cache.v.dtype != x.dtype
+    ):
         raise ValueError("KV cache shape differs from the specification")
     p = cache.position
     u = _rms_norm(x, weights["attn_norm"], spec.rms_norm_eps)
@@ -218,8 +233,13 @@ def decode_one(
     head_to_kv = spec.head_to_kv
     keys = cache.k[0, : p + 1, head_to_kv]
     values = cache.v[0, : p + 1, head_to_kv]
-    scores = torch.einsum("hd,thd->ht", q, keys) / math.sqrt(spec.head_dim)
-    probabilities = torch.softmax(scores, dim=-1)
+    raw_scores = torch.einsum("hd,thd->ht", q, keys)
+    scores = (
+        raw_scores / math.sqrt(spec.head_dim)
+        if x.dtype == torch.float32
+        else raw_scores * (spec.head_dim**-0.5)
+    )
+    probabilities = torch.softmax(scores, dim=-1, dtype=torch.float32).to(x.dtype)
     attention = torch.einsum("ht,thd->hd", probabilities, values).reshape(
         spec.hidden_size
     )
@@ -256,10 +276,17 @@ def recompute_prefix(
     k = apply_rope(k, positions, spec)
     keys = k[:, spec.head_to_kv]
     values = v[:, spec.head_to_kv]
-    scores = torch.einsum("thd,shd->ths", q, keys) / math.sqrt(spec.head_dim)
-    future = torch.triu(torch.ones((length, length), dtype=torch.bool), diagonal=1)
+    raw_scores = torch.einsum("thd,shd->ths", q, keys)
+    scores = (
+        raw_scores / math.sqrt(spec.head_dim)
+        if tokens.dtype == torch.float32
+        else raw_scores * (spec.head_dim**-0.5)
+    )
+    future = torch.triu(
+        torch.ones((length, length), dtype=torch.bool, device=tokens.device), diagonal=1
+    )
     scores = scores.masked_fill(future[:, None, :], -torch.inf)
-    probabilities = torch.softmax(scores, dim=-1)
+    probabilities = torch.softmax(scores, dim=-1, dtype=torch.float32).to(tokens.dtype)
     attention = torch.einsum("ths,shd->thd", probabilities, values).reshape(
         length, spec.hidden_size
     )

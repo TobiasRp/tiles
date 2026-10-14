@@ -65,13 +65,17 @@ int width(Id tensor, const PlanShape& s)
     }
 }
 
-CheckedTask check_task(const json& task, const PlanShape& s, int workers, int waves)
+CheckedTask check_task(const json& task, const PlanShape& s, int workers, int waves, bool bf16)
 {
     CheckedTask result{};
     result.wave = index(task.at("wave"), waves);
     result.worker = index(task.at("worker"), workers);
     const auto& op = task.at("operands");
-    const auto code = task.at("opcode").get<std::string>();
+    auto code = task.at("opcode").get<std::string>();
+    require(
+        code.ends_with(bf16 ? "_bf16" : "_f32"), "opcode precision differs from numeric policy");
+    if (bf16)
+        code.replace(code.size() - 5, 5, "_f32");
     json expected;
     json outputs = json::array();
     auto read = [&](Id id, int begin, int end) { result.reads.push_back({id, begin, end}); };
@@ -193,6 +197,8 @@ CheckedTask check_task(const json& task, const PlanShape& s, int workers, int wa
     } else {
         throw std::runtime_error("unsupported decoder opcode");
     }
+    if (bf16)
+        result.record.opcode = static_cast<Opcode>(static_cast<unsigned>(result.record.opcode) + 6);
     for (const auto& [key, value] : expected.items())
         if (value.is_number_integer())
             require(op.at(key).is_number_integer(), "operand must be an integer");
@@ -222,7 +228,8 @@ void validate_program(const json& document, const PlanShape& s, int workers, Loa
         const int id = index(task.at("id"), count);
         require(!seen[id], "duplicate task ID");
         seen[id] = true;
-        tasks[id] = check_task(task, s, workers, result.wave_count);
+        tasks[id] = check_task(
+            task, s, workers, result.wave_count, result.weight_dtype == WeightDtype::bfloat16);
     }
     struct Writer
     {

@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
 from tileplan.decoder_plan import read_package
 from tileplan.decoder_stack import (
     StackCache,
@@ -33,6 +32,8 @@ OPCODES = [
     "embedding_lookup_f32",
     "logits_f32",
 ]
+
+OPCODES += [opcode.replace("_f32", "_bf16") for opcode in OPCODES]
 
 
 def target(threads: int = 128) -> dict:

@@ -25,12 +25,19 @@ in `checkpoints/Llama-3.2-1B`, run from the repository root:
 ```sh
 ./generate.py "The capital of France is"
 ./generate.py "Once upon a time" --max-new-tokens 32
+./generate.py "The capital of France is" --dtype float32
+./generate.py "The capital of France is" --matrix-kernel mma
 ```
 
 `generate.py` builds the runtime, probes the compiled worker, imports a package,
-and prints the continuation and timing. Reuse a package with
-`--package runs/llama32-…`; each run prints its output directory. The checkpoint
-is the base model, so prompts are text continuations rather than chat messages.
+and prints the continuation and timing. New packages default to BF16 weights,
+activations, and K/V, with SIMT matrix kernels; `--dtype float32` selects the
+pure-float32 path.
+
+Reuse a package with `--package runs/llama32-…`; omitted precision/kernel options
+follow the package, and explicit options must match it. Each run prints its
+output directory. The checkpoint is the base model, so prompts are text
+continuations rather than chat messages.
 
 ## Explore
 

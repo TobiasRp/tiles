@@ -48,7 +48,7 @@ class StreamGate
     {
         std::unique_lock lock(state_->mutex);
         require(state_->condition.wait_for(
-                    lock, std::chrono::seconds(10), [&] { return state_->entered; }),
+                    lock, std::chrono::seconds(480), [&] { return state_->entered; }),
             "stream did not reach test gate");
     }
     void release()
@@ -108,7 +108,8 @@ int main(int argc, char** argv)
         }
         require(exhausted, "pending inputs did not exhaust the ring");
         first.release();
-        queued.wait(prefix);
+        // Wait until prefix work reaches the gate before asking the CUDA tool
+        // to drain an event: instrumentation may also drain later callbacks.
         second.entered();
         // One reservation remains at capacity-2. The new span starts at
         // capacity-1 and must copy one tail element followed by three head elements.
@@ -117,6 +118,7 @@ int main(int argc, char** argv)
         auto wrapped = queued.enqueue_prefill(prompt, {.logits = true});
         prompt.fill(1); // enqueue must retain its own copy of the caller's bytes
         second.release();
+        queued.wait(prefix);
         require(queued.wait(wrapped).position == 4, "wrapped prefill position changed");
         const std::array<tileinfer::TokenId, 4> expected{0, 1, 1, 0};
         auto comparison = reference.enqueue_prefill(expected, {.logits = true});

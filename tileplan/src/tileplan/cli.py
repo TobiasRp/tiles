@@ -37,7 +37,11 @@ def main(argv: list[str] | None = None) -> int:
         planner.add_argument(f"--{name}", type=_path, required=True)
     planner.add_argument("--tile-rows", default="auto")
     planner.add_argument(
-        "--weight-dtype", choices=("float32", "bfloat16"), default="float32"
+        "--dtype",
+        "--weight-dtype",
+        dest="weight_dtype",
+        choices=("float32", "bfloat16"),
+        default="float32",
     )
     stack_planner = commands.add_parser(
         "build-stack", help="write a decoder stack package"
@@ -46,7 +50,11 @@ def main(argv: list[str] | None = None) -> int:
         stack_planner.add_argument(f"--{name}", type=_path, required=True)
     stack_planner.add_argument("--tile-rows", default="auto")
     stack_planner.add_argument(
-        "--weight-dtype", choices=("float32", "bfloat16"), default="float32"
+        "--dtype",
+        "--weight-dtype",
+        dest="weight_dtype",
+        choices=("float32", "bfloat16"),
+        default="float32",
     )
     importer = commands.add_parser(
         "import-llama32", help="pack the pinned Llama 3.2 1B base checkpoint"
@@ -56,6 +64,14 @@ def main(argv: list[str] | None = None) -> int:
     importer.add_argument("--max-context", type=int, default=4096)
     importer.add_argument("--tile-rows", default="auto")
     importer.add_argument("--revision", help="pinned Hugging Face commit SHA")
+    importer.add_argument(
+        "--dtype",
+        dest="weight_dtype",
+        choices=("float32", "bfloat16"),
+        default="bfloat16",
+    )
+    for command in (planner, stack_planner, importer):
+        command.add_argument("--matrix-kernel", choices=("simt", "mma"), default="simt")
     for name in ("inspect", "verify"):
         command = commands.add_parser(name, help=f"{name} a decoder package")
         command.add_argument("package", type=_path)
@@ -85,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.tile_rows,
                 args.out,
                 args.weight_dtype,
+                args.matrix_kernel,
             )
         elif args.command == "build-stack":
             result = build_stack(
@@ -94,6 +111,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.tile_rows,
                 args.out,
                 args.weight_dtype,
+                args.matrix_kernel,
             )
         elif args.command == "import-llama32":
             result = import_llama32(
@@ -103,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.max_context,
                 args.tile_rows,
                 args.revision,
+                args.weight_dtype,
+                args.matrix_kernel,
             )
         elif args.command in {"inspect", "verify"}:
             plan, _, digest = read_package(args.package)

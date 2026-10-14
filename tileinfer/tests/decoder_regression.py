@@ -9,7 +9,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
 from tileplan.decoder_plan import build
 from tileplan.decoder_reference import (
     DecoderSpec,
@@ -135,9 +134,7 @@ def main() -> None:
         if bf16_plan["model"]["weight_dtype"] != "bfloat16":
             raise AssertionError("missing BF16 weight dtype")
         if any(
-            tensor["dtype"]
-            != ("bfloat16" if tensor["storage"] == "weight" else "float32")
-            for tensor in bf16_plan["model"]["tensors"]
+            tensor["dtype"] != "bfloat16" for tensor in bf16_plan["model"]["tensors"]
         ):
             raise AssertionError("incorrect per-tensor dtype")
         bf16_blob = (bf16_package / "weights.bin").read_bytes()
@@ -155,12 +152,18 @@ def main() -> None:
         ).reshape(expected_wq.shape)
         np.testing.assert_array_equal(actual_wq, expected_wq)
         quantized = {
-            name: value.to(torch.bfloat16).float() for name, value in weights.items()
+            name: value.to(device="cuda", dtype=torch.bfloat16)
+            for name, value in weights.items()
         }
-        bf16_cache = ReferenceCache.empty(spec)
+        bf16_cache = ReferenceCache.empty(spec, torch.bfloat16, "cuda")
         with torch.inference_mode():
             bf16_traces = [
-                decode_one(torch.from_numpy(row), quantized, spec, bf16_cache)
+                decode_one(
+                    torch.from_numpy(row).to(device="cuda", dtype=torch.bfloat16),
+                    quantized,
+                    spec,
+                    bf16_cache,
+                )
                 for row in hidden[:2]
             ]
         request_path.write_text(json.dumps({"tokens": request["tokens"][:2]}))
@@ -173,9 +176,9 @@ def main() -> None:
             for field in ("q", "k", "v", "attention", "attn_residual", "ffn", "y"):
                 np.testing.assert_allclose(
                     actual[field],
-                    expected[field].numpy().reshape(-1),
-                    atol=spec.atol,
-                    rtol=spec.rtol,
+                    expected[field].float().cpu().numpy().reshape(-1),
+                    atol=1e-2,
+                    rtol=1e-2,
                     err_msg=f"BF16 {field}",
                 )
         original_bf16 = bf16_plan

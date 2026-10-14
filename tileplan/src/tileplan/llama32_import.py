@@ -185,7 +185,12 @@ def _hash_file(path: Path) -> str:
 
 
 def _copy_tensor(
-    source: Any, name: str, shape: tuple[int, ...], mapping: mmap.mmap, offset: int
+    source: Any,
+    name: str,
+    shape: tuple[int, ...],
+    mapping: mmap.mmap,
+    offset: int,
+    dtype: str = "bfloat16",
 ) -> None:
     tensor_slice = source.get_slice(name)
     _require(
@@ -194,7 +199,11 @@ def _copy_tensor(
     )
     tensor = source.get_tensor(name)
     _require(bool(torch.isfinite(tensor).all()), f"non-finite tensor {name}")
-    raw = tensor.contiguous().view(torch.uint16).numpy().tobytes()
+    raw = (
+        tensor.contiguous().view(torch.uint16).numpy().tobytes()
+        if dtype == "bfloat16"
+        else tensor.float().contiguous().numpy().tobytes()
+    )
     mapping[offset : offset + len(raw)] = raw
 
 
@@ -205,6 +214,8 @@ def pack_safetensors(
     tile_rows: int,
     out: Path,
     revision: str | None = None,
+    dtype: str = "bfloat16",
+    matrix_kernel: str = "simt",
 ) -> dict:
     """Stream HF BF16 tensors into the existing stack ABI."""
     resolved_revision, revision_evidence = _revision(checkpoint, revision)
@@ -222,7 +233,9 @@ def pack_safetensors(
     out.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{out.name}-", dir=out.parent))
     try:
-        plan = make_stack_plan_metadata(spec, target, tile_rows, "bfloat16", "0" * 64)
+        plan = make_stack_plan_metadata(
+            spec, target, tile_rows, dtype, "0" * 64, matrix_kernel
+        )
         storage = plan["storage"]
         stack = storage["stack"]
         weight_regions = {entry["tensor"]: entry for entry in storage["weights"]}
@@ -242,7 +255,12 @@ def pack_safetensors(
                 def copy(internal: str, shape: tuple[int, ...], offset: int) -> None:
                     hf_name = names[internal]
                     _copy_tensor(
-                        sources[manifest[hf_name]], hf_name, shape, mapping, offset
+                        sources[manifest[hf_name]],
+                        hf_name,
+                        shape,
+                        mapping,
+                        offset,
+                        dtype,
                     )
 
                 d = spec.block.hidden_size
@@ -286,6 +304,11 @@ def pack_safetensors(
         data = _json_bytes(plan)
         (temporary / "plan.json").write_bytes(data)
         report = {
+            "numeric_policy": plan["model"]["numeric_policy"],
+            "activation_dtype": dtype,
+            "accumulation_dtype": "float32",
+            "matrix_kernel": matrix_kernel,
+            "attention_bytes": storage["attention_bytes"],
             "plan_sha256": sha256(data).hexdigest(),
             "weights_sha256": plan["integrity"]["weights_sha256"],
             "revision": resolved_revision,
@@ -311,6 +334,8 @@ def import_llama32(
     max_context: int = 4096,
     tile_rows: int | str = "auto",
     revision: str | None = None,
+    dtype: str = "bfloat16",
+    matrix_kernel: str = "simt",
 ) -> dict:
     spec = read_llama32_config(checkpoint / "config.json", max_context)
     target = read_target(target_path)
@@ -321,7 +346,9 @@ def import_llama32(
         )
     elif isinstance(tile_rows, str):
         tile_rows = int(tile_rows)
-    report = pack_safetensors(checkpoint, spec, target, tile_rows, out, revision)
+    report = pack_safetensors(
+        checkpoint, spec, target, tile_rows, out, revision, dtype, matrix_kernel
+    )
     if candidates is not None:
         report["tile_search"] = candidates
         (out / "planning_report.json").write_bytes(_json_bytes(report))

@@ -1,6 +1,14 @@
 # Llama-style one-token decoder design
 
-Status: milestones 1–6 implemented, 2026-10-12. The CPU reference,
+Status: milestones 1–6 implemented; BF16 computation supersedes BF16-only
+weight storage in version 4, 2026-10-13. The current precision and migration
+contract is in [the BF16 implementation plan](bf16_compute_plan.md). Version-4
+packages use either float32 or BF16 weights, activations, and K/V; reductions
+and selected internal operations remain float32. Version-2/3 pure-float32
+packages remain readable; old BF16-weight/float32-activation packages must be
+regenerated. The historical milestone results below describe version 3.
+
+Historical status, 2026-10-12: The CPU reference,
 version-3 decoder package, cooperative CUDA arithmetic, and compact repeated-block
 stack are available. Synthetic float32 block and full-stack fixtures are under
 `tileplan/tests/fixtures/decoder_m1` and `decoder_m4`; the planner can pack
@@ -32,10 +40,11 @@ plan; reaching it returns an error instead of silently overwriting cache.
 The first synthetic block uses float32 weights, activations, KV cache, and
 accumulation, batch size one, standard full causal attention, no dropout, and
 the existing cooperative wave barrier. This isolates decoder semantics before
-adding BF16 weight storage. The checkpoint path stores **all model weights**
+adding BF16 weight storage. The historical version-3 checkpoint path stores **all model weights**
 (including embeddings and norm scales) as BF16, converts them to float32 when
 consumed by the initial kernels, and keeps activations, KV cache, reductions,
-and softmax in float32. Activation/KV precision can be revisited separately.
+and softmax in float32. Version 4 replaces this path with BF16 activations/KV and PyTorch-compatible
+rounding; its required float32 internal math is specified in the BF16 plan.
 Start with small synthetic dimensions and an independent PyTorch reference.
 The first importer supports the pinned Llama 3.2 1B base checkpoint rather
 than every model with a `Llama` label.

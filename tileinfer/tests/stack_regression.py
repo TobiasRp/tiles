@@ -9,7 +9,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-
 from tileplan.decoder_stack import (
     StackCache,
     StackSpec,
@@ -54,16 +53,26 @@ def check_sequence(
             raise AssertionError("wrong stack token position")
         np.testing.assert_allclose(
             step["logits"],
-            reference["logits"].numpy(),
-            atol=spec.block.atol,
-            rtol=spec.block.rtol,
+            reference["logits"].float().cpu().numpy(),
+            atol=1e-2
+            if reference["logits"].dtype == torch.bfloat16
+            else spec.block.atol,
+            rtol=1e-2
+            if reference["logits"].dtype == torch.bfloat16
+            else spec.block.rtol,
             err_msg=f"logits at token {index}",
         )
         np.testing.assert_allclose(
             step["blocks"],
-            np.stack([block["y"].numpy() for block in reference["blocks"]]),
-            atol=spec.block.atol,
-            rtol=spec.block.rtol,
+            np.stack(
+                [block["y"].float().cpu().numpy() for block in reference["blocks"]]
+            ),
+            atol=1e-2
+            if reference["logits"].dtype == torch.bfloat16
+            else spec.block.atol,
+            rtol=1e-2
+            if reference["logits"].dtype == torch.bfloat16
+            else spec.block.rtol,
             err_msg=f"block outputs at token {index}",
         )
         for layer in range(spec.layers):
@@ -72,9 +81,13 @@ def check_sequence(
                     np.asarray(step[field][layer]).reshape(
                         spec.block.num_key_value_heads, spec.block.head_dim
                     ),
-                    reference["blocks"][layer][field].numpy(),
-                    atol=spec.block.atol,
-                    rtol=spec.block.rtol,
+                    reference["blocks"][layer][field].float().cpu().numpy(),
+                    atol=1e-2
+                    if reference["logits"].dtype == torch.bfloat16
+                    else spec.block.atol,
+                    rtol=1e-2
+                    if reference["logits"].dtype == torch.bfloat16
+                    else spec.block.rtol,
                     err_msg=f"{field} layer {layer} token {index}",
                 )
     if report["position"] != 1 or not report["valid"]:
@@ -101,7 +114,9 @@ def check_generation(
 ) -> None:
     input_path = root / "generate_inputs.json"
     input_path.write_text(json.dumps({"tokens": prompt}))
-    cache = StackCache.empty(spec)
+    cache = StackCache.empty(
+        spec, weights["embedding"].dtype, weights["embedding"].device
+    )
     with torch.inference_mode():
         for token in prompt:
             step = decode_token(token, weights, spec, cache)
@@ -193,20 +208,24 @@ def main() -> None:
             expected_k = cases["k_cache"].copy()
             expected_v = cases["v_cache"].copy()
         weights = fixed_stack_weights(spec)
-        cache = StackCache.empty(spec)
+        cache = StackCache.empty(
+            spec, weights["embedding"].dtype, weights["embedding"].device
+        )
         with torch.inference_mode():
             traces = [decode_token(token, weights, spec, cache) for token in ids]
         np.testing.assert_allclose(
-            np.stack([trace["logits"].numpy() for trace in traces]),
+            np.stack([trace["logits"].float().cpu().numpy() for trace in traces]),
             expected_logits,
             atol=0,
             rtol=0,
         )
         np.testing.assert_allclose(
-            np.stack([layer.k.numpy() for layer in cache.layers]), expected_k
+            np.stack([layer.k.float().cpu().numpy() for layer in cache.layers]),
+            expected_k,
         )
         np.testing.assert_allclose(
-            np.stack([layer.v.numpy() for layer in cache.layers]), expected_v
+            np.stack([layer.v.float().cpu().numpy() for layer in cache.layers]),
+            expected_v,
         )
         for tile_rows in (4, 7):
             package = root / f"package-{tile_rows}"
@@ -239,7 +258,13 @@ def main() -> None:
         legacy_path = package / "plan.json"
         current = json.loads(legacy_path.read_text())
         legacy = copy.deepcopy(current)
-        legacy["header"].update(format_version=2, executor_abi="tileinfer-decoder-v2")
+        legacy["header"].update(
+            format_version=2,
+            executor_abi="tileinfer-decoder-v2",
+            model_kind="llama_decoder_stack_f32",
+        )
+        legacy["model"]["dtype"] = "float32"
+        legacy["storage"].pop("attention_bytes", None)
         legacy["target"].update(
             threads_per_block=128,
             kernel_fingerprint="decoder-wave-abi2-ops-v3-stack-sm86-b128",
@@ -265,9 +290,10 @@ def main() -> None:
         if bf16_plan["storage"]["weight_bytes"] >= original_weight_bytes:
             raise AssertionError("BF16 weights did not reduce storage")
         bf16_weights = {
-            name: value.to(torch.bfloat16).float() for name, value in weights.items()
+            name: value.to(device="cuda", dtype=torch.bfloat16)
+            for name, value in weights.items()
         }
-        bf16_cache = StackCache.empty(spec)
+        bf16_cache = StackCache.empty(spec, torch.bfloat16, "cuda")
         with torch.inference_mode():
             bf16_traces = [
                 decode_token(token, bf16_weights, spec, bf16_cache) for token in ids
@@ -338,10 +364,10 @@ def main() -> None:
         if untied_bf16_plan["storage"]["stack"]["lm_head_offset"] == 0:
             raise AssertionError("untied BF16 output incorrectly aliases embedding")
         untied_bf16_weights = {
-            name: value.to(torch.bfloat16).float()
+            name: value.to(device="cuda", dtype=torch.bfloat16)
             for name, value in untied_weights.items()
         }
-        untied_bf16_cache = StackCache.empty(untied)
+        untied_bf16_cache = StackCache.empty(untied, torch.bfloat16, "cuda")
         with torch.inference_mode():
             untied_bf16_traces = [
                 decode_token(token, untied_bf16_weights, untied, untied_bf16_cache)

@@ -22,6 +22,8 @@ def reference(
     rounds: int,
     weight_dtype: str,
 ) -> dict:
+    torch.backends.cuda.preferred_blas_library("cublaslt")
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (False, False)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     dtype = torch.bfloat16 if weight_dtype == "bfloat16" else torch.float32
@@ -53,13 +55,15 @@ def reference(
 
     def prefill() -> None:
         cache.reset()
-        logits = model(
-            input_ids=prompt_tensor,
-            past_key_values=cache,
-            use_cache=True,
-            cache_position=torch.arange(len(prompt), device=device),
-            logits_to_keep=1,
-        ).logits
+        # Match the executor's one-token prefix shapes; setup is not timed.
+        for position in range(len(prompt)):
+            logits = model(
+                input_ids=prompt_tensor[:, position : position + 1],
+                past_key_values=cache,
+                use_cache=True,
+                cache_position=torch.tensor([position], device=device),
+                logits_to_keep=1,
+            ).logits
         prefix_logits.copy_(logits)
 
     def generate() -> torch.Tensor:
@@ -139,7 +143,11 @@ def reference(
         "cuda_version": torch.version.cuda,
         "device": torch.cuda.get_device_name(),
         "weight_dtype": weight_dtype,
-        "arithmetic_dtype": weight_dtype,
+        "activation_dtype": weight_dtype,
+        "accumulation_dtype": "float32",
+        "bf16_reduction": False,
+        "split_k": False,
+        "blas_library": "cublaslt",
         "tf32": False,
         "baseline": "Transformers eager attention, StaticCache, GPU argmax feedback",
         "graph_scope": "complete selection/decode loop for all requested tokens",
@@ -159,8 +167,8 @@ def main() -> None:
     parser.add_argument(
         "--reference-dtype",
         choices=("float32", "bfloat16"),
-        default="float32",
-        help="reference weights and arithmetic; TileInfer arithmetic stays float32",
+        default=None,
+        help="reference precision (defaults to the package policy)",
     )
     parser.add_argument(
         "--reference-child", action="store_true", help=argparse.SUPPRESS
@@ -171,6 +179,10 @@ def main() -> None:
         parser.error("inputs must contain a nonempty integer token list")
     plan = json.loads((args.package / "plan.json").read_text())
     weight_dtype = plan["model"]["weight_dtype"]
+    if args.reference_dtype is None:
+        args.reference_dtype = weight_dtype
+    if args.reference_dtype != weight_dtype:
+        parser.error("reference precision must match the package")
     if weight_dtype not in {"float32", "bfloat16"}:
         parser.error("unsupported package weight dtype")
     if (
@@ -236,8 +248,10 @@ def main() -> None:
         )
     )
     matches = runtime["generated"] == baseline["eager"]["generated"]
-    if args.reference_dtype == "float32" and not matches:
-        raise AssertionError("generated IDs differ from the float32 reference")
+    if not matches:
+        raise AssertionError(
+            "generated IDs differ from the matching-precision reference"
+        )
     report = {
         "prompt_tokens": len(prompt),
         "new_tokens": args.new_tokens,
@@ -245,7 +259,9 @@ def main() -> None:
         "rounds": args.rounds,
         "reference": baseline,
         "runtime": runtime,
-        "runtime_arithmetic_dtype": "float32",
+        "runtime_activation_dtype": weight_dtype,
+        "runtime_accumulation_dtype": "float32",
+        "matrix_kernel": plan["model"].get("matrix_kernel", "simt"),
         "generated_ids_match": matches,
         "timing": "CUDA events around GPU selection and decode; prefill and readback excluded",
     }
@@ -257,7 +273,7 @@ def main() -> None:
             f"{baseline[mode]['us_per_token'] / 1000:.3f} ms/token"
         )
     print(
-        f"TileInfer {weight_dtype} weights/float32 arithmetic: "
+        f"TileInfer {weight_dtype} weights/activations, FP32 accumulation: "
         f"{runtime['us_per_token'] / 1000:.3f} ms/token; IDs match: {matches}"
     )
     print(args.out)

@@ -1,0 +1,99 @@
+{
+  "calibration_id": "pytorch-bf16-reference-variation-v1",
+  "date": "2026-10-14",
+  "torch_version": "2.14.1+cu130",
+  "transformers_version": "4.57.6",
+  "device": "RTX 3050 SM86",
+  "weights_sha256": "34cb4260034f41a7b629325a4f29e8fef074f978321b9b70d95487aa6bf3d7ce",
+  "reference_sha256": "201e4be24866ba777f329cd1ce3d41ae2187017c02e35074e223631ed61739bf",
+  "rule": "rtol=.03 (.02 for V); atol=max(.05, round_up_to_0.01(1.25*max_reference_positive(abs_error-rtol*abs_expected))); RMS ceiling=round_up_to_0.01(2*max_reference_RMS)",
+  "oracle": "cuBLASLt sequential eager, BF16 reduction and split-K disabled, TF32 disabled",
+  "independent_comparisons": [
+    "cuBLASLt full-prefix strict",
+    "cuBLAS sequential with BF16 reduction and split-K enabled"
+  ],
+  "bfloat16": {
+    "blocks": {
+      "atol": 0.34,
+      "rtol": 0.03,
+      "rms_limit": 0.04
+    },
+    "k": {
+      "atol": 0.15,
+      "rtol": 0.03,
+      "rms_limit": 0.03
+    },
+    "v": {
+      "atol": 0.05,
+      "rtol": 0.02,
+      "rms_limit": 0.01
+    },
+    "logits": {
+      "atol": 0.18,
+      "rtol": 0.03,
+      "rms_limit": 0.07
+    }
+  },
+  "reference_variation": {
+    "full-prefix-strict": {
+      "blocks": {
+        "max_abs": 0.5,
+        "rms": 0.0031828226055949926,
+        "required_floor_at_fixed_rtol": 0.27125000953674316,
+        "max_scaled_at_005_002": 2.4691357612609863,
+        "calibrated_max_scaled_error": 0.8791208267211914
+      },
+      "k": {
+        "max_abs": 0.15625,
+        "rms": 0.011802290566265583,
+        "required_floor_at_fixed_rtol": 0.115234375,
+        "max_scaled_at_005_002": 2.020202159881592,
+        "calibrated_max_scaled_error": 0.8179959058761597
+      },
+      "v": {
+        "max_abs": 0.0390625,
+        "rms": 0.0036897382233291864,
+        "required_floor_at_fixed_rtol": 0.03569335862994194,
+        "max_scaled_at_005_002": 0.7217473387718201,
+        "calibrated_max_scaled_error": 0.7217473387718201
+      },
+      "logits": {
+        "max_abs": 0.1875,
+        "rms": 0.02775048464536667,
+        "required_floor_at_fixed_rtol": 0.1382421851158142,
+        "max_scaled_at_005_002": 2.621995449066162,
+        "calibrated_max_scaled_error": 0.7804476618766785
+      }
+    },
+    "sequential-default-cublas": {
+      "blocks": {
+        "max_abs": 2.0,
+        "rms": 0.019298268482089043,
+        "required_floor_at_fixed_rtol": 0.10687500238418579,
+        "max_scaled_at_005_002": 1.807228922843933,
+        "calibrated_max_scaled_error": 0.5586592555046082
+      },
+      "k": {
+        "max_abs": 0.125,
+        "rms": 0.012071085162460804,
+        "required_floor_at_fixed_rtol": 0.07406249642372131,
+        "max_scaled_at_005_002": 1.4867841005325317,
+        "calibrated_max_scaled_error": 0.5813953280448914
+      },
+      "v": {
+        "max_abs": 0.0390625,
+        "rms": 0.003807496279478073,
+        "required_floor_at_fixed_rtol": 0.03559814393520355,
+        "max_scaled_at_005_002": 0.7143203020095825,
+        "calibrated_max_scaled_error": 0.7143203020095825
+      },
+      "logits": {
+        "max_abs": 0.1875,
+        "rms": 0.0322461873292923,
+        "required_floor_at_fixed_rtol": 0.1390496790409088,
+        "max_scaled_at_005_002": 2.7739336490631104,
+        "calibrated_max_scaled_error": 0.7765482068061829
+      }
+    }
+  }
+}

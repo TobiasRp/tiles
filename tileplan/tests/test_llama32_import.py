@@ -7,7 +7,6 @@ from pathlib import Path
 
 import torch
 from safetensors.torch import save_file
-
 from tileplan.decoder_plan import read_package
 from tileplan.decoder_reference import DecoderSpec
 from tileplan.decoder_stack import StackSpec, fixed_stack_weights, make_stack_plan
@@ -38,6 +37,12 @@ def target() -> dict:
                     "rope_cache_f32",
                     "attention_prefix_f32",
                     "silu_product_f32",
+                    "rms_norm_bf16",
+                    "gemv_bf16",
+                    "rope_query_bf16",
+                    "rope_cache_bf16",
+                    "attention_prefix_bf16",
+                    "silu_product_bf16",
                 ],
                 "active_blocks_per_sm": 2,
                 "threads_per_block": 128,
@@ -112,6 +117,22 @@ class Llama32ImportTest(unittest.TestCase):
             self.assertEqual(report["revision"], PINNED_REVISION)
             self.assertTrue(plan["storage"]["stack"]["lm_head_alias"])
             self.assertEqual(plan["source"]["revision_evidence"], "explicit")
+
+            _, expected_float32 = make_stack_plan(
+                spec,
+                {name: value.float().numpy() for name, value in bf16.items()},
+                target(),
+                7,
+                "float32",
+            )
+            float32_package = root / "package-float32"
+            pack_safetensors(
+                root, spec, target(), 7, float32_package, PINNED_REVISION, "float32"
+            )
+            float32_plan, float32_bytes, _ = read_package(float32_package)
+            self.assertEqual(float32_bytes, expected_float32)
+            self.assertEqual(float32_plan["model"]["activation_dtype"], "float32")
+            self.assertEqual(float32_plan["storage"]["attention_bytes"], 0)
 
             # An unexpected tensor cannot silently be dropped.
             package2 = root / "package2"

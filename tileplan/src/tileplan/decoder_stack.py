@@ -1,4 +1,4 @@
-"""Synthetic float32 decoder stack and compact repeated-block package."""
+"""Synthetic decoder stack and compact repeated-block package."""
 
 import json
 import math
@@ -18,21 +18,26 @@ from .decoder_plan import (
     GENERATOR,
     SCRATCH,
     WEIGHTS,
+    _attention_bytes,
     _descriptors,
     _graph,
     _json_bytes,
+    _model_fields,
     _pack_array,
     _pack_weights,
     _regions,
     _require,
     _schedule,
     _shape,
+    _validate_policy,
     _weight_size,
     choose_tile_rows,
+    numeric_policy,
 )
 from .decoder_reference import (
     DecoderSpec,
     ReferenceCache,
+    _rms_norm,
     decode_one,
     fixed_weights,
     recompute_prefix,
@@ -89,8 +94,18 @@ class StackCache:
     layers: list[ReferenceCache]
 
     @classmethod
-    def empty(cls, spec: StackSpec) -> StackCache:
-        return cls([ReferenceCache.empty(spec.block) for _ in range(spec.layers)])
+    def empty(
+        cls,
+        spec: StackSpec,
+        dtype: torch.dtype = torch.float32,
+        device: str | torch.device = "cpu",
+    ) -> StackCache:
+        return cls(
+            [
+                ReferenceCache.empty(spec.block, dtype, device)
+                for _ in range(spec.layers)
+            ]
+        )
 
     @property
     def position(self) -> int:
@@ -119,8 +134,11 @@ def decode_token(
         trace = decode_one(hidden, layer_weights, spec.block, cache.layers[layer])
         hidden = trace["y"]
         blocks.append(trace)
-    factor = torch.rsqrt(hidden.square().mean() + spec.block.rms_norm_eps)
-    final_hidden = hidden * factor * weights["final_norm"]
+    if hidden.dtype == torch.float32:
+        factor = torch.rsqrt(hidden.square().mean() + spec.block.rms_norm_eps)
+        final_hidden = hidden * factor * weights["final_norm"]
+    else:
+        final_hidden = _rms_norm(hidden, weights["final_norm"], spec.block.rms_norm_eps)
     projection = (
         weights["embedding"] if spec.tie_word_embeddings else weights["lm_head"]
     )
@@ -140,10 +158,13 @@ def recompute_stack_prefix(
     for layer in range(spec.layers):
         layer_weights = {name: weights[f"L{layer}.{name}"] for name in WEIGHTS}
         hidden = recompute_prefix(hidden, layer_weights, spec.block)["y"]
-    factor = torch.rsqrt(
-        hidden.square().mean(dim=-1, keepdim=True) + spec.block.rms_norm_eps
-    )
-    final_hidden = hidden * factor * weights["final_norm"]
+    if hidden.dtype == torch.float32:
+        factor = torch.rsqrt(
+            hidden.square().mean(dim=-1, keepdim=True) + spec.block.rms_norm_eps
+        )
+        final_hidden = hidden * factor * weights["final_norm"]
+    else:
+        final_hidden = _rms_norm(hidden, weights["final_norm"], spec.block.rms_norm_eps)
     projection = (
         weights["embedding"] if spec.tie_word_embeddings else weights["lm_head"]
     )
@@ -214,6 +235,7 @@ def make_stack_plan(
     target: dict,
     tile_rows: int,
     weight_dtype: str = "float32",
+    matrix_kernel: str = "simt",
 ) -> tuple[dict, bytes]:
     _require(type(tile_rows) is int and tile_rows > 0, "tile rows must be positive")
     _validate_weights(spec, weights)
@@ -249,7 +271,7 @@ def make_stack_plan(
             weights["lm_head"], weight_dtype
         )
     plan = make_stack_plan_metadata(
-        spec, target, tile_rows, weight_dtype, sha256(packed).hexdigest()
+        spec, target, tile_rows, weight_dtype, sha256(packed).hexdigest(), matrix_kernel
     )
     _require(len(packed) == plan["storage"]["weight_bytes"], "invalid packed size")
     validate_stack(plan, bytes(packed))
@@ -262,6 +284,7 @@ def make_stack_plan_metadata(
     tile_rows: int,
     weight_dtype: str,
     weights_sha256: str,
+    matrix_kernel: str = "simt",
 ) -> dict:
     """Build the stack graph and layout without holding checkpoint weights."""
     _require(type(tile_rows) is int and tile_rows > 0, "tile rows must be positive")
@@ -278,9 +301,9 @@ def make_stack_plan_metadata(
     if not spec.tie_word_embeddings:
         lm_offset = _align(cursor)
         cursor = lm_offset + embedding_bytes
-    scratch_regions, scratch_bytes = _regions(block, SCRATCH, 16)
-    kv_regions, layer_kv_bytes = _regions(block, ("K", "V"), 16)
-    tasks = _graph(block, tile_rows)
+    scratch_regions, scratch_bytes = _regions(block, SCRATCH, 16, weight_bytes)
+    kv_regions, layer_kv_bytes = _regions(block, ("K", "V"), 16, weight_bytes)
+    tasks = _graph(block, tile_rows, weight_dtype)
     waves = _schedule(tasks, target["launch"]["worker_count"])
     stack = {
         "embedding_offset": 0,
@@ -299,7 +322,7 @@ def make_stack_plan_metadata(
             "format_version": FORMAT,
             "executor_abi": ABI,
             "generator": GENERATOR,
-            "model_kind": "llama_decoder_stack_f32",
+            "model_kind": "llama_decoder_stack",
         },
         "target": {
             "compute_capability": target["device"]["compute_capability"],
@@ -310,8 +333,8 @@ def make_stack_plan_metadata(
             "kernel_fingerprint": target["executor"]["fingerprint"],
         },
         "model": {
-            **spec.as_dict(),
-            "weight_dtype": weight_dtype,
+            **_model_fields(spec.as_dict(), weight_dtype),
+            "matrix_kernel": matrix_kernel,
             "tile_rows": tile_rows,
             "tensors": _descriptors(block, weight_dtype),
         },
@@ -319,6 +342,7 @@ def make_stack_plan_metadata(
             "input_bytes": 4,
             "output_bytes": spec.vocab_size * 4,
             "scratch_bytes": scratch_bytes,
+            "attention_bytes": _attention_bytes(block, weight_dtype),
             "scratch": scratch_regions,
             "kv_bytes": layer_kv_bytes * spec.layers,
             "kv": kv_regions,
@@ -327,9 +351,13 @@ def make_stack_plan_metadata(
             "stack": stack,
         },
         "execution": {
-            "prelude": "embedding_lookup_f32",
+            "prelude": "embedding_lookup_bf16"
+            if weight_dtype == "bfloat16"
+            else "embedding_lookup_f32",
             "repeat_block_count": spec.layers,
-            "postlude": ["rms_norm_f32", "logits_f32"],
+            "postlude": ["rms_norm_bf16", "logits_bf16"]
+            if weight_dtype == "bfloat16"
+            else ["rms_norm_f32", "logits_f32"],
         },
         "tasks": tasks,
         "waves": waves,
@@ -343,24 +371,36 @@ def make_stack_plan_metadata(
 
 def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
     header, model, storage = (plan[name] for name in ("header", "model", "storage"))
-    legacy = header["format_version"] == 2
+    legacy = header["format_version"] in (2, 3)
     _require(
         (
-            (legacy and header["executor_abi"] == "tileinfer-decoder-v2")
+            (
+                legacy
+                and header["executor_abi"]
+                == f"tileinfer-decoder-v{header['format_version']}"
+            )
             or (header["format_version"] == FORMAT and header["executor_abi"] == ABI)
         )
-        and header["model_kind"] == "llama_decoder_stack_f32",
+        and header["model_kind"]
+        == ("llama_decoder_stack_f32" if legacy else "llama_decoder_stack"),
         "unsupported stack header",
     )
-    weight_dtype = "float32" if legacy else model["weight_dtype"]
+    weight_dtype = _validate_policy(header, model)
     weight_bytes = _weight_size(weight_dtype)
     names = {field.name for field in fields(DecoderSpec)}
-    block = DecoderSpec(**{name: model[name] for name in names})
+    block = DecoderSpec(
+        **{name: model[name] for name in names if name != "dtype" or legacy}
+    )
     spec = StackSpec(
         block, model["layers"], model["vocab_size"], model["tie_word_embeddings"]
     )
     _require(
-        {name: model[name] for name in spec.as_dict()} == spec.as_dict()
+        {name: model[name] for name in spec.as_dict() if name != "dtype" or legacy}
+        == {
+            name: value
+            for name, value in spec.as_dict().items()
+            if name != "dtype" or legacy
+        }
         and model["tensors"] == _descriptors(block, weight_dtype),
         "invalid stack model",
     )
@@ -377,8 +417,8 @@ def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
         "invalid stack target",
     )
     base_regions, layer_weights_bytes = _regions(block, WEIGHTS, 64, weight_bytes)
-    scratch_regions, scratch_bytes = _regions(block, SCRATCH, 16)
-    kv_regions, layer_kv_bytes = _regions(block, ("K", "V"), 16)
+    scratch_regions, scratch_bytes = _regions(block, SCRATCH, 16, weight_bytes)
+    kv_regions, layer_kv_bytes = _regions(block, ("K", "V"), 16, weight_bytes)
     embedding_bytes = spec.vocab_size * block.hidden_size * weight_bytes
     layer_offset = _align(embedding_bytes)
     layer_stride = _align(layer_weights_bytes)
@@ -411,6 +451,11 @@ def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
             "input_bytes": 4,
             "output_bytes": spec.vocab_size * 4,
             "scratch_bytes": scratch_bytes,
+            **(
+                {"attention_bytes": _attention_bytes(block, weight_dtype)}
+                if not legacy
+                else {}
+            ),
             "scratch": scratch_regions,
             "kv_bytes": layer_kv_bytes * spec.layers,
             "kv": kv_regions,
@@ -423,9 +468,13 @@ def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
     _require(
         plan["execution"]
         == {
-            "prelude": "embedding_lookup_f32",
+            "prelude": "embedding_lookup_bf16"
+            if weight_dtype == "bfloat16"
+            else "embedding_lookup_f32",
             "repeat_block_count": spec.layers,
-            "postlude": ["rms_norm_f32", "logits_f32"],
+            "postlude": ["rms_norm_bf16", "logits_bf16"]
+            if weight_dtype == "bfloat16"
+            else ["rms_norm_f32", "logits_f32"],
         },
         "invalid stack execution stages",
     )
@@ -435,7 +484,7 @@ def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
         and len(packed) == total,
         "stack weight checksum or size mismatch",
     )
-    tasks = _graph(block, tile_rows)
+    tasks = _graph(block, tile_rows, weight_dtype)
     waves = _schedule(tasks, workers)
     _require(
         plan["tasks"] == tasks and plan["waves"] == waves,
@@ -450,6 +499,7 @@ def build_stack(
     tile_rows: int | str,
     out: Path,
     weight_dtype: str = "float32",
+    matrix_kernel: str = "simt",
 ) -> dict:
     spec = read_stack_model(model_path)
     weights = read_stack_weights(weights_path, spec)
@@ -461,7 +511,9 @@ def build_stack(
         )
     elif isinstance(tile_rows, str):
         tile_rows = int(tile_rows)
-    plan, packed = make_stack_plan(spec, weights, target, tile_rows, weight_dtype)
+    plan, packed = make_stack_plan(
+        spec, weights, target, tile_rows, weight_dtype, matrix_kernel
+    )
     if out.exists():
         raise FileExistsError(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -471,7 +523,9 @@ def build_stack(
         data = _json_bytes(plan)
         (temporary / "plan.json").write_bytes(data)
         report = {
-            "weight_dtype": weight_dtype,
+            **numeric_policy(weight_dtype),
+            "matrix_kernel": matrix_kernel,
+            "attention_bytes": plan["storage"]["attention_bytes"],
             "plan_sha256": sha256(data).hexdigest(),
             "weights_sha256": plan["integrity"]["weights_sha256"],
             "layers": spec.layers,

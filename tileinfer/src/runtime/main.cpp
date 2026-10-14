@@ -25,38 +25,81 @@ using json = nlohmann::json;
 
 json target_json(const tileinfer::Target& t)
 {
+    json variants = json::object();
+    for (const auto& variant : t.variants)
+        variants[variant.name] = {{"registers_per_thread", variant.registers_per_thread},
+            {"static_shared_bytes", variant.static_shared_bytes},
+            {"active_blocks_per_sm", variant.active_blocks_per_sm},
+            {"threads_per_block", tileinfer::kThreads}};
     return {{"device",
                 {{"name", t.name}, {"compute_capability", {t.major, t.minor}},
                     {"sm_count", t.sm_count}, {"cooperative_launch", t.cooperative_launch},
                     {"global_memory_bytes", t.global_memory_bytes},
                     {"max_threads_per_sm", t.max_threads_per_sm},
                     {"driver_version", t.driver_version}, {"runtime_version", t.runtime_version}}},
-        {"executor", {{"abi", tileinfer::kAbi},
-                         {"opcodes", {"rms_norm_f32", "gemv_f32", "rope_query_f32",
-                                         "rope_cache_f32", "attention_prefix_f32",
-                                         "silu_product_f32", "embedding_lookup_f32", "logits_f32"}},
-                         {"execution_ready", true}, {"threads_per_block", tileinfer::kThreads},
-                         {"active_blocks_per_sm", t.active_blocks_per_sm},
-                         {"registers_per_thread", t.registers_per_thread},
-                         {"static_shared_bytes", t.static_shared_bytes},
-                         {"fingerprint", tileinfer::kFingerprint}}}};
+        {"executor",
+            {{"abi", tileinfer::kAbi},
+                {"opcodes", {"rms_norm_f32", "gemv_f32", "rope_query_f32", "rope_cache_f32",
+                                "attention_prefix_f32", "silu_product_f32", "embedding_lookup_f32",
+                                "logits_f32", "rms_norm_bf16", "gemv_bf16", "rope_query_bf16",
+                                "rope_cache_bf16", "attention_prefix_bf16", "silu_product_bf16",
+                                "embedding_lookup_bf16", "logits_bf16"}},
+                {"worker_variants", variants}, {"execution_ready", true},
+                {"threads_per_block", tileinfer::kThreads},
+                {"active_blocks_per_sm", t.active_blocks_per_sm},
+                {"registers_per_thread", t.registers_per_thread},
+                {"static_shared_bytes", t.static_shared_bytes},
+                {"fingerprint", tileinfer::kFingerprint}}}};
+}
+
+json precision(const tileinfer::LoadedPlan& plan)
+{
+    const bool bf16 = plan.weight_dtype == tileinfer::WeightDtype::bfloat16;
+    const char* dtype = bf16 ? "bfloat16" : "float32";
+    return {{"numeric_policy", bf16 ? "hf-llama-eager-bf16-v1" : "decoder-f32-v1"},
+        {"weight_dtype", dtype}, {"activation_dtype", dtype}, {"kv_dtype", dtype},
+        {"accumulation_dtype", "float32"}, {"logits_compute_dtype", dtype},
+        {"api_output_dtype", "float32"}, {"matrix_kernel", plan.matrix_mma ? "mma" : "simt"}};
 }
 
 json inspect(const tileinfer::LoadedPlan& plan)
 {
+    const std::uint64_t hidden_buffers =
+        2ull * plan.hidden_size * tileinfer::element_bytes(plan.weight_dtype);
+    const std::uint64_t logits_bytes =
+        static_cast<std::uint64_t>(plan.stack.vocab_size) * sizeof(float);
+    const std::uint64_t program_bytes = plan.tasks.size() * sizeof(tileinfer::TaskRecord) +
+                                        plan.ranges.size() * sizeof(tileinfer::WorkerTaskRange) +
+                                        plan.tensors.size() * sizeof(tileinfer::TensorRecord) +
+                                        plan.rotary_frequencies.size() * sizeof(float);
+    const std::uint64_t token_bytes =
+        plan.stack.full_stack
+            ? 2ull * plan.max_context * sizeof(tileinfer::TokenId) + 2 * sizeof(int)
+            : 0;
+    const json memory = {{"hidden_buffers_bytes", hidden_buffers},
+        {"logits_buffer_bytes", logits_bytes}, {"program_bytes", program_bytes},
+        {"token_status_bytes", token_bytes},
+        {"context_device_payload_bytes", hidden_buffers + logits_bytes + token_bytes +
+                                             plan.scratch_bytes + plan.kv_bytes +
+                                             plan.attention_bytes},
+        {"model_device_payload_bytes", plan.weights.size() + program_bytes},
+        {"allocator_runtime_overhead_bytes", nullptr},
+        {"scope",
+            "validated payload extents including alignment; allocator/runtime overhead and "
+            "optional diagnostic snapshots excluded"}};
     return {{"plan_sha256", plan.plan_sha256}, {"weights_sha256", plan.weights_sha256},
+        {"memory", memory},
         {"model",
             {{"hidden_size", plan.hidden_size}, {"intermediate_size", plan.intermediate_size},
                 {"num_attention_heads", plan.query_heads}, {"num_key_value_heads", plan.kv_heads},
                 {"head_dim", plan.head_dim}, {"max_context", plan.max_context}}},
         {"workers", plan.workers}, {"wave_count", plan.wave_count},
         {"task_count", plan.tasks.size()}, {"worker_loads", plan.worker_loads},
-        {"scratch_bytes", plan.scratch_bytes}, {"kv_bytes", plan.kv_bytes},
-        {"weight_bytes", plan.weights.size()},
+        {"scratch_bytes", plan.scratch_bytes}, {"attention_bytes", plan.attention_bytes},
+        {"kv_bytes", plan.kv_bytes}, {"weight_bytes", plan.weights.size()},
         {"weight_dtype",
             plan.weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
-        {"model_kind",
-            plan.stack.full_stack ? "llama_decoder_stack_f32" : "llama_decoder_block_f32"},
+        {"model_kind", plan.stack.full_stack ? "llama_decoder_stack" : "llama_decoder_block"},
         {"layers", plan.stack.layers}, {"vocab_size", plan.stack.vocab_size}};
 }
 
@@ -109,9 +152,7 @@ json run_block(const tileinfer::LoadedPlan& plan, const std::string& input_path)
         const std::vector<float> value(
             kv.begin() + value_offset, kv.begin() + value_offset + kv_width);
         auto residual = segment(14, plan.hidden_size);
-        std::vector<float> ffn(plan.hidden_size);
-        for (int i = 0; i < plan.hidden_size; ++i)
-            ffn[i] = output[i] - residual[i];
+        const auto ffn = context.ffn_snapshot();
         steps.push_back({{"position", p}, {"q", segment(9, plan.hidden_size)}, {"k", key},
             {"v", value}, {"attention", segment(12, plan.hidden_size)}, {"attn_residual", residual},
             {"ffn", ffn}, {"y", output}});
@@ -458,6 +499,8 @@ int main(int argc, char** argv)
         default:
             throw std::runtime_error("unsupported command");
         }
+        if (command.mode != Mode::state)
+            result.update(precision(plan));
         std::cout << result.dump() << '\n';
         return 0;
     } catch (const std::exception& error) {

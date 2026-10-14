@@ -3,9 +3,9 @@
 This repository tests the tile-graph inference hypothesis on the RTX 3050.
 Read the four design documents in `docs/` before changing the plan format or
 executor. The active workload is the Llama-style one-token decoder in
-`docs/tile_graph_decoder.md`. Its CPU reference, version-3 plan (with
-version-2 float32 compatibility), SequenceContext, CUDA arithmetic, and
-synthetic full stack with float32 or BF16 weights, and the pinned Llama 3.2 1B
+`docs/tile_graph_decoder.md`. Its CPU reference, version-4 plan (with
+version-2/3 pure-float32 compatibility), SequenceContext, CUDA arithmetic, and
+synthetic full stack with float32 or BF16 weights/activations/KV, and the pinned Llama 3.2 1B
 checkpoint bridge are implemented.
 The MLP prototype is historical and its source/tests were removed.
 

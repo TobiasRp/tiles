@@ -1,4 +1,4 @@
-"""Compare a packed Llama 3.2 1B package with float32 Transformers inference."""
+"""Compare a packed Llama 3.2 1B package with matching-precision Transformers inference."""
 
 import argparse
 import gc
@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+from hashlib import sha256
 from pathlib import Path
 
 import numpy as np
@@ -22,22 +23,31 @@ PROMPTS = (
 )
 
 
-def _reference(checkpoint: Path) -> tuple[list[list[int]], list[dict], list[str]]:
+TOLERANCE_CALIBRATION = json.loads(
+    Path(__file__).with_name("bf16_checkpoint_tolerances.json").read_text()
+)
+
+
+def _reference(
+    checkpoint: Path, dtype: str
+) -> tuple[list[list[int]], list[dict], list[str]]:
+    torch.backends.cuda.preferred_blas_library("cublaslt")
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (False, False)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
     model = AutoModelForCausalLM.from_pretrained(
         checkpoint,
-        dtype=torch.float32,
+        dtype=torch.bfloat16 if dtype == "bfloat16" else torch.float32,
         device_map="cuda:0",
         low_cpu_mem_usage=True,
         attn_implementation="eager",
         local_files_only=True,
     ).eval()
-    if next(model.parameters()).dtype != torch.float32:
-        raise AssertionError(
-            "Transformers did not convert checkpoint weights to float32"
-        )
+    if next(model.parameters()).dtype != (
+        torch.bfloat16 if dtype == "bfloat16" else torch.float32
+    ):
+        raise AssertionError("Transformers did not load the requested precision")
     layer_outputs: list[np.ndarray] = []
 
     def capture(_module: object, _inputs: object, output: object) -> None:
@@ -146,13 +156,48 @@ def _reference(checkpoint: Path) -> tuple[list[list[int]], list[dict], list[str]
     return sequences, records, generated
 
 
-def _compare(name: str, actual: np.ndarray, expected: np.ndarray) -> dict:
+def _compare(name: str, actual: np.ndarray, expected: np.ndarray, dtype: str) -> dict:
     delta = np.abs(actual - expected)
-    limit = 0.001 + 0.0001 * np.abs(expected)
+    # Reference-only calibration includes a fixed margin for shape/backend variation.
+    if dtype == "bfloat16":
+        limits = TOLERANCE_CALIBRATION["bfloat16"][name]
+        atol, rtol, rms_limit = limits["atol"], limits["rtol"], limits["rms_limit"]
+    else:
+        atol, rtol, rms_limit = 0.001, 0.0001, 0.001
+    limit = atol + rtol * np.abs(expected)
+    metrics = {}
+    if dtype == "bfloat16":
+        actual_bits = np.ascontiguousarray(actual, dtype=np.float32).view(np.uint32)
+        expected_bits = np.ascontiguousarray(expected, dtype=np.float32).view(np.uint32)
+        if np.any(actual_bits & 0xFFFF):
+            raise AssertionError(
+                f"{name} contains values that were not rounded to BF16"
+            )
+
+        def ordered(bits):
+            bf16 = (bits >> 16).astype(np.int32)
+            return np.where(bf16 & 0x8000, 0x10000 - bf16, bf16 + 0x8000)
+
+        ulps = np.abs(ordered(actual_bits) - ordered(expected_bits))
+        metrics = {
+            "bf16_ulp_max": int(ulps.max()),
+            "bf16_ulp_p95": float(np.percentile(ulps, 95)),
+            "bf16_ulp_p99": float(np.percentile(ulps, 99)),
+            "exact_fraction": float(np.mean(ulps == 0)),
+        }
     return {
+        **metrics,
+        "finite": bool(np.all(np.isfinite(actual)) and np.all(np.isfinite(expected))),
+        "mismatched_elements": int(np.count_nonzero(actual != expected)),
+        "atol": atol,
+        "rtol": rtol,
+        "rms_error": float(np.sqrt(np.mean(delta**2))),
         "max_abs": float(delta.max()),
         "max_scaled_error": float((delta / limit).max()),
-        "within_tolerance": bool(np.all(delta <= limit)),
+        "rms_limit": rms_limit,
+        "within_tolerance": bool(
+            np.all(delta <= limit) and np.sqrt(np.mean(delta**2)) <= rms_limit
+        ),
         "shape": list(actual.shape),
         "name": name,
     }
@@ -169,13 +214,15 @@ def main() -> None:
     )
     parser.add_argument("--reuse-runtime", action="store_true")
     args = parser.parse_args()
+    package = json.loads((args.package / "plan.json").read_text())
+    dtype = package["model"]["weight_dtype"]
     input_path = args.out / "inputs.json"
     reference_path = args.out / "reference.npz"
     if args.reference_child:
         if args.out.exists():
             raise FileExistsError(args.out)
         args.out.mkdir(parents=True)
-        sequences, reference, _generated = _reference(args.checkpoint)
+        sequences, reference, _generated = _reference(args.checkpoint, dtype)
         request: dict = {"trace_blocks": True, "tokens": []}
         for index, sequence in enumerate(sequences):
             if index:
@@ -258,6 +305,7 @@ def main() -> None:
                 expected.shape
             ),
             expected,
+            dtype,
         )
     if [step["position"] for step in actual] != [
         position for sequence in sequences for position in range(len(sequence))
@@ -265,12 +313,51 @@ def main() -> None:
         raise AssertionError("runtime position differs")
     top1 = [int(np.argmax(step["logits"])) for step in actual]
     expected_top1 = [int(np.argmax(step["logits"])) for step in reference]
+    topk_overlap = []
+    margins = []
+    for step, expected_step in zip(actual, reference, strict=True):
+        actual_logits = np.asarray(step["logits"], dtype=np.float32)
+        expected_logits = expected_step["logits"]
+        # Stable ordering gives the same smallest-token tie break as argmax.
+        actual_order = np.argsort(-actual_logits, kind="stable")[:5]
+        expected_order = np.argsort(-expected_logits, kind="stable")[:5]
+        topk_overlap.append(len(set(actual_order) & set(expected_order)) / 5)
+        margins.append(
+            float(
+                expected_logits[expected_order[0]] - expected_logits[expected_order[1]]
+            )
+        )
     report = {
+        "precision": {
+            key: package["model"][key]
+            for key in (
+                "numeric_policy",
+                "weight_dtype",
+                "activation_dtype",
+                "kv_dtype",
+                "accumulation_dtype",
+                "logits_compute_dtype",
+                "api_output_dtype",
+                "matrix_kernel",
+            )
+        },
+        "weights_sha256": package["integrity"]["weights_sha256"],
+        "plan_sha256": sha256((args.package / "plan.json").read_bytes()).hexdigest(),
+        "executable_sha256": sha256(args.executor.read_bytes()).hexdigest(),
+        "tolerance_calibration": TOLERANCE_CALIBRATION["calibration_id"]
+        if dtype == "bfloat16"
+        else "legacy-float32",
+        "torch_version": torch.__version__,
+        "blas_library": "cublaslt",
+        "bf16_reduction": False,
+        "split_k": False,
         "prompts": list(PROMPTS),
         "token_sequences": sequences,
         "generated": generated,
         "steps": len(actual),
         "checks": checks,
+        "top5_overlap_fraction": topk_overlap,
+        "reference_top_two_margins": margins,
         "top1_matches": [a == b for a, b in zip(top1, expected_top1, strict=True)],
         "greedy_matches": all(a == b for a, b in zip(top1, expected_top1, strict=True)),
     }

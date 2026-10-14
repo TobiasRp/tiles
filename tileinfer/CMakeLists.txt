@@ -87,6 +87,10 @@ if(TILE_INFER_ENABLE_CUDA)
         target_include_directories(tile_runtime_test PRIVATE third_party)
         target_link_libraries(tile_runtime_test PRIVATE tileinfer_diagnostics)
         target_compile_definitions(tile_runtime_test PRIVATE TILE_TEST_HARNESS=1)
+        add_executable(ops_unit tests/ops_unit.cu)
+        target_include_directories(ops_unit PRIVATE src/runtime third_party ${CUDAToolkit_INCLUDE_DIRS}/cccl)
+        target_link_libraries(ops_unit PRIVATE CUDA::cudart)
+        tileinfer_warnings(ops_unit)
         add_executable(sequence_context_smoke tests/sequence_context_smoke.cpp)
         target_link_libraries(sequence_context_smoke PRIVATE tileinfer_runtime)
         add_executable(sequence_ring_smoke tests/sequence_ring_smoke.cu)
@@ -109,6 +113,8 @@ if(TILE_INFER_ENABLE_CUDA)
         set_tests_properties(tile_runtime_help cuda_smoke cccl_cooperative_smoke input_ring_copy_smoke PROPERTIES TIMEOUT 30)
         set_tests_properties(cuda_smoke PROPERTIES SKIP_RETURN_CODE 77)
         if(UV_EXECUTABLE)
+            add_test(NAME ops_unit COMMAND ${UV_EXECUTABLE} run --locked --project ${PROJECT_SOURCE_DIR}/../tileplan python ${PROJECT_SOURCE_DIR}/tests/ops_unit.py --executor $<TARGET_FILE:ops_unit>)
+            set_tests_properties(ops_unit PROPERTIES TIMEOUT 180)
             add_test(NAME decoder_regression COMMAND ${UV_EXECUTABLE} run --locked --project ${PROJECT_SOURCE_DIR}/../tileplan
                 python ${PROJECT_SOURCE_DIR}/tests/decoder_regression.py --executor $<TARGET_FILE:tile_runtime_test>)
             add_test(NAME stack_regression COMMAND ${UV_EXECUTABLE} run --locked --project ${PROJECT_SOURCE_DIR}/../tileplan
@@ -127,7 +133,7 @@ if(TILE_INFER_ENABLE_CUDA)
                 add_custom_target(sanitizers COMMAND ${UV_EXECUTABLE} run --locked --project ${PROJECT_SOURCE_DIR}/../tileplan
                     python ${PROJECT_SOURCE_DIR}/tests/sanitizers.py --build-dir ${CMAKE_CURRENT_BINARY_DIR}
                     --sanitizer ${COMPUTE_SANITIZER_EXECUTABLE} USES_TERMINAL
-                    DEPENDS tile_runtime tile_runtime_test sequence_context_smoke sequence_ring_smoke input_ring_copy_smoke)
+                    DEPENDS tile_runtime tile_runtime_test sequence_context_smoke sequence_ring_smoke input_ring_copy_smoke ops_unit)
             else()
                 message(WARNING "compute-sanitizer was not found: the sanitizers target is unavailable")
             endif()

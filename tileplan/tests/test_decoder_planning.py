@@ -19,6 +19,8 @@ OPCODES = [
     "silu_product_f32",
 ]
 
+OPCODES += [opcode.replace("_f32", "_bf16") for opcode in OPCODES]
+
 
 def target(workers: int = 4) -> dict:
     return normalize(
@@ -61,8 +63,8 @@ class DecoderPlanningTest(unittest.TestCase):
     def test_versioned_package_and_earliest_balanced_waves(self) -> None:
         package = self.package()
         plan, weights, digest = read_package(package)
-        self.assertEqual(plan["header"]["format_version"], 3)
-        self.assertEqual(plan["header"]["model_kind"], "llama_decoder_block_f32")
+        self.assertEqual(plan["header"]["format_version"], 4)
+        self.assertEqual(plan["header"]["model_kind"], "llama_decoder_block")
         self.assertEqual(plan["model"]["weight_dtype"], "float32")
         self.assertEqual(len(plan["waves"]), 9)
         self.assertEqual(len(plan["model"]["tensors"]), 24)
@@ -141,11 +143,7 @@ class DecoderPlanningTest(unittest.TestCase):
         self.assertLess(len(packed), fp32_plan["storage"]["weight_bytes"])
         self.assertEqual(plan["model"]["weight_dtype"], "bfloat16")
         self.assertTrue(
-            all(
-                tensor["dtype"]
-                == ("bfloat16" if tensor["storage"] == "weight" else "float32")
-                for tensor in plan["model"]["tensors"]
-            )
+            all(tensor["dtype"] == "bfloat16" for tensor in plan["model"]["tensors"])
         )
         for mutate in (
             lambda item: item["model"]["tensors"][3].update(dtype="float32"),

@@ -37,19 +37,23 @@ def _baseline(
     warmup: int,
     iterations: int,
     rounds: int,
+    dtype: str,
 ) -> dict:
+    torch.backends.cuda.preferred_blas_library("cublaslt")
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (False, False)
     torch.backends.cuda.matmul.allow_tf32 = False
+    scalar = torch.bfloat16 if dtype == "bfloat16" else torch.float32
     torch.backends.cudnn.allow_tf32 = False
     model = AutoModelForCausalLM.from_pretrained(
         checkpoint,
-        dtype=torch.float32,
+        dtype=scalar,
         device_map="cuda:0",
         low_cpu_mem_usage=True,
         attn_implementation="eager",
         local_files_only=True,
     ).eval()
-    if next(model.parameters()).dtype != torch.float32:
-        raise RuntimeError("reference weights were not converted to float32")
+    if next(model.parameters()).dtype != scalar:
+        raise RuntimeError("reference weights differ from the package precision")
     rows = []
     device = torch.device("cuda:0")
     token_tensor = torch.tensor([[token]], dtype=torch.long, device=device)
@@ -57,20 +61,19 @@ def _baseline(
         for p in positions:
             cache = StaticCache(model.config, max_cache_len=p + 1)
             if p:
-                # Prefix setup is outside the timed region. A single prefill call
-                # fills exactly positions 0..p-1 with the same repeated token.
-                prefix = torch.full((1, p), token, dtype=torch.long, device=device)
-                model(
-                    input_ids=prefix,
-                    past_key_values=cache,
-                    use_cache=True,
-                    cache_position=torch.arange(p, device=device),
-                    logits_to_keep=1,
-                )
+                # Prefix setup is outside the timed region and matches the
+                # executor's sequential one-token calls.
+                for prefix_position in range(p):
+                    model(
+                        input_ids=token_tensor,
+                        past_key_values=cache,
+                        use_cache=True,
+                        cache_position=torch.tensor([prefix_position], device=device),
+                        logits_to_keep=1,
+                    )
                 torch.cuda.synchronize()
-                del prefix
             position = torch.tensor([p], dtype=torch.long, device=device)
-            fixed_mask = torch.zeros((1, 1, 1, p + 1), device=device)
+            fixed_mask = torch.zeros((1, 1, 1, p + 1), device=device, dtype=scalar)
 
             def forward():
                 return model(
@@ -121,10 +124,15 @@ def _baseline(
             torch.cuda.empty_cache()
     result = {
         "torch_version": torch.__version__,
-        "transformers_baseline": "LlamaForCausalLM float32 eager attention, StaticCache, logits_to_keep=1",
+        "transformers_baseline": f"LlamaForCausalLM {dtype} eager attention, StaticCache, logits_to_keep=1",
         "cuda_version": torch.version.cuda,
         "device": torch.cuda.get_device_name(),
         "tf32": False,
+        "activation_dtype": dtype,
+        "accumulation_dtype": "float32",
+        "bf16_reduction": False,
+        "split_k": False,
+        "blas_library": "cublaslt",
         "rows": rows,
     }
     gc.collect()
@@ -164,6 +172,7 @@ def main() -> None:
             args.warmup,
             args.iterations,
             args.rounds,
+            package["model"]["weight_dtype"],
         )
         baseline_path.parent.mkdir(parents=True, exist_ok=True)
         baseline_path.write_text(json.dumps(baseline, indent=2) + "\n")
@@ -215,7 +224,12 @@ def main() -> None:
         reference = baseline["rows"][len(runtime)]
         if tile["top_token"] != reference["next_token"]:
             raise AssertionError(f"next token mismatch at position {p}")
-        limit = 0.001 + 0.0001 * abs(reference["top_logit"])
+        atol, rtol = (
+            (0.15, 0.03)
+            if package["model"]["weight_dtype"] == "bfloat16"
+            else (0.001, 0.0001)
+        )
+        limit = atol + rtol * abs(reference["top_logit"])
         if abs(tile["top_logit"] - reference["top_logit"]) > limit:
             raise AssertionError(f"top logit mismatch at position {p}")
         runtime.append(tile)

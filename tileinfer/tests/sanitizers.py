@@ -5,11 +5,11 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
 import numpy as np
-
 from tileplan.decoder_plan import build
 from tileplan.decoder_reference import DecoderSpec, generate_fixture
 from tileplan.decoder_stack import build_stack
@@ -22,6 +22,11 @@ def main() -> None:
     parser.add_argument("--sanitizer", type=Path, required=True)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--report-api-errors", choices=("all", "no"), default="no")
+    parser.add_argument(
+        "--matrix-kernel",
+        choices=("simt", "mma"),
+        help="restrict stack/block cases to one matrix implementation; isolated operators remain included",
+    )
     args = parser.parse_args()
     build_dir = args.build_dir.resolve()
     out = args.out or build_dir / "sanitizers"
@@ -44,9 +49,15 @@ def main() -> None:
         json.dumps({"trace_blocks": True, "tokens": [0, 1, {"reset": True}, 1]})
     )
     cases = {}
-    for dtype in ("float32", "bfloat16"):
-        block = root / f"block-{dtype}"
-        stack = root / f"stack-{dtype}"
+    for dtype, matrix_kernel in (
+        ("float32", "simt"),
+        ("bfloat16", "simt"),
+        ("bfloat16", "mma"),
+    ):
+        if args.matrix_kernel is not None and matrix_kernel != args.matrix_kernel:
+            continue
+        block = root / f"block-{dtype}-{matrix_kernel}"
+        stack = root / f"stack-{dtype}-{matrix_kernel}"
         build(
             tail / "model.json",
             tail / "weights.npz",
@@ -54,6 +65,7 @@ def main() -> None:
             7,
             block,
             dtype,
+            matrix_kernel,
         )
         source = fixture_root / "decoder_m4"
         build_stack(
@@ -63,6 +75,7 @@ def main() -> None:
             7,
             stack,
             dtype,
+            matrix_kernel,
         )
         generation = [
             str(executor),
@@ -76,24 +89,44 @@ def main() -> None:
             generation, capture_output=True, text=True, check=True, timeout=30
         )
         eos = json.loads(baseline.stdout)["generated"][0]
-        cases[f"{dtype}-generate-eos"] = [*generation, "--eos-id", str(eos)]
-        cases[f"{dtype}-check-reset"] = [
+        cases[f"{dtype}-{matrix_kernel}-generate-eos"] = [
+            *generation,
+            "--eos-id",
+            str(eos),
+        ]
+        cases[f"{dtype}-{matrix_kernel}-check-reset"] = [
             str(executor),
             "check",
             str(stack),
             str(root / "check.json"),
         ]
-        cases[f"{dtype}-block-tail"] = [
+        cases[f"{dtype}-{matrix_kernel}-block-tail"] = [
             str(build_dir / "tile_runtime_test"),
             "--run-block",
             str(block),
             str(root / "block.json"),
         ]
-        cases[f"{dtype}-tickets"] = [
+        cases[f"{dtype}-{matrix_kernel}-tickets"] = [
             str(build_dir / "sequence_context_smoke"),
             str(stack),
         ]
-        cases[f"{dtype}-ring"] = [str(build_dir / "sequence_ring_smoke"), str(stack)]
+        cases[f"{dtype}-{matrix_kernel}-ring"] = [
+            str(build_dir / "sequence_ring_smoke"),
+            str(stack),
+        ]
+    ops_cases = root / "ops-cases.json"
+    subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).with_name("ops_unit.py")),
+            "--executor",
+            str(build_dir / "ops_unit"),
+            "--write-cases",
+            str(ops_cases),
+        ],
+        check=True,
+    )
+    cases["isolated-operators"] = [str(build_dir / "ops_unit"), str(ops_cases)]
     cases["ring-copy"] = [str(build_dir / "input_ring_copy_smoke")]
     results = []
     if args.report_api_errors == "no":
@@ -132,7 +165,9 @@ def main() -> None:
                     start_new_session=True,
                 )
                 try:
-                    _, stderr = process.communicate(timeout=120)
+                    _, stderr = process.communicate(
+                        timeout=600 if name.endswith("-ring") else 180
+                    )
                     returncode = process.returncode
                 except subprocess.TimeoutExpired:
                     os.killpg(process.pid, signal.SIGKILL)
@@ -155,8 +190,9 @@ def main() -> None:
                 flush=True,
             )
     summary = {
+        "matrix_kernel_filter": args.matrix_kernel,
         "api_error_reporting": args.report_api_errors,
-        "gated_initcheck_api_memory_access": "disabled only for the two controlled ring cases",
+        "gated_initcheck_api_memory_access": "disabled only for the controlled ring cases",
         "target": json.loads((root / "target.json").read_text()),
         "results": results,
     }
