@@ -25,4 +25,6 @@ The MLP prototype is historical and its source/tests were removed.
   opcodes or the execution loop. Run clang-format, Ruff, ty, CTest, and Compute Sanitizer before
   performance claims; distinguish exploratory timings from a controlled
   shape/tile sweep.
-- Use `ssh tux:~/dev/tiles` to compile/run, if available.
+- Work in `tux:~/dev/tiles` over SSH, if available: edit, build, run, test,
+  and commit there. Treat any other local checkout as read-only; do not edit
+  or commit in it, and do not mirror files from it to `tux`.
