@@ -17,6 +17,8 @@ INFER = ROOT / "tileinfer"
 CHECKPOINT = ROOT / "checkpoints" / "Llama-3.2-1B"
 EXECUTOR = INFER / "build" / "release" / "tile_runtime"
 VENV = PLAN / ".venv"
+# Package format accepted by the runtime built from this checkout.
+FORMAT = 4
 
 
 def run(command, *, cwd):
@@ -40,11 +42,6 @@ def main():
         choices=("float32", "bfloat16"),
         help="new-package dtype (default: bfloat16); must match when reusing a package",
     )
-    parser.add_argument(
-        "--matrix-kernel",
-        choices=("simt", "mma"),
-        help="new-package matrix kernel (default: simt); must match when reusing a package",
-    )
     args = parser.parse_args()
 
     if args.max_new_tokens < 1:
@@ -66,21 +63,15 @@ def main():
         if plan.get("source", {}).get("repository") != "meta-llama/Llama-3.2-1B":
             parser.error(f"not a Llama 3.2 1B checkpoint package: {package}")
         model = plan.get("model", {})
-        if (
-            plan["header"]["format_version"] < 4
-            and model.get("weight_dtype") == "bfloat16"
-        ):
+        if plan["header"]["format_version"] != FORMAT:
             parser.error(
-                "old BF16-weight packages are retired; regenerate a version-4 package"
+                f"package format {plan['header']['format_version']} is retired; "
+                f"regenerate a version-{FORMAT} package"
             )
         if args.dtype is not None and args.dtype != model.get(
             "weight_dtype", "float32"
         ):
             parser.error("--dtype conflicts with the existing package")
-        if args.matrix_kernel is not None and args.matrix_kernel != model.get(
-            "matrix_kernel", "simt"
-        ):
-            parser.error("--matrix-kernel conflicts with the existing package")
         max_context = model.get("max_context")
         if type(max_context) is not int or max_context < 2:
             parser.error(f"invalid max_context in {package / 'plan.json'}")
@@ -161,8 +152,6 @@ def main():
                 "auto",
                 "--dtype",
                 args.dtype or "bfloat16",
-                "--matrix-kernel",
-                args.matrix_kernel or "simt",
                 "--out",
                 package,
             ],

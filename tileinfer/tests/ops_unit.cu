@@ -18,7 +18,7 @@ namespace {
 using namespace tileinfer;
 using json = nlohmann::json;
 
-template <typename Scalar, bool UseMma>
+template <typename Scalar>
 __global__ __launch_bounds__(kThreads, 1) void run_operator(int op, TaskRecord task,
     ops::BlockShape shape, const TensorRecord* records, Scalar* input, Scalar* output, Scalar* aux,
     Scalar* kv, const Scalar* weights, Scalar* scores, float* logits, int rows)
@@ -28,7 +28,7 @@ __global__ __launch_bounds__(kThreads, 1) void run_operator(int op, TaskRecord t
         records, {input, output, aux, kv, weights, scores, nullptr}, shape, &shared};
     switch (op) {
     case 0:
-        ops::gemv<Scalar, UseMma>(task, context);
+        ops::gemv(task, context);
         break;
     case 1:
         ops::rms_norm(task, context);
@@ -53,7 +53,7 @@ __global__ __launch_bounds__(kThreads, 1) void run_operator(int op, TaskRecord t
             &shared.inverse_rms, shared.norm_partials);
         break;
     case 7:
-        ops::logits<Scalar, UseMma>(input, weights, logits, shape.hidden_size, rows, shared);
+        ops::logits(input, weights, logits, shape.hidden_size, rows, shared);
         break;
     }
 }
@@ -68,7 +68,7 @@ std::vector<Scalar> values(const json& item, const char* name, std::size_t minim
     return result;
 }
 
-template <typename Scalar, bool UseMma>
+template <typename Scalar>
 json evaluate(const json& item)
 {
     const std::string name = item.at("op");
@@ -146,7 +146,7 @@ json evaluate(const json& item)
     const ops::BlockShape shape{
         width, width, nkv, dh, position, capacity, numeric, d_frequencies.data()};
     const auto config = cuda::make_config(cuda::block_dims<kThreads>(), cuda::grid_dims(1));
-    cuda::launch(stream, config, run_operator<Scalar, UseMma>, op, task, shape, d_records.data(),
+    cuda::launch(stream, config, run_operator<Scalar>, op, task, shape, d_records.data(),
         d_input.data(), d_output.data(), d_aux.data(), d_cache.data(), d_weight.data(),
         d_scores.data(), d_logits.data(), rows);
     cuda::copy_bytes(stream, d_output, output);
@@ -174,13 +174,10 @@ int main(int argc, char** argv)
         const auto cases = json::parse(source);
         json results = json::array();
         for (const auto& item : cases) {
-            if (item.at("dtype") == "bfloat16") {
-                if (item.value("mma", false))
-                    results.push_back(evaluate<__nv_bfloat16, true>(item));
-                else
-                    results.push_back(evaluate<__nv_bfloat16, false>(item));
-            } else
-                results.push_back(evaluate<float, false>(item));
+            if (item.at("dtype") == "bfloat16")
+                results.push_back(evaluate<__nv_bfloat16>(item));
+            else
+                results.push_back(evaluate<float>(item));
         }
         std::cout << results.dump() << '\n';
     } catch (const std::exception& error) {

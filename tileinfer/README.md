@@ -10,16 +10,15 @@ Version-4 packages use either float32 or BF16 weights, activations, and K/V.
 BF16 matrix operands accumulate in float32; RMSNorm statistics, softmax, RoPE
 frequency/trigonometric work, and SiLU internals retain float32 math. BF16
 rounding follows the pinned PyTorch eager operator boundaries. Public logits
-and diagnostics widen the modeled values to float32. Both SIMT and native
-BF16 MMA matrix routines are available for projections and the language-model
-head; attention uses SIMT in both variants. SIMT remains the default after the
-controlled comparison; see [current results](../docs/bf16_compute_results.md).
+and diagnostics widen the modeled values to float32. Projections, attention,
+and the language-model head use SIMT warp reductions. A native BF16 MMA
+variant was measured 2.15 times slower for batch-one decode and has been
+removed; see [the BF16 results](../docs/bf16_compute_results.md).
 
-Version-2/3 pure-float32 packages remain readable. The former BF16-weight/
-float32-activation path is removed; regenerate those packages as version 4.
-For a text demo, use [`generate.py`](../generate.py), which creates BF16/SIMT
-packages by default. The runtime follows the precision and matrix kernel stored
-in each package.
+The runtime reads only packages of the current format; regenerate older
+packages with TilePlan. For a text demo, use [`generate.py`](../generate.py),
+which creates BF16 packages by default. The runtime follows the precision
+stored in each package.
 
 ## Build
 
@@ -120,7 +119,7 @@ CTest covers the CCCL cooperative-launch gate, loader/UBSan validation,
 float32/BF16 numerical references, generation, and context/ring behavior.
 [ops_unit.py](tests/ops_unit.py) tests the actual device GEMV, attention, norm,
 rotary, SiLU/product, embedding, and logits routines in isolation, including
-BF16 MMA, tails, ownership, ties-to-even, and exact BF16 norm cases.
+tails, ownership, ties-to-even, and exact BF16 norm cases.
 The `cpu-debug` preset runs host-only checks. Run the four Compute Sanitizer
 tools after kernel changes:
 
@@ -133,9 +132,6 @@ initcheck disables API-copy inspection only for the deliberately gated
 ring tests. Kernel memory reads remain checked.
 [llama32_checkpoint.py](tests/llama32_checkpoint.py) compares layer outputs,
 K/V, logits, and greedy choices with matching-precision Transformers.
-[benchmark_bf16_kernels.py](tests/benchmark_bf16_kernels.py) freezes BF16
-SIMT/MMA and tile candidates, selects tiles from pilots, then measures
-independent final rounds against eager/graph PyTorch on the pinned checkpoint.
 [sweep_tiles.py](tests/sweep_tiles.py) separates synthetic tile-selection pilots
 from independent final rounds. See the [decoder design](../docs/tile_graph_decoder.md)
 for the full numerical and execution contract.

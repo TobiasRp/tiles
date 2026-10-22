@@ -4,9 +4,9 @@ Status: milestones 1–6 implemented; BF16 computation supersedes BF16-only
 weight storage in version 4, 2026-10-13. The current precision and migration
 contract is in [the BF16 implementation plan](bf16_compute_plan.md). Version-4
 packages use either float32 or BF16 weights, activations, and K/V; reductions
-and selected internal operations remain float32. Version-2/3 pure-float32
-packages remain readable; old BF16-weight/float32-activation packages must be
-regenerated. The historical milestone results below describe version 3.
+and selected internal operations remain float32. Older package formats are no
+longer read and must be regenerated (2026-10-22). The historical milestone
+results below describe version 3.
 
 Historical status, 2026-10-12: The CPU reference,
 version-3 decoder package, cooperative CUDA arithmetic, and compact repeated-block

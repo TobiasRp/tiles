@@ -13,12 +13,7 @@ using TokenId = std::int32_t;
 
 inline constexpr int kThreads = 1024;
 inline constexpr const char* kAbi = "tileinfer-decoder-v4";
-inline constexpr const char* kFingerprint = "decoder-wave-abi4-bf16-eager-simt-mma2-v1-sm86-b1024";
-inline constexpr const char* kVersion3Fingerprint =
-    "decoder-wave-abi3-warp-gemv-head-attention-rope-table-v1-sm86-b1024";
-inline constexpr const char* kLegacyAbi = "tileinfer-decoder-v2";
-inline constexpr const char* kLegacyFingerprint = "decoder-wave-abi2-ops-v3-stack-sm86-b128";
-inline constexpr const char* kLegacyProbeFingerprint = "decoder-wave-abi2-probe-v1-sm86-b128";
+inline constexpr const char* kFingerprint = "decoder-wave-abi4-bf16-eager-simt-v2-sm86-b1024";
 
 // Storage precision for weights, activations and K/V; reductions use float32.
 enum class WeightDtype : std::uint32_t
@@ -192,7 +187,6 @@ struct LoadedPlan
     std::uint64_t scratch_bytes;
     std::uint64_t kv_bytes;
     std::uint64_t attention_bytes = 0;
-    bool matrix_mma = false;
     std::vector<std::uint8_t> weights;
     std::vector<TaskRecord> tasks;
     std::vector<WorkerTaskRange> ranges;

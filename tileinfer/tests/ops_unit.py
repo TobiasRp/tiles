@@ -47,61 +47,55 @@ def fixtures() -> tuple[list[dict], list[torch.Tensor], list[torch.Tensor | None
                 random(rows, width, dtype=dtype),
                 random(rows, dtype=dtype),
             )
-            for mma in (False, True) if dtype == torch.bfloat16 else (False,):
-                for use_residual in (False, True):
-                    projected = F.linear(x, w)
-                    expected = projected + residual if use_residual else projected
-                    begin, end = (1, rows - 1) if rows > 2 else (0, rows)
-                    result = torch.full((rows,), -123.0, device="cuda", dtype=dtype)
-                    result[begin:end] = expected[begin:end]
-                    add(
-                        {
-                            "op": "gemv",
-                            "dtype": label,
-                            "mma": mma,
-                            "width": width,
-                            "rows": rows,
-                            "input": raw(x),
-                            "weights": raw(w),
-                            "aux": raw(residual),
-                            "residual": use_residual,
-                            "begin": begin,
-                            "end": end,
-                        },
-                        result,
-                    )
-        for mma in (False, True) if dtype == torch.bfloat16 else (False,):
-            x, w = random(93, dtype=dtype), random(53, 93, dtype=dtype)
-            add(
-                {
-                    "op": "logits",
-                    "dtype": label,
-                    "mma": mma,
-                    "width": 93,
-                    "rows": 53,
-                    "input": raw(x),
-                    "weights": raw(w),
-                },
-                F.linear(x, w),
-            )
-        if dtype == torch.bfloat16:
-            for mma in (False, True):
-                # Both additions land exactly on ties-to-even boundaries.
+            for use_residual in (False, True):
+                projected = F.linear(x, w)
+                expected = projected + residual if use_residual else projected
+                begin, end = (1, rows - 1) if rows > 2 else (0, rows)
+                result = torch.full((rows,), -123.0, device="cuda", dtype=dtype)
+                result[begin:end] = expected[begin:end]
                 add(
                     {
                         "op": "gemv",
                         "dtype": label,
-                        "mma": mma,
-                        "width": 2,
-                        "rows": 1,
-                        "input": [1.0, 1.0],
-                        "weights": [1.0, 1 / 256],
-                        "aux": [1 / 256],
-                        "residual": True,
-                        "exact": True,
+                        "width": width,
+                        "rows": rows,
+                        "input": raw(x),
+                        "weights": raw(w),
+                        "aux": raw(residual),
+                        "residual": use_residual,
+                        "begin": begin,
+                        "end": end,
                     },
-                    torch.tensor([1.0]),
+                    result,
                 )
+        x, w = random(93, dtype=dtype), random(53, 93, dtype=dtype)
+        add(
+            {
+                "op": "logits",
+                "dtype": label,
+                "width": 93,
+                "rows": 53,
+                "input": raw(x),
+                "weights": raw(w),
+            },
+            F.linear(x, w),
+        )
+        if dtype == torch.bfloat16:
+            # Both additions land exactly on ties-to-even boundaries.
+            add(
+                {
+                    "op": "gemv",
+                    "dtype": label,
+                    "width": 2,
+                    "rows": 1,
+                    "input": [1.0, 1.0],
+                    "weights": [1.0, 1 / 256],
+                    "aux": [1 / 256],
+                    "residual": True,
+                    "exact": True,
+                },
+                torch.tensor([1.0]),
+            )
         # Expose round-before-residual with a non-BF16 projection accumulator.
         for width in (10, 64, 333, 2048):
             x, w, up = (
@@ -258,22 +252,20 @@ def fixtures() -> tuple[list[dict], list[torch.Tensor], list[torch.Tensor | None
             },
             boundary,
         )
-    for mma in (False, True):
-        add(
-            {
-                "op": "gemv",
-                "dtype": "bfloat16",
-                "mma": mma,
-                "width": 2,
-                "rows": 1,
-                "input": [1.0, 1.0],
-                "weights": [-1.0, -1 / 256],
-                "aux": [-1 / 256],
-                "residual": True,
-                "exact": True,
-            },
-            torch.tensor([-1.0]),
-        )
+    add(
+        {
+            "op": "gemv",
+            "dtype": "bfloat16",
+            "width": 2,
+            "rows": 1,
+            "input": [1.0, 1.0],
+            "weights": [-1.0, -1 / 256],
+            "aux": [-1 / 256],
+            "residual": True,
+            "exact": True,
+        },
+        torch.tensor([-1.0]),
+    )
     return cases, outputs, probabilities
 
 
@@ -328,11 +320,9 @@ def main() -> None:
                 torch.testing.assert_close(observed, probs, atol=5e-4, rtol=1e-2)
         except (AssertionError, RuntimeError) as error:
             raise AssertionError(
-                f"operator case {index}: {case['op']} {case['dtype']} MMA={case.get('mma', False)} shape={case.get('rows', 1)}x{case['width']} position={case.get('position', 0)}"
+                f"operator case {index}: {case['op']} {case['dtype']} shape={case.get('rows', 1)}x{case['width']} position={case.get('position', 0)}"
             ) from error
-    print(
-        f"{len(cases)} isolated CUDA operator cases passed (FP32, BF16 SIMT, BF16 MMA)."
-    )
+    print(f"{len(cases)} isolated CUDA operator cases passed (FP32, BF16).")
 
 
 if __name__ == "__main__":

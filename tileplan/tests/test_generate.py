@@ -62,10 +62,10 @@ class GenerateTests(unittest.TestCase):
             [str(part) for part in call.args[0]] for call in commands.call_args_list
         ]
 
-    def package(self, dtype: str | None, kernel: str, version: int = 4) -> Path:
+    def package(self, dtype: str | None, version: int = 4) -> Path:
         path = self.root / "existing"
         path.mkdir(exist_ok=True)
-        model = {"matrix_kernel": kernel, "max_context": 64}
+        model = {"max_context": 64}
         if dtype is not None:
             model["weight_dtype"] = dtype
         (path / "plan.json").write_text(
@@ -80,38 +80,36 @@ class GenerateTests(unittest.TestCase):
         return path
 
     def test_new_package_precision(self) -> None:
-        for arguments, dtype, kernel in (
-            ((), "bfloat16", "simt"),
-            (("--dtype", "float32"), "float32", "simt"),
-            (("--matrix-kernel", "mma"), "bfloat16", "mma"),
-        ):
+        for arguments, dtype in (((), "bfloat16"), (("--dtype", "float32"), "float32")):
             with self.subTest(arguments=arguments):
                 commands = self.invoke(*arguments)
                 command = next(item for item in commands if "import-llama32" in item)
                 self.assertEqual(command[command.index("--dtype") + 1], dtype)
-                self.assertEqual(command[command.index("--matrix-kernel") + 1], kernel)
 
     def test_existing_package_inherits_precision(self) -> None:
-        for dtype, kernel, version, arguments in (
-            ("float32", "simt", 4, ()),
-            ("bfloat16", "simt", 4, ()),
-            ("bfloat16", "mma", 4, ()),
-            (None, "simt", 2, ("--dtype", "float32")),
-            ("bfloat16", "mma", 4, ("--dtype", "bfloat16", "--matrix-kernel", "mma")),
+        for dtype, arguments in (
+            ("float32", ()),
+            ("bfloat16", ()),
+            ("bfloat16", ("--dtype", "bfloat16")),
         ):
-            with self.subTest(dtype=dtype, kernel=kernel, version=version):
-                package = self.package(dtype, kernel, version)
+            with self.subTest(dtype=dtype, arguments=arguments):
+                package = self.package(dtype)
                 commands = self.invoke("--package", str(package), *arguments)
                 self.assertFalse(any("import-llama32" in item for item in commands))
 
     def test_existing_package_rejects_explicit_precision_conflicts(self) -> None:
-        package = self.package("bfloat16", "mma")
-        for option, value in (("--dtype", "float32"), ("--matrix-kernel", "simt")):
-            with self.subTest(option=option):
-                with self.assertRaises(SystemExit) as error:
-                    self.invoke("--package", str(package), option, value)
-                self.assertEqual(error.exception.code, 2)
-                self.assertIn(f"{option} conflicts", self.stderr.getvalue())
+        package = self.package("bfloat16")
+        with self.assertRaises(SystemExit) as error:
+            self.invoke("--package", str(package), "--dtype", "float32")
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("--dtype conflicts", self.stderr.getvalue())
+
+    def test_retired_package_format_is_rejected(self) -> None:
+        package = self.package("float32", version=2)
+        with self.assertRaises(SystemExit) as error:
+            self.invoke("--package", str(package))
+        self.assertEqual(error.exception.code, 2)
+        self.assertIn("regenerate", self.stderr.getvalue())
 
 
 if __name__ == "__main__":

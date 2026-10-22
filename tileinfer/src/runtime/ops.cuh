@@ -263,70 +263,6 @@ __device__ inline void rms_norm(const TaskRecord& task, const Context<Scalar>& c
             static_cast<float>(scale[index]));
 }
 
-/// Compute up to 16 GEMV rows as a BF16 m16n8k16 tile with FP32 accumulators.
-/// @param weights Row-major matrix base, with input_width columns and at least row_end rows.
-/// @param input,input_width Read-only vector and positive K extent.
-/// @param first_row,row_end First tile row and exclusive valid-row bound; row/K tails are zero-filled.
-/// @param[out] fragment Four FP32 results per lane, without a BF16 cast, in PTX C-fragment layout.
-/// @pre All 32 lanes participate with uniform arguments and 0 <= first_row < row_end.
-/// Lane l owns rows first_row+l/4 and +8, and columns 2*(l%4) and +1.
-/// Only lanes l%4==0 supply useful column-zero results, in fragment[0] and [2].
-/// The vector is replicated across N; two independent K streams merge before any BF16 cast.
-__device__ inline void warp_gemv_mma(const __nv_bfloat16* weights, const __nv_bfloat16* input,
-    int input_width, int first_row, int row_end, float (&fragment)[4])
-{
-    const int lane = threadIdx.x % kWarpSize;
-    const int lane_row = first_row + lane / 4;
-    const int lane_k = (lane % 4) * 2;
-    // Two independent K streams reduce serial FP32 accumulation error.
-    float partials[2][4] = {};
-    auto pack_pair = [](__nv_bfloat16 first, __nv_bfloat16 second) {
-        return static_cast<unsigned>(__bfloat16_as_ushort(first)) |
-               (static_cast<unsigned>(__bfloat16_as_ushort(second)) << 16);
-    };
-    for (int chunk = 0; chunk < input_width; chunk += 32) {
-#pragma unroll
-        for (int bank = 0; bank < 2; ++bank) {
-            const int k = chunk + bank * 16;
-            if (k >= input_width)
-                continue;
-            unsigned a_fragment[4], b_fragment[2];
-            for (int part = 0; part < 4; ++part) {
-                const int weight_row = lane_row + (part % 2) * 8;
-                const int input_column = k + lane_k + (part / 2) * 8;
-                const auto lo =
-                    weight_row < row_end && input_column < input_width
-                        ? weights[static_cast<cuda::std::size_t>(weight_row) * input_width +
-                                  input_column]
-                        : __float2bfloat16_rn(0);
-                const auto hi =
-                    weight_row < row_end && input_column + 1 < input_width
-                        ? weights[static_cast<cuda::std::size_t>(weight_row) * input_width +
-                                  input_column + 1]
-                        : __float2bfloat16_rn(0);
-                a_fragment[part] = pack_pair(lo, hi);
-            }
-            for (int part = 0; part < 2; ++part) {
-                const int input_column = k + lane_k + part * 8;
-                b_fragment[part] = pack_pair(
-                    input_column < input_width ? input[input_column] : __float2bfloat16_rn(0),
-                    input_column + 1 < input_width ? input[input_column + 1]
-                                                   : __float2bfloat16_rn(0));
-            }
-            auto& partial = partials[bank];
-            asm volatile(
-                "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-                "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
-                : "+f"(partial[0]), "+f"(partial[1]), "+f"(partial[2]), "+f"(partial[3])
-                : "r"(a_fragment[0]), "r"(a_fragment[1]), "r"(a_fragment[2]), "r"(a_fragment[3]),
-                "r"(b_fragment[0]), "r"(b_fragment[1]));
-        }
-    }
-#pragma unroll
-    for (int part = 0; part < 4; ++part)
-        fragment[part] = partials[0][part] + partials[1][part];
-}
-
 /// Commit one owned row, rounding the projection before any residual addition.
 /// @param task,context Identify Wdown and an optional FP32 pre-residual diagnostic trace.
 /// @param output,residual Row vectors; residual is nullptr, disjoint from output, or aliases it exactly.
@@ -349,10 +285,9 @@ __device__ inline void store_projection(const TaskRecord& task, const Context<Sc
 /// Compute complete dot products for the task's exclusive [begin,end) output rows.
 /// @param task Bindings a=input, b=matrix, c=output, d=optional residual (kNoTensor disables it).
 /// @param context Wdown uses intermediate_size columns; other projections use hidden_size.
-/// @tparam UseMma Select warp MMA for BF16; otherwise one warp reduces each row with SIMT.
 /// @pre Output is disjoint from input/matrix; a residual may exactly alias output.
-/// @post Warp leaders own SIMT stores; lanes divisible by four own MMA stores. No exit barrier.
-template <typename Scalar, bool UseMma = false>
+/// @post Warp leaders own the stores, one warp per row. No exit barrier.
+template <typename Scalar>
 __device__ inline void gemv(const TaskRecord& task, const Context<Scalar>& context)
 {
     const Scalar* input = activation_tensor(context, task.a);
@@ -363,27 +298,11 @@ __device__ inline void gemv(const TaskRecord& task, const Context<Scalar>& conte
                           ? context.shape.intermediate_size
                           : context.shape.hidden_size;
     const int warp = threadIdx.x / kWarpSize;
-    if constexpr (UseMma && cuda::std::is_same_v<Scalar, __nv_bfloat16>) {
-        for (cuda::std::uint32_t base = task.begin + warp * 16; base < task.end;
-            base += kWarpsPerBlock * 16) {
-            float values[4];
-            warp_gemv_mma(matrix, input, width, base, task.end, values);
-            if (threadIdx.x % 4 == 0) {
-                const int group = (threadIdx.x % kWarpSize) / 4;
-                for (int half = 0; half < 2; ++half) {
-                    const auto row = base + group + half * 8;
-                    if (row < task.end)
-                        store_projection(task, context, output, residual, row, values[half * 2]);
-                }
-            }
-        }
-    } else {
-        for (cuda::std::uint32_t row = task.begin + warp; row < task.end; row += kWarpsPerBlock) {
-            const float value = warp_dot(matrix + static_cast<cuda::std::size_t>(row) * width,
-                input, width, *context.shared);
-            if (threadIdx.x % kWarpSize == 0)
-                store_projection(task, context, output, residual, row, value);
-        }
+    for (cuda::std::uint32_t row = task.begin + warp; row < task.end; row += kWarpsPerBlock) {
+        const float value = warp_dot(
+            matrix + static_cast<cuda::std::size_t>(row) * width, input, width, *context.shared);
+        if (threadIdx.x % kWarpSize == 0)
+            store_projection(task, context, output, residual, row, value);
     }
 }
 
@@ -562,10 +481,9 @@ __device__ inline void silu_product(const TaskRecord& task, const Context<Scalar
 /// Dispatch one loader-validated task uniformly across the calling block.
 /// @param task Opcode, bindings and owned output range; its dtype must agree with Scalar.
 /// @param context Layer bindings, current prefix shape and block-private collective scratch.
-/// @tparam UseMma Enable native BF16 matrix arithmetic for GEMV tasks only.
 /// @post Output ownership follows the selected operation; the caller must finish the task's barriers.
 /// Device dispatch does not validate malformed opcode/dtype combinations.
-template <typename Scalar, bool UseMma = false>
+template <typename Scalar>
 __device__ inline void execute(const TaskRecord& task, const Context<Scalar>& context)
 {
     switch (task.opcode) {
@@ -575,7 +493,7 @@ __device__ inline void execute(const TaskRecord& task, const Context<Scalar>& co
         break;
     case Opcode::gemv_f32:
     case Opcode::gemv_bf16:
-        gemv<Scalar, UseMma>(task, context);
+        gemv(task, context);
         break;
     case Opcode::rope_query_f32:
     case Opcode::rope_query_bf16:
@@ -640,38 +558,20 @@ __device__ inline void final_rms_norm(const Scalar* hidden, const Scalar* scale,
 /// @param hidden,lm_head Globally visible normalized input and row-major [vocab_size,hidden_size] weights.
 /// @param[out] output Disjoint float32 API buffer; BF16 mathematical logits round before widening.
 /// @param hidden_size,vocab_size Positive matrix dimensions, uniform across the grid.
-/// @param shared Block-private reduction scratch; SIMT warps use separate slots.
-/// @tparam UseMma Select BF16 warp MMA; otherwise lane 0 alone stores each SIMT warp's row.
+/// @param shared Block-private reduction scratch; warps use separate slots.
 /// @pre All threads in a one-dimensional grid of kThreads-thread blocks participate.
-/// @post Every logit has one writer; consumers require a grid/stream boundary after all stores.
-template <typename Scalar, bool UseMma = false>
+/// @post Every logit has one writer, lane 0 of its warp; consumers require a grid/stream boundary.
+template <typename Scalar>
 __device__ inline void logits(const Scalar* hidden, const Scalar* lm_head, float* output,
     int hidden_size, int vocab_size, SharedStorage& shared)
 {
     const int warp = threadIdx.x / kWarpSize;
-    if constexpr (UseMma && cuda::std::is_same_v<Scalar, __nv_bfloat16>) {
-        for (int base = (blockIdx.x * kWarpsPerBlock + warp) * 16; base < vocab_size;
-            base += gridDim.x * kWarpsPerBlock * 16) {
-            float values[4];
-            warp_gemv_mma(lm_head, hidden, hidden_size, base, vocab_size, values);
-            if (threadIdx.x % 4 == 0) {
-                const int group = (threadIdx.x % kWarpSize) / 4;
-                for (int half = 0; half < 2; ++half) {
-                    const int row = base + group + half * 8;
-                    if (row < vocab_size)
-                        output[row] = static_cast<float>(static_cast<Scalar>(values[half * 2]));
-                }
-            }
-        }
-    } else {
-        for (int row = blockIdx.x * kWarpsPerBlock + warp; row < vocab_size;
-            row += gridDim.x * kWarpsPerBlock) {
-            const float value =
-                warp_dot(lm_head + static_cast<cuda::std::size_t>(row) * hidden_size, hidden,
-                    hidden_size, shared);
-            if (threadIdx.x % kWarpSize == 0)
-                output[row] = static_cast<float>(static_cast<Scalar>(value));
-        }
+    for (int row = blockIdx.x * kWarpsPerBlock + warp; row < vocab_size;
+        row += gridDim.x * kWarpsPerBlock) {
+        const float value = warp_dot(lm_head + static_cast<cuda::std::size_t>(row) * hidden_size,
+            hidden, hidden_size, shared);
+        if (threadIdx.x % kWarpSize == 0)
+            output[row] = static_cast<float>(static_cast<Scalar>(value));
     }
 }
 

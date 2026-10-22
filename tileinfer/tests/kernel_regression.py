@@ -67,12 +67,8 @@ def main() -> None:
             tokens = fixed_tokens(spec).repeat((spec.max_context + 4) // 5, 1)[
                 : spec.max_context
             ]
-            for dtype, matrix_kernel in (
-                ("float32", "simt"),
-                ("bfloat16", "simt"),
-                ("bfloat16", "mma"),
-            ):
-                package = root / f"block-{number}-{dtype}-{matrix_kernel}"
+            for dtype in ("float32", "bfloat16"):
+                package = root / f"block-{number}-{dtype}"
                 build(
                     fixture / "model.json",
                     fixture / "weights.npz",
@@ -80,7 +76,6 @@ def main() -> None:
                     7,
                     package,
                     dtype,
-                    matrix_kernel,
                 )
                 path = package / "plan.json"
                 plan = json.loads(path.read_text())
@@ -156,12 +151,8 @@ def main() -> None:
         generate_stack_fixture(fixture, spec)
         weights = fixed_stack_weights(spec)
         ids = [0, 1, 52, 7]
-        for dtype, matrix_kernel in (
-            ("float32", "simt"),
-            ("bfloat16", "simt"),
-            ("bfloat16", "mma"),
-        ):
-            package = root / f"stack-{dtype}-{matrix_kernel}"
+        for dtype in ("float32", "bfloat16"):
+            package = root / f"stack-{dtype}"
             build_stack(
                 fixture / "model.json",
                 fixture / "weights.npz",
@@ -169,7 +160,6 @@ def main() -> None:
                 7,
                 package,
                 dtype,
-                matrix_kernel,
             )
             quantized = {
                 name: value.to(device="cuda", dtype=torch.bfloat16)
@@ -185,7 +175,7 @@ def main() -> None:
             check_sequence(args.executor, package, root, ids, traces, spec)
             check_generation(args.executor, package, root, ids[:2], quantized, spec)
             # Zero logits tie across the whole vocabulary. Sampling must keep
-            # the smallest token ID in every precision/matrix implementation.
+            # the smallest token ID in every precision.
             tied_weights = root / "ties-weights.npz"
             np.savez(
                 tied_weights,
@@ -194,7 +184,7 @@ def main() -> None:
                     for name, value in weights.items()
                 },
             )
-            tied_package = root / f"ties-{dtype}-{matrix_kernel}"
+            tied_package = root / f"ties-{dtype}"
             build_stack(
                 fixture / "model.json",
                 tied_weights,
@@ -202,7 +192,6 @@ def main() -> None:
                 7,
                 tied_package,
                 dtype,
-                matrix_kernel,
             )
             tied_input = root / "ties-input.json"
             tied_input.write_text(json.dumps({"tokens": [1]}))

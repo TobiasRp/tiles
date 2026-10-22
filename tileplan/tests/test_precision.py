@@ -47,7 +47,7 @@ class PrecisionTest(unittest.TestCase):
             ("logits_compute_dtype", "float32"),
             ("api_output_dtype", "bfloat16"),
             ("numeric_policy", "unknown"),
-            ("matrix_kernel", "unknown"),
+            ("matrix_kernel", "simt"),
         ):
             bad = copy.deepcopy(bf16)
             bad["model"][field] = value
@@ -62,12 +62,8 @@ class PrecisionTest(unittest.TestCase):
             mutation(bad)
             with self.assertRaises(ValueError):
                 validate(bad, packed)
-        with self.assertRaisesRegex(ValueError, "matrix kernel"):
-            make_plan(self.spec, self.weights, target(), 7, "float32", "mma")
-        mma, blob = make_plan(self.spec, self.weights, target(), 7, "bfloat16", "mma")
-        validate(mma, blob)
 
-    def test_legacy_float32_remains_readable_and_old_bf16_is_rejected(self):
+    def test_retired_package_formats_are_rejected(self):
         for dtype in ("float32", "bfloat16"):
             plan, packed = make_plan(self.spec, self.weights, target(), 7, dtype)
             for version in (2, 3):
@@ -79,11 +75,8 @@ class PrecisionTest(unittest.TestCase):
                 )
                 legacy["model"]["dtype"] = "float32"
                 legacy["storage"].pop("attention_bytes")
-                if dtype == "float32":
+                with self.assertRaisesRegex(ValueError, "regenerate"):
                     validate(legacy, packed)
-                else:
-                    with self.assertRaisesRegex(ValueError, "retired.*regenerate"):
-                        validate(legacy, packed)
         spec = StackSpec(self.spec)
         weights = {
             name: value.numpy() for name, value in fixed_stack_weights(spec).items()
@@ -96,7 +89,8 @@ class PrecisionTest(unittest.TestCase):
         )
         stack["model"]["dtype"] = "float32"
         stack["storage"].pop("attention_bytes")
-        validate_stack(stack, packed)
+        with self.assertRaisesRegex(ValueError, "regenerate"):
+            validate_stack(stack, packed)
 
     def test_bf16_reference_keeps_real_bf16_tensors_and_cache(self):
         weights = {

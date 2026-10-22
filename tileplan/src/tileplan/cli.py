@@ -70,8 +70,6 @@ def main(argv: list[str] | None = None) -> int:
         choices=("float32", "bfloat16"),
         default="bfloat16",
     )
-    for command in (planner, stack_planner, importer):
-        command.add_argument("--matrix-kernel", choices=("simt", "mma"), default="simt")
     for name in ("inspect", "verify"):
         command = commands.add_parser(name, help=f"{name} a decoder package")
         command.add_argument("package", type=_path)
@@ -101,7 +99,6 @@ def main(argv: list[str] | None = None) -> int:
                 args.tile_rows,
                 args.out,
                 args.weight_dtype,
-                args.matrix_kernel,
             )
         elif args.command == "build-stack":
             result = build_stack(
@@ -111,7 +108,6 @@ def main(argv: list[str] | None = None) -> int:
                 args.tile_rows,
                 args.out,
                 args.weight_dtype,
-                args.matrix_kernel,
             )
         elif args.command == "import-llama32":
             result = import_llama32(
@@ -122,7 +118,6 @@ def main(argv: list[str] | None = None) -> int:
                 args.tile_rows,
                 args.revision,
                 args.weight_dtype,
-                args.matrix_kernel,
             )
         elif args.command in {"inspect", "verify"}:
             plan, _, digest = read_package(args.package)

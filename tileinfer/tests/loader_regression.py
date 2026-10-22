@@ -97,39 +97,15 @@ def main() -> None:
                 check(legal, True, "alternative assignment and ordering")
                 legal["model"]["tile_rows"] = 2**31 - 1
                 check(legal, True, "large tile metadata does not expand a graph")
-                if dtype == "float32":
-                    legacy = copy.deepcopy(original)
-                    legacy["header"].update(
-                        format_version=2,
-                        executor_abi="tileinfer-decoder-v2",
-                        model_kind=f"llama_decoder_{kind}_f32",
-                    )
-                    legacy["model"]["dtype"] = "float32"
-                    legacy["storage"].pop("attention_bytes", None)
-                    legacy["target"]["kernel_fingerprint"] = (
-                        "decoder-wave-abi2-ops-v3-stack-sm86-b128"
-                    )
-                    legacy["target"]["threads_per_block"] = 128
-                    check(legacy, True, "version 2 compatibility")
-                if dtype == "bfloat16":
+                for version in (2, 3):
                     retired = copy.deepcopy(original)
                     retired["header"].update(
-                        format_version=3,
-                        executor_abi="tileinfer-decoder-v3",
+                        format_version=version,
+                        executor_abi=f"tileinfer-decoder-v{version}",
                         model_kind=f"llama_decoder_{kind}_f32",
                     )
                     retired["model"]["dtype"] = "float32"
-                    check(retired, False, "retired mixed-mode package")
-                else:
-                    v3 = copy.deepcopy(legacy)
-                    v3["header"].update(
-                        format_version=3, executor_abi="tileinfer-decoder-v3"
-                    )
-                    v3["target"].update(
-                        threads_per_block=1024,
-                        kernel_fingerprint="decoder-wave-abi3-warp-gemv-head-attention-rope-table-v1-sm86-b1024",
-                    )
-                    check(v3, True, "version 3 float32 compatibility")
+                    check(retired, False, f"retired version {version} package")
                 mutations = {
                     "read before producer": delay_producer,
                     "mixed activation dtype": lambda p: p["model"].update(

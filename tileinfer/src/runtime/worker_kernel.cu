@@ -14,7 +14,7 @@ namespace tileinfer {
 using detail::check;
 namespace {
 
-template <typename Scalar, bool UseMma = false>
+template <typename Scalar>
 __global__ __launch_bounds__(kThreads, 1) void decoder_worker(const TaskRecord* tasks,
     const WorkerTaskRange* ranges, const TensorRecord* tensors, int waves, int workers,
     int position, int hidden_size, int intermediate_size, int kv_heads, int head_dim,
@@ -58,7 +58,7 @@ __global__ __launch_bounds__(kThreads, 1) void decoder_worker(const TaskRecord* 
             const WorkerTaskRange range = ranges[wave * workers + blockIdx.x];
             for (cuda::std::uint32_t index = range.begin; index < range.begin + range.count;
                 ++index) {
-                ops::execute<Scalar, UseMma>(tasks[index], context);
+                ops::execute(tasks[index], context);
                 __syncthreads();
             }
             if (wave + 1 < waves)
@@ -79,8 +79,8 @@ __global__ __launch_bounds__(kThreads, 1) void decoder_worker(const TaskRecord* 
         ops::final_rms_norm(last_hidden, weights + stack.final_norm_offset, final_hidden,
             hidden_size, numeric.rms_norm_eps, &shared.inverse_rms, shared.norm_partials);
         cg::this_grid().sync();
-        ops::logits<Scalar, UseMma>(final_hidden, weights + stack.lm_head_offset, logits,
-            hidden_size, stack.vocab_size, shared);
+        ops::logits(final_hidden, weights + stack.lm_head_offset, logits, hidden_size,
+            stack.vocab_size, shared);
     }
 }
 
@@ -88,13 +88,13 @@ __global__ __launch_bounds__(kThreads, 1) void decoder_worker(const TaskRecord* 
 
 namespace detail {
 
-template <typename Scalar, bool UseMma = false>
+template <typename Scalar>
 void enqueue_worker_typed(cuda::stream& stream, const WorkerProgramView& program,
     const WorkerBuffers& buffers, int position, TokenInput token)
 {
     auto config = cuda::make_config(
         cuda::block_dims<kThreads>(), cuda::grid_dims(program.workers), cuda::cooperative_launch{});
-    cuda::launch(stream, config, decoder_worker<Scalar, UseMma>, program.tasks, program.ranges,
+    cuda::launch(stream, config, decoder_worker<Scalar>, program.tasks, program.ranges,
         program.tensors, program.waves, program.workers, position, program.hidden_size,
         program.intermediate_size, program.kv_heads, program.head_dim, program.numeric,
         program.stack, token.immediate, token.ids, token.index, buffers.input, buffers.output,
@@ -106,12 +106,9 @@ void enqueue_worker_typed(cuda::stream& stream, const WorkerProgramView& program
 void enqueue_worker(cuda::stream& stream, const WorkerProgramView& program,
     const WorkerBuffers& buffers, int position, TokenInput token)
 {
-    if (program.weight_dtype == WeightDtype::bfloat16) {
-        if (program.matrix_mma)
-            enqueue_worker_typed<__nv_bfloat16, true>(stream, program, buffers, position, token);
-        else
-            enqueue_worker_typed<__nv_bfloat16>(stream, program, buffers, position, token);
-    } else
+    if (program.weight_dtype == WeightDtype::bfloat16)
+        enqueue_worker_typed<__nv_bfloat16>(stream, program, buffers, position, token);
+    else
         enqueue_worker_typed<float>(stream, program, buffers, position, token);
 }
 
@@ -135,19 +132,6 @@ Target describe_target()
     check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
               &bf16_occupancy, decoder_worker<__nv_bfloat16>, kThreads, 0),
         "BF16 worker occupancy");
-    cudaFuncAttributes mma_attributes{};
-    check(cudaFuncGetAttributes(&mma_attributes, decoder_worker<__nv_bfloat16, true>),
-        "BF16 MMA worker attributes");
-    int mma_occupancy = 0;
-    check(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
-              &mma_occupancy, decoder_worker<__nv_bfloat16, true>, kThreads, 0),
-        "BF16 MMA worker occupancy");
-    const auto bf16_simt_attributes = bf16_attributes;
-    const int bf16_simt_occupancy = bf16_occupancy;
-    bf16_occupancy = std::min(bf16_occupancy, mma_occupancy);
-    bf16_attributes.numRegs = std::max(bf16_attributes.numRegs, mma_attributes.numRegs);
-    bf16_attributes.sharedSizeBytes =
-        std::max(bf16_attributes.sharedSizeBytes, mma_attributes.sharedSizeBytes);
     int driver = 0, runtime = 0;
     check(cudaDriverGetVersion(&driver), "driver version");
     check(cudaRuntimeGetVersion(&runtime), "runtime version");
@@ -159,10 +143,8 @@ Target describe_target()
         props.maxThreadsPerMultiProcessor, props.totalGlobalMem, driver, runtime,
         {{"float32-simt", attributes.numRegs, static_cast<int>(attributes.sharedSizeBytes),
              f32_occupancy},
-            {"bfloat16-simt", bf16_simt_attributes.numRegs,
-                static_cast<int>(bf16_simt_attributes.sharedSizeBytes), bf16_simt_occupancy},
-            {"bfloat16-mma", mma_attributes.numRegs,
-                static_cast<int>(mma_attributes.sharedSizeBytes), mma_occupancy}}};
+            {"bfloat16-simt", bf16_attributes.numRegs,
+                static_cast<int>(bf16_attributes.sharedSizeBytes), bf16_occupancy}}};
 }
 
 } // namespace tileinfer

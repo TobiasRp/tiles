@@ -184,35 +184,24 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
     const auto document = json::parse(plan_data.begin(), plan_data.end());
     const auto& header = document.at("header");
     const auto model_kind = header.at("model_kind").get<std::string>();
-    const bool full_stack =
-        model_kind == "llama_decoder_stack_f32" || model_kind == "llama_decoder_stack";
+    const bool full_stack = model_kind == "llama_decoder_stack";
     const int version = positive(header.at("format_version"), "format_version");
-    const bool legacy = version == 2 || version == 3;
-    require(((version == 2 && header.at("executor_abi") == kLegacyAbi) ||
-                (version == 3 && header.at("executor_abi") == "tileinfer-decoder-v3") ||
-                (version == 4 && header.at("executor_abi") == kAbi)) &&
-                model_kind ==
-                    (full_stack ? (legacy ? "llama_decoder_stack_f32" : "llama_decoder_stack")
-                                : (legacy ? "llama_decoder_block_f32" : "llama_decoder_block")),
-        "unsupported decoder plan header");
+    require(version == 4 && header.at("executor_abi") == kAbi &&
+                model_kind == (full_stack ? "llama_decoder_stack" : "llama_decoder_block"),
+        "unsupported decoder plan header; regenerate the package with the current planner");
     const auto& model = document.at("model");
-    const std::string weight_dtype =
-        version == 2 ? "float32" : model.at("weight_dtype").get<std::string>();
+    const std::string weight_dtype = model.at("weight_dtype").get<std::string>();
     require(weight_dtype == "float32" || weight_dtype == "bfloat16", "unsupported weight dtype");
-    require(!legacy || weight_dtype == "float32",
-        "BF16-weight/float32-activation packages are retired; regenerate as version 4");
     const bool bf16 = weight_dtype == "bfloat16";
     const int weight_element_bytes = bf16 ? 2 : 4;
-    if (!legacy) {
-        require(
-            !model.contains("dtype") && model.at("activation_dtype") == weight_dtype &&
+    require(!model.contains("dtype") && !model.contains("matrix_kernel") &&
+                model.at("activation_dtype") == weight_dtype &&
                 model.at("kv_dtype") == weight_dtype &&
                 model.at("accumulation_dtype") == "float32" &&
                 model.at("logits_compute_dtype") == weight_dtype &&
                 model.at("api_output_dtype") == "float32" &&
                 model.at("numeric_policy") == (bf16 ? "hf-llama-eager-bf16-v1" : "decoder-f32-v1"),
-            "inconsistent numeric policy");
-    }
+        "inconsistent numeric policy");
     Spec s{positive(model.at("hidden_size"), "hidden_size"),
         positive(model.at("intermediate_size"), "intermediate_size"),
         positive(model.at("num_attention_heads"), "num_attention_heads"),
@@ -233,8 +222,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
         require(elements <= static_cast<std::uint64_t>(std::numeric_limits<int>::max()),
             "tensor exceeds device address range");
     }
-    require((!legacy || model.at("dtype") == "float32") && model.at("rope_type") == "llama3" &&
-                model.at("rope_pairing") == "split_half" &&
+    require(model.at("rope_type") == "llama3" && model.at("rope_pairing") == "split_half" &&
                 model.at("kv_cache_layout") == "[layers,max_context,kv_heads,head_dim]",
         "unsupported decoder numeric semantics");
     const NumericConfig numeric{positive_float(model.at("rms_norm_eps"), "rms_norm_eps"),
@@ -256,15 +244,10 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
     const auto& target = document.at("target");
     const int workers = positive(target.at("worker_count"), "worker_count");
     const auto& fingerprint = target.at("kernel_fingerprint");
-    const bool valid_fingerprint =
-        version == 2   ? fingerprint == kLegacyFingerprint || fingerprint == kLegacyProbeFingerprint
-        : version == 3 ? fingerprint == kVersion3Fingerprint
-                       : fingerprint == kFingerprint;
     require(target.at("compute_capability") == json::array({device.major, device.minor}) &&
                 target.at("sm_count") == device.sm_count && workers == device.sm_count &&
                 target.at("cooperative_launch") == true && device.cooperative_launch &&
-                target.at("threads_per_block") == (version == 2 ? 128 : kThreads) &&
-                valid_fingerprint &&
+                target.at("threads_per_block") == kThreads && fingerprint == kFingerprint &&
                 workers <= static_cast<std::int64_t>(device.sm_count) * device.active_blocks_per_sm,
         "decoder plan target does not match compiled worker");
 
@@ -341,15 +324,10 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
 
     LoadedPlan result{};
     const auto attention_bytes = bf16 ? multiply(multiply(s.nq, s.context), 2) : 0;
-    require(
-        legacy || storage.at("attention_bytes") == attention_bytes, "invalid attention workspace");
+    require(storage.at("attention_bytes") == attention_bytes, "invalid attention workspace");
     require(attention_bytes / 2 <= static_cast<std::uint64_t>(std::numeric_limits<int>::max()),
         "attention workspace exceeds address range");
     result.attention_bytes = attention_bytes;
-    const auto matrix_kernel = model.value("matrix_kernel", "simt");
-    require(
-        matrix_kernel == "simt" || (matrix_kernel == "mma" && bf16), "unsupported matrix kernel");
-    result.matrix_mma = matrix_kernel == "mma";
     result.weight_dtype = weight_dtype == "bfloat16" ? WeightDtype::bfloat16 : WeightDtype::float32;
     result.hidden_size = s.d;
     result.intermediate_size = s.f;

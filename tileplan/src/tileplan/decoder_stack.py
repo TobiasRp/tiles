@@ -235,7 +235,6 @@ def make_stack_plan(
     target: dict,
     tile_rows: int,
     weight_dtype: str = "float32",
-    matrix_kernel: str = "simt",
 ) -> tuple[dict, bytes]:
     _require(type(tile_rows) is int and tile_rows > 0, "tile rows must be positive")
     _validate_weights(spec, weights)
@@ -271,7 +270,7 @@ def make_stack_plan(
             weights["lm_head"], weight_dtype
         )
     plan = make_stack_plan_metadata(
-        spec, target, tile_rows, weight_dtype, sha256(packed).hexdigest(), matrix_kernel
+        spec, target, tile_rows, weight_dtype, sha256(packed).hexdigest()
     )
     _require(len(packed) == plan["storage"]["weight_bytes"], "invalid packed size")
     validate_stack(plan, bytes(packed))
@@ -284,7 +283,6 @@ def make_stack_plan_metadata(
     tile_rows: int,
     weight_dtype: str,
     weights_sha256: str,
-    matrix_kernel: str = "simt",
 ) -> dict:
     """Build the stack graph and layout without holding checkpoint weights."""
     _require(type(tile_rows) is int and tile_rows > 0, "tile rows must be positive")
@@ -334,7 +332,6 @@ def make_stack_plan_metadata(
         },
         "model": {
             **_model_fields(spec.as_dict(), weight_dtype),
-            "matrix_kernel": matrix_kernel,
             "tile_rows": tile_rows,
             "tensors": _descriptors(block, weight_dtype),
         },
@@ -371,36 +368,22 @@ def make_stack_plan_metadata(
 
 def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
     header, model, storage = (plan[name] for name in ("header", "model", "storage"))
-    legacy = header["format_version"] in (2, 3)
     _require(
-        (
-            (
-                legacy
-                and header["executor_abi"]
-                == f"tileinfer-decoder-v{header['format_version']}"
-            )
-            or (header["format_version"] == FORMAT and header["executor_abi"] == ABI)
-        )
-        and header["model_kind"]
-        == ("llama_decoder_stack_f32" if legacy else "llama_decoder_stack"),
-        "unsupported stack header",
+        header["format_version"] == FORMAT
+        and header["executor_abi"] == ABI
+        and header["model_kind"] == "llama_decoder_stack",
+        "unsupported stack header; regenerate the package with the current planner",
     )
-    weight_dtype = _validate_policy(header, model)
+    weight_dtype = _validate_policy(model)
     weight_bytes = _weight_size(weight_dtype)
     names = {field.name for field in fields(DecoderSpec)}
-    block = DecoderSpec(
-        **{name: model[name] for name in names if name != "dtype" or legacy}
-    )
+    block = DecoderSpec(**{name: model[name] for name in names if name != "dtype"})
     spec = StackSpec(
         block, model["layers"], model["vocab_size"], model["tie_word_embeddings"]
     )
     _require(
-        {name: model[name] for name in spec.as_dict() if name != "dtype" or legacy}
-        == {
-            name: value
-            for name, value in spec.as_dict().items()
-            if name != "dtype" or legacy
-        }
+        {name: model[name] for name in spec.as_dict() if name != "dtype"}
+        == {name: value for name, value in spec.as_dict().items() if name != "dtype"}
         and model["tensors"] == _descriptors(block, weight_dtype),
         "invalid stack model",
     )
@@ -451,11 +434,7 @@ def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
             "input_bytes": 4,
             "output_bytes": spec.vocab_size * 4,
             "scratch_bytes": scratch_bytes,
-            **(
-                {"attention_bytes": _attention_bytes(block, weight_dtype)}
-                if not legacy
-                else {}
-            ),
+            "attention_bytes": _attention_bytes(block, weight_dtype),
             "scratch": scratch_regions,
             "kv_bytes": layer_kv_bytes * spec.layers,
             "kv": kv_regions,
@@ -499,7 +478,6 @@ def build_stack(
     tile_rows: int | str,
     out: Path,
     weight_dtype: str = "float32",
-    matrix_kernel: str = "simt",
 ) -> dict:
     spec = read_stack_model(model_path)
     weights = read_stack_weights(weights_path, spec)
@@ -511,9 +489,7 @@ def build_stack(
         )
     elif isinstance(tile_rows, str):
         tile_rows = int(tile_rows)
-    plan, packed = make_stack_plan(
-        spec, weights, target, tile_rows, weight_dtype, matrix_kernel
-    )
+    plan, packed = make_stack_plan(spec, weights, target, tile_rows, weight_dtype)
     if out.exists():
         raise FileExistsError(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -524,7 +500,6 @@ def build_stack(
         (temporary / "plan.json").write_bytes(data)
         report = {
             **numeric_policy(weight_dtype),
-            "matrix_kernel": matrix_kernel,
             "attention_bytes": plan["storage"]["attention_bytes"],
             "plan_sha256": sha256(data).hexdigest(),
             "weights_sha256": plan["integrity"]["weights_sha256"],

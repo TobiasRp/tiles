@@ -82,31 +82,18 @@ def _model_fields(model: dict, dtype: str) -> dict:
     return {
         **{k: v for k, v in model.items() if k != "dtype"},
         **numeric_policy(dtype),
-        "matrix_kernel": "simt",
     }
 
 
-def _validate_policy(header: dict, model: dict) -> str:
-    version = header["format_version"]
+def _validate_policy(model: dict) -> str:
     dtype = model.get("weight_dtype", "float32")
-    if version in (2, 3):
-        _require(
-            dtype == "float32",
-            "BF16-weight/float32-activation packages are retired; regenerate as version 4",
-        )
-        _require(model["dtype"] == "float32", "invalid legacy dtype")
-    else:
-        kernel = model.get("matrix_kernel")
-        _require(
-            kernel == "simt" or (kernel == "mma" and dtype == "bfloat16"),
-            "unsupported matrix kernel",
-        )
-        expected = numeric_policy(dtype)
-        _require(
-            "dtype" not in model
-            and all(model.get(k) == v for k, v in expected.items()),
-            "inconsistent numeric policy",
-        )
+    expected = numeric_policy(dtype)
+    _require(
+        "dtype" not in model
+        and "matrix_kernel" not in model
+        and all(model.get(k) == v for k, v in expected.items()),
+        "inconsistent numeric policy",
+    )
     return dtype
 
 
@@ -476,7 +463,6 @@ def make_plan(
     target: dict,
     tile_rows: int,
     weight_dtype: str = "float32",
-    matrix_kernel: str = "simt",
 ) -> tuple[dict, bytes]:
     _require(type(tile_rows) is int and tile_rows > 0, "tile_rows must be positive")
     _require(set(weights) == set(WEIGHTS), "weight names mismatch")
@@ -511,7 +497,6 @@ def make_plan(
         },
         "model": {
             **_model_fields(spec.as_dict(), weight_dtype),
-            "matrix_kernel": matrix_kernel,
             "layers": 1,
             "tile_rows": tile_rows,
             "tensors": _descriptors(spec, weight_dtype),
@@ -543,26 +528,16 @@ def validate(plan: dict, packed: bytes) -> None:
     header, target, model, storage = (
         plan[name] for name in ("header", "target", "model", "storage")
     )
-    legacy = header["format_version"] in (2, 3)
     _require(
-        (
-            (
-                legacy
-                and header["executor_abi"]
-                == f"tileinfer-decoder-v{header['format_version']}"
-            )
-            or (header["format_version"] == FORMAT and header["executor_abi"] == ABI)
-        )
-        and header["model_kind"]
-        == ("llama_decoder_block_f32" if legacy else "llama_decoder_block"),
-        "unsupported decoder header",
+        header["format_version"] == FORMAT
+        and header["executor_abi"] == ABI
+        and header["model_kind"] == "llama_decoder_block",
+        "unsupported decoder header; regenerate the package with the current planner",
     )
-    weight_dtype = _validate_policy(header, model)
+    weight_dtype = _validate_policy(model)
     weight_bytes = _weight_size(weight_dtype)
     names = {field.name for field in fields(DecoderSpec)}
-    spec = DecoderSpec(
-        **{name: model[name] for name in names if name != "dtype" or legacy}
-    )
+    spec = DecoderSpec(**{name: model[name] for name in names if name != "dtype"})
     _require(
         model["head_to_kv"] == spec.head_to_kv and model["layers"] == 1,
         "unsupported model/head mapping",
@@ -588,9 +563,7 @@ def validate(plan: dict, packed: bytes) -> None:
     _require(
         storage["input_bytes"] == spec.hidden_size * weight_bytes
         and storage["output_bytes"] == spec.hidden_size * weight_bytes
-        and (
-            legacy or storage["attention_bytes"] == _attention_bytes(spec, weight_dtype)
-        ),
+        and storage["attention_bytes"] == _attention_bytes(spec, weight_dtype),
         "invalid IO storage",
     )
     for names_in_class, key, alignment in (
@@ -630,7 +603,6 @@ def build(
     tile_rows: int | str,
     out: Path,
     weight_dtype: str = "float32",
-    matrix_kernel: str = "simt",
 ) -> dict:
     spec = read_model(model_path)
     weights = read_weights(weights_path, spec)
@@ -640,9 +612,7 @@ def build(
         tile_rows, candidates = choose_tile_rows(spec, target["launch"]["worker_count"])
     elif isinstance(tile_rows, str):
         tile_rows = int(tile_rows)
-    plan, packed = make_plan(
-        spec, weights, target, tile_rows, weight_dtype, matrix_kernel
-    )
+    plan, packed = make_plan(spec, weights, target, tile_rows, weight_dtype)
     if out.exists():
         raise FileExistsError(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -688,7 +658,6 @@ def summary(plan: dict, digest: str) -> dict:
     ):
         return {
             **numeric_policy(weight_dtype),
-            "matrix_kernel": plan["model"].get("matrix_kernel", "simt"),
             "attention_bytes": storage.get("attention_bytes", 0),
             "plan_sha256": digest,
             "weights_sha256": plan["integrity"]["weights_sha256"],
@@ -704,7 +673,6 @@ def summary(plan: dict, digest: str) -> dict:
         }
     return {
         **numeric_policy(weight_dtype),
-        "matrix_kernel": plan["model"].get("matrix_kernel", "simt"),
         "attention_bytes": storage.get("attention_bytes", 0),
         "plan_sha256": digest,
         "weights_sha256": plan["integrity"]["weights_sha256"],

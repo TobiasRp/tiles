@@ -27,7 +27,6 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
     , scratch_count(plan.scratch_bytes / element_bytes(plan.weight_dtype))
     , kv_count(plan.kv_bytes / element_bytes(plan.weight_dtype))
     , attention_count(plan.attention_bytes / element_bytes(plan.weight_dtype))
-    , matrix_mma(plan.matrix_mma)
     , numeric(plan.numeric)
     , stack(plan.stack)
     , weight_dtype(plan.weight_dtype)
@@ -59,7 +58,7 @@ WorkerProgramView UploadedPlan::view() const
 {
     return {tasks.data(), ranges.data(), tensors.data(), weights.data(), rotary_frequencies.data(),
         waves, workers, hidden_size, intermediate_size, kv_heads, head_dim, numeric, stack,
-        weight_dtype, max_context, matrix_mma};
+        weight_dtype, max_context};
 }
 
 } // namespace tileinfer::detail

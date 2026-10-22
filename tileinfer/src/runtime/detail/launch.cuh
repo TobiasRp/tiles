@@ -24,7 +24,6 @@ struct WorkerProgramView
     StackConfig stack;
     WeightDtype weight_dtype;
     int max_context;
-    bool matrix_mma;
 };
 
 // Borrows one sequence's mutable device storage for a worker launch.

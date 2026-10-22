@@ -338,7 +338,6 @@ def main() -> None:
                 "accumulation_dtype",
                 "logits_compute_dtype",
                 "api_output_dtype",
-                "matrix_kernel",
             )
         },
         "weights_sha256": package["integrity"]["weights_sha256"],

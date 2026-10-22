@@ -9,9 +9,9 @@ dependencies and planning metadata; [TileInfer](../tileinfer/README.md) checks
 the executable layout and schedule.
 
 For text generation, use [`generate.py`](../generate.py). It handles the full
-build/probe/import/tokenize/run sequence and creates BF16/SIMT packages by
-default. Reusing a package inherits its precision and matrix kernel unless
-explicit matching options are supplied.
+build/probe/import/tokenize/run sequence and creates BF16 packages by
+default. Reusing a package inherits its precision unless an explicit matching
+option is supplied.
 
 ## Checkpoint setup
 
@@ -45,18 +45,15 @@ uv run --locked --project tileplan python -m tileplan verify runs/demo/package
 ```
 
 Probe the actual compiled worker after any kernel change. Packages record its
-fingerprint and launch parameters. Version-2/3 pure-float32 compatibility remains
-available; old BF16-weight/float32-activation packages are retired and must be
-regenerated as version 4. Unknown worker fingerprints also require regeneration.
+fingerprint and launch parameters. Older package formats and unknown worker
+fingerprints are rejected; regenerate those packages.
 
 `--dtype bfloat16` (the checkpoint default) selects BF16 weights, activations,
 and K/V together; `--dtype float32` selects the pure-float32 path. Synthetic
 builders default to float32 and also accept `--weight-dtype` as an alias.
-`--matrix-kernel simt` uses FP32 SIMT multiplication and accumulation over BF16
-operands; `--matrix-kernel mma` uses native
-BF16 Tensor Core multiplication with FP32 accumulation. MMA requires BF16.
-SIMT remains the default; [the measured comparison](../docs/bf16_compute_results.md)
-explains that choice.
+Matrix arithmetic uses FP32 SIMT multiplication and accumulation over BF16
+operands; [the measured comparison](../docs/bf16_compute_results.md) explains
+why the native Tensor Core variant was removed.
 
 `--tile-rows auto` uses an offline load-balancing heuristic over 2/4/8/16 rows;
 it does not benchmark the GPU. Explicit tile sizes should be selected with

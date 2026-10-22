@@ -59,7 +59,7 @@ json precision(const tileinfer::LoadedPlan& plan)
     return {{"numeric_policy", bf16 ? "hf-llama-eager-bf16-v1" : "decoder-f32-v1"},
         {"weight_dtype", dtype}, {"activation_dtype", dtype}, {"kv_dtype", dtype},
         {"accumulation_dtype", "float32"}, {"logits_compute_dtype", dtype},
-        {"api_output_dtype", "float32"}, {"matrix_kernel", plan.matrix_mma ? "mma" : "simt"}};
+        {"api_output_dtype", "float32"}};
 }
 
 json inspect(const tileinfer::LoadedPlan& plan)

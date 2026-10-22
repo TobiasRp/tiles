@@ -261,7 +261,6 @@ def main() -> None:
         "runtime": runtime,
         "runtime_activation_dtype": weight_dtype,
         "runtime_accumulation_dtype": "float32",
-        "matrix_kernel": plan["model"].get("matrix_kernel", "simt"),
         "generated_ids_match": matches,
         "timing": "CUDA events around GPU selection and decode; prefill and readback excluded",
     }
