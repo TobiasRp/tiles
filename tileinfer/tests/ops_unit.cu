@@ -25,7 +25,7 @@ __global__ __launch_bounds__(kThreads, 1) void run_operator(int op, TaskRecord t
 {
     __shared__ ops::SharedStorage shared;
     const ops::Context<Scalar> context{
-        records, {input, output, aux, kv, weights, scores, nullptr}, shape, &shared};
+        records, {input, output, aux, kv, weights, scores, nullptr, nullptr}, shape, &shared};
     switch (op) {
     case 0:
         ops::gemv(task, context);
@@ -46,14 +46,14 @@ __global__ __launch_bounds__(kThreads, 1) void run_operator(int op, TaskRecord t
         ops::silu_product(task, context);
         break;
     case 5:
-        ops::embedding_lookup(0, shape.hidden_size, weights, output);
+        ops::embedding_lookup(0, task.begin, task.end, shape.hidden_size, weights, output);
         break;
     case 6:
-        ops::final_rms_norm(input, weights, output, shape.hidden_size, shape.numeric.rms_norm_eps,
-            &shared.inverse_rms, shared.norm_partials);
+        ops::final_rms_norm(input, weights, output, task.begin, task.end, shape.hidden_size,
+            shape.numeric.rms_norm_eps, &shared.inverse_rms, shared.norm_partials);
         break;
     case 7:
-        ops::logits(input, weights, logits, shape.hidden_size, rows, shared);
+        ops::logits(input, weights, logits, task.begin, task.end, shape.hidden_size, shared);
         break;
     }
 }
@@ -141,6 +141,9 @@ json evaluate(const json& item)
     cuda::copy_bytes(stream, scores, d_scores);
     cuda::copy_bytes(stream, frequencies, d_frequencies);
     cuda::copy_bytes(stream, records, d_records);
+    // Unowned logits keep the same sentinel as other operators' outputs.
+    const std::vector<float> logits_sentinel(output_count, -123.0f);
+    cuda::copy_bytes(stream, logits_sentinel, d_logits);
     NumericConfig numeric{};
     numeric.rms_norm_eps = item.value("epsilon", 1e-5f);
     const ops::BlockShape shape{

@@ -62,7 +62,7 @@ class GenerateTests(unittest.TestCase):
             [str(part) for part in call.args[0]] for call in commands.call_args_list
         ]
 
-    def package(self, dtype: str | None, version: int = 4) -> Path:
+    def package(self, dtype: str | None, version: int = 5) -> Path:
         path = self.root / "existing"
         path.mkdir(exist_ok=True)
         model = {"max_context": 64}

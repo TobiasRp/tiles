@@ -40,10 +40,11 @@ json target_json(const tileinfer::Target& t)
         {"executor",
             {{"abi", tileinfer::kAbi},
                 {"opcodes", {"rms_norm_f32", "gemv_f32", "rope_query_f32", "rope_cache_f32",
-                                "attention_prefix_f32", "silu_product_f32", "embedding_lookup_f32",
-                                "logits_f32", "rms_norm_bf16", "gemv_bf16", "rope_query_bf16",
-                                "rope_cache_bf16", "attention_prefix_bf16", "silu_product_bf16",
-                                "embedding_lookup_bf16", "logits_bf16"}},
+                                "attention_prefix_f32", "silu_product_f32", "embedding_f32",
+                                "final_rms_norm_f32", "logits_f32", "rms_norm_bf16", "gemv_bf16",
+                                "rope_query_bf16", "rope_cache_bf16", "attention_prefix_bf16",
+                                "silu_product_bf16", "embedding_bf16", "final_rms_norm_bf16",
+                                "logits_bf16"}},
                 {"worker_variants", variants}, {"execution_ready", true},
                 {"threads_per_block", tileinfer::kThreads},
                 {"active_blocks_per_sm", t.active_blocks_per_sm},
@@ -68,8 +69,8 @@ json inspect(const tileinfer::LoadedPlan& plan)
         2ull * plan.hidden_size * tileinfer::element_bytes(plan.weight_dtype);
     const std::uint64_t logits_bytes =
         static_cast<std::uint64_t>(plan.stack.vocab_size) * sizeof(float);
-    const std::uint64_t program_bytes = plan.tasks.size() * sizeof(tileinfer::TaskRecord) +
-                                        plan.ranges.size() * sizeof(tileinfer::WorkerTaskRange) +
+    const std::uint64_t program_bytes = plan.instructions.size() * sizeof(tileinfer::TaskRecord) +
+                                        plan.streams.size() * sizeof(tileinfer::WorkerTaskRange) +
                                         plan.tensors.size() * sizeof(tileinfer::TensorRecord) +
                                         plan.rotary_frequencies.size() * sizeof(float);
     const std::uint64_t token_bytes =
@@ -93,8 +94,8 @@ json inspect(const tileinfer::LoadedPlan& plan)
             {{"hidden_size", plan.hidden_size}, {"intermediate_size", plan.intermediate_size},
                 {"num_attention_heads", plan.query_heads}, {"num_key_value_heads", plan.kv_heads},
                 {"head_dim", plan.head_dim}, {"max_context", plan.max_context}}},
-        {"workers", plan.workers}, {"wave_count", plan.wave_count},
-        {"task_count", plan.tasks.size()}, {"worker_loads", plan.worker_loads},
+        {"workers", plan.workers}, {"wave_count", plan.wave_count}, {"task_count", plan.task_count},
+        {"instruction_count", plan.instructions.size()}, {"worker_loads", plan.worker_loads},
         {"scratch_bytes", plan.scratch_bytes}, {"attention_bytes", plan.attention_bytes},
         {"kv_bytes", plan.kv_bytes}, {"weight_bytes", plan.weights.size()},
         {"weight_dtype",

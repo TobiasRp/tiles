@@ -9,12 +9,11 @@ namespace tileinfer::detail {
 // Immutable device data for one worker launch
 struct WorkerProgramView
 {
-    const TaskRecord* tasks;
-    const WorkerTaskRange* ranges;
+    const TaskRecord* instructions;
+    const WorkerTaskRange* streams; // one per worker
     const TensorRecord* tensors;
     const void* weights;
     const float* rotary_frequencies;
-    int waves;
     int workers;
     int hidden_size;
     int intermediate_size;

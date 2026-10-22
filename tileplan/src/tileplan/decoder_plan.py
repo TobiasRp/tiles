@@ -1,5 +1,6 @@
-"""Version-4 decoder package builder and independent package checks."""
+"""Version-5 decoder package builder and independent package checks."""
 
+import copy
 import json
 import os
 import shutil
@@ -14,8 +15,8 @@ import torch
 from .decoder_reference import WEIGHT_SHAPES, DecoderSpec
 from .probe import ABI, read_target
 
-FORMAT = 4
-GENERATOR = "tileplan-decoder-0.4"
+FORMAT = 5
+GENERATOR = "tileplan-decoder-0.5"
 WEIGHT_DTYPES = {"float32": 4, "bfloat16": 2}
 TENSOR_NAMES = (
     "x",
@@ -48,14 +49,6 @@ WEIGHTS = tuple(name for name in TENSOR_NAMES if name in WEIGHT_SHAPES)
 SCRATCH = tuple(
     name for name in TENSOR_NAMES if name not in (*WEIGHTS, "x", "y", "K", "V")
 )
-REQUIRED_OPCODES = {
-    "rms_norm_f32",
-    "gemv_f32",
-    "rope_query_f32",
-    "rope_cache_f32",
-    "attention_prefix_f32",
-    "silu_product_f32",
-}
 
 
 def _require(condition: bool, message: str) -> None:
@@ -407,6 +400,124 @@ def _graph(spec: DecoderSpec, tile_rows: int, dtype: str = "float32") -> list[di
     return tasks
 
 
+def _split(rows: int, parts: int) -> list[tuple[int, int]]:
+    """Return at most ``parts`` contiguous, near-equal, nonempty row ranges."""
+    count = min(rows, parts)
+    return [(i * rows // count, (i + 1) * rows // count) for i in range(count)]
+
+
+def _program(
+    spec: DecoderSpec,
+    tile_rows: int,
+    dtype: str,
+    workers: int,
+    layers: int = 1,
+    vocab_size: int | None = None,
+) -> list[dict]:
+    """Whole-token task graph in topological order.
+
+    A stack (``vocab_size`` set) starts with embedding tasks and ends with final
+    normalization and logits tasks, each split into one row range per worker.
+    Every layer repeats the block graph; its first normalization depends on the
+    previous layer's output tasks. Layer tasks name their layer so the executor
+    selects that layer's weights, K/V, and alternating hidden buffers.
+    """
+    suffix = "_bf16" if dtype == "bfloat16" else "_f32"
+    d = spec.hidden_size
+    tasks: list[dict] = []
+
+    def stage(
+        opcode: str, name: str, rows: int, predecessors: list[int], work
+    ) -> list[int]:
+        ids = []
+        for begin, end in _split(rows, workers):
+            ids.append(len(tasks))
+            tasks.append(
+                {
+                    "id": len(tasks),
+                    "layer": None,
+                    "opcode": opcode + suffix,
+                    "operands": {"rows": [begin, end]},
+                    "output": [{"stage": name, "rows": [begin, end]}],
+                    "predecessors": sorted(predecessors),
+                    "estimated_work": work(begin, end),
+                }
+            )
+        return ids
+
+    previous = (
+        stage("embedding", "embedding", d, [], lambda begin, end: end - begin)
+        if vocab_size is not None
+        else []
+    )
+    template = _graph(spec, tile_rows, dtype)
+    for layer in range(layers):
+        offset = len(tasks)
+        for task in template:
+            repeated = copy.deepcopy(task)
+            repeated["id"] += offset
+            repeated["layer"] = layer
+            repeated["predecessors"] = sorted(
+                [index + offset for index in task["predecessors"]]
+                if task["predecessors"]
+                else previous
+            )
+            tasks.append(repeated)
+        previous = [
+            task["id"]
+            for task in tasks[offset:]
+            if task["operands"].get("weight") == TID["Wdown"]
+        ]
+    if vocab_size is not None:
+        normalized = stage(
+            "final_rms_norm",
+            "final_norm",
+            d,
+            previous,
+            lambda begin, end: d + end - begin,
+        )
+        stage(
+            "logits",
+            "logits",
+            vocab_size,
+            normalized,
+            lambda begin, end: (end - begin) * d,
+        )
+    return tasks
+
+
+def layer_view(plan: dict, layer: int = 0) -> dict:
+    """Return a copy of ``plan`` restricted to one layer, renumbered from zero.
+
+    Every layer of the current planner occupies its own consecutive waves, so
+    the view shows the repeated block schedule for display and inspection.
+    """
+    selected = [task for task in plan["tasks"] if task["layer"] == layer]
+    ids = {task["id"]: index for index, task in enumerate(selected)}
+    first = min(task["wave"] for task in selected)
+    last = max(task["wave"] for task in selected)
+    tasks = []
+    for task in selected:
+        local = copy.deepcopy(task)
+        local["id"] = ids[task["id"]]
+        local["wave"] -= first
+        local["predecessors"] = [ids[p] for p in task["predecessors"] if p in ids]
+        tasks.append(local)
+    waves = []
+    for wave in plan["waves"][first : last + 1]:
+        lanes = [[ids[i] for i in lane if i in ids] for lane in wave["workers"]]
+        waves.append(
+            {
+                "id": wave["id"] - first,
+                "workers": lanes,
+                "estimated_work": [
+                    sum(tasks[i]["estimated_work"] for i in lane) for lane in lanes
+                ],
+            }
+        )
+    return {**plan, "tasks": tasks, "waves": waves}
+
+
 def _schedule(tasks: list[dict], workers: int) -> list[dict]:
     buckets: list[list[int]] = []
     for task in tasks:
@@ -478,8 +589,9 @@ def make_plan(
         spec, SCRATCH, 16, _weight_size(weight_dtype)
     )
     kv_regions, kv_bytes = _regions(spec, ("K", "V"), 16, _weight_size(weight_dtype))
-    tasks = _graph(spec, tile_rows, weight_dtype)
-    waves = _schedule(tasks, target["launch"]["worker_count"])
+    workers = target["launch"]["worker_count"]
+    tasks = _program(spec, tile_rows, weight_dtype, workers)
+    waves = _schedule(tasks, workers)
     plan = {
         "header": {
             "format_version": FORMAT,
@@ -588,7 +700,7 @@ def validate(plan: dict, packed: bytes) -> None:
         == {"weights_bytes": len(packed), "weights_sha256": sha256(packed).hexdigest()},
         "weight length or checksum mismatch",
     )
-    expected_tasks = _graph(spec, tile_rows, weight_dtype)
+    expected_tasks = _program(spec, tile_rows, weight_dtype, workers)
     expected_waves = _schedule(expected_tasks, workers)
     _require(
         plan["tasks"] == expected_tasks and plan["waves"] == expected_waves,
@@ -636,10 +748,7 @@ def read_package(package: Path) -> tuple[dict, bytes, str]:
     data = (package / "plan.json").read_bytes()
     plan = json.loads(data)
     packed = (package / "weights.bin").read_bytes()
-    if plan.get("header", {}).get("model_kind") in (
-        "llama_decoder_stack_f32",
-        "llama_decoder_stack",
-    ):
+    if plan.get("header", {}).get("model_kind") == "llama_decoder_stack":
         from .decoder_stack import validate_stack
 
         validate_stack(plan, packed)
@@ -652,10 +761,7 @@ def summary(plan: dict, digest: str) -> dict:
     storage = plan["storage"]
     waves = plan["waves"]
     weight_dtype = plan["model"].get("weight_dtype", "float32")
-    if plan["header"]["model_kind"] in (
-        "llama_decoder_stack_f32",
-        "llama_decoder_stack",
-    ):
+    if plan["header"]["model_kind"] == "llama_decoder_stack":
         return {
             **numeric_policy(weight_dtype),
             "attention_bytes": storage.get("attention_bytes", 0),
@@ -664,8 +770,9 @@ def summary(plan: dict, digest: str) -> dict:
             "layers": plan["model"]["layers"],
             "vocab_size": plan["model"]["vocab_size"],
             "tile_rows": plan["model"]["tile_rows"],
-            "block_task_count": len(plan["tasks"]),
-            "block_wave_count": len(waves),
+            "task_count": len(plan["tasks"]),
+            "wave_count": len(waves),
+            "layer_wave_count": len(layer_view(plan)["waves"]),
             "scratch_bytes": storage["scratch_bytes"],
             "kv_bytes": storage["kv_bytes"],
             "weight_bytes": storage["weight_bytes"],

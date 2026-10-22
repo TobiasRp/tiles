@@ -14,73 +14,69 @@ namespace tileinfer {
 using detail::check;
 namespace {
 
+// Executes this block's validated instruction stream for one token. Barrier
+// instructions appear at the same stream positions in every worker.
 template <typename Scalar>
-__global__ __launch_bounds__(kThreads, 1) void decoder_worker(const TaskRecord* tasks,
-    const WorkerTaskRange* ranges, const TensorRecord* tensors, int waves, int workers,
-    int position, int hidden_size, int intermediate_size, int kv_heads, int head_dim,
-    NumericConfig numeric, StackConfig stack, TokenId token_id, const TokenId* device_tokens,
-    int token_index, void* raw_input, void* raw_output, void* raw_scratch, void* raw_kv,
-    const Scalar* weights, float* logits, float* block_trace, const float* rotary_frequencies,
-    int max_context, void* attention_scores, float* ffn_trace)
+__global__ __launch_bounds__(kThreads, 1) void decoder_worker(const TaskRecord* instructions,
+    const WorkerTaskRange* streams, const TensorRecord* tensors, int position, int hidden_size,
+    int intermediate_size, int kv_heads, int head_dim, NumericConfig numeric, StackConfig stack,
+    TokenId token_id, const TokenId* device_tokens, int token_index, void* raw_input,
+    void* raw_output, void* raw_scratch, void* raw_kv, const Scalar* weights, float* logits,
+    float* block_trace, const float* rotary_frequencies, int max_context, void* attention_scores,
+    float* ffn_trace)
 {
-    auto* input = static_cast<Scalar*>(raw_input);
-    auto* output = static_cast<Scalar*>(raw_output);
+    // Layer l reads hidden(l) and writes hidden(l + 1). Selecting with a
+    // conditional, not an indexed array, keeps both pointers in the global
+    // address space; a local array made activation reads generic loads.
+    auto* const input = static_cast<Scalar*>(raw_input);
+    auto* const output = static_cast<Scalar*>(raw_output);
+    const auto hidden = [&](int index) { return index % 2 == 0 ? input : output; };
     auto* scratch = static_cast<Scalar*>(raw_scratch);
     auto* kv = static_cast<Scalar*>(raw_kv);
     namespace cg = cooperative_groups;
     __shared__ ops::SharedStorage shared;
 
     const TokenId current_token = device_tokens == nullptr ? token_id : device_tokens[token_index];
+    // Every block takes the same EOS skip decision, so no barrier is left waiting.
     if (stack.full_stack && current_token < 0)
         return;
 
-    if (stack.full_stack) {
-        ops::embedding_lookup(current_token, hidden_size, weights + stack.embedding_offset, input);
-        cg::this_grid().sync();
-    }
-
-    for (int layer = 0; layer < stack.layers; ++layer) {
-        Scalar* current_input = layer % 2 == 0 ? input : output;
-        Scalar* current_output = layer % 2 == 0 ? output : input;
-        Scalar* layer_kv = kv + layer * stack.layer_kv_stride;
-        const Scalar* layer_weights =
-            weights + stack.layer_weights_offset + layer * stack.layer_weight_stride;
-        const ops::Context<Scalar> context{
-            tensors,
-            {current_input, current_output, scratch, layer_kv, layer_weights,
-                static_cast<Scalar*>(attention_scores), ffn_trace},
-            {hidden_size, intermediate_size, kv_heads, head_dim, position, max_context, numeric,
-                rotary_frequencies},
-            &shared,
-        };
-
-        for (int wave = 0; wave < waves; ++wave) {
-            const WorkerTaskRange range = ranges[wave * workers + blockIdx.x];
-            for (cuda::std::uint32_t index = range.begin; index < range.begin + range.count;
-                ++index) {
-                ops::execute(tasks[index], context);
-                __syncthreads();
-            }
-            if (wave + 1 < waves)
-                cg::this_grid().sync();
-        }
-        cg::this_grid().sync();
-        if (block_trace != nullptr) {
-            for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < hidden_size;
-                index += gridDim.x * blockDim.x)
-                block_trace[layer * hidden_size + index] = current_output[index];
+    const WorkerTaskRange stream = streams[blockIdx.x];
+    for (cuda::std::uint32_t index = stream.begin; index < stream.begin + stream.count; ++index) {
+        const TaskRecord task = instructions[index];
+        switch (task.opcode) {
+        case Opcode::barrier:
             cg::this_grid().sync();
+            continue;
+        case Opcode::embedding:
+            ops::embedding_lookup(current_token, task.begin, task.end, hidden_size,
+                weights + stack.embedding_offset, hidden(0));
+            break;
+        case Opcode::final_rms_norm:
+            ops::final_rms_norm(hidden(stack.layers), weights + stack.final_norm_offset,
+                hidden(stack.layers + 1), task.begin, task.end, hidden_size, numeric.rms_norm_eps,
+                &shared.inverse_rms, shared.norm_partials);
+            break;
+        case Opcode::logits:
+            ops::logits(hidden(stack.layers + 1), weights + stack.lm_head_offset, logits,
+                task.begin, task.end, hidden_size, shared);
+            break;
+        default: {
+            const int layer = static_cast<int>(task.layer);
+            const ops::Context<Scalar> context{
+                tensors,
+                {hidden(layer), hidden(layer + 1), scratch, kv + layer * stack.layer_kv_stride,
+                    weights + stack.layer_weights_offset + layer * stack.layer_weight_stride,
+                    static_cast<Scalar*>(attention_scores), ffn_trace,
+                    block_trace == nullptr ? nullptr : block_trace + layer * hidden_size},
+                {hidden_size, intermediate_size, kv_heads, head_dim, position, max_context, numeric,
+                    rotary_frequencies},
+                &shared,
+            };
+            ops::execute(task, context);
         }
-    }
-
-    if (stack.full_stack) {
-        const Scalar* last_hidden = stack.layers % 2 == 0 ? input : output;
-        Scalar* final_hidden = stack.layers % 2 == 0 ? output : input;
-        ops::final_rms_norm(last_hidden, weights + stack.final_norm_offset, final_hidden,
-            hidden_size, numeric.rms_norm_eps, &shared.inverse_rms, shared.norm_partials);
-        cg::this_grid().sync();
-        ops::logits(final_hidden, weights + stack.lm_head_offset, logits, hidden_size,
-            stack.vocab_size, shared);
+        }
+        __syncthreads();
     }
 }
 
@@ -94,13 +90,13 @@ void enqueue_worker_typed(cuda::stream& stream, const WorkerProgramView& program
 {
     auto config = cuda::make_config(
         cuda::block_dims<kThreads>(), cuda::grid_dims(program.workers), cuda::cooperative_launch{});
-    cuda::launch(stream, config, decoder_worker<Scalar>, program.tasks, program.ranges,
-        program.tensors, program.waves, program.workers, position, program.hidden_size,
-        program.intermediate_size, program.kv_heads, program.head_dim, program.numeric,
-        program.stack, token.immediate, token.ids, token.index, buffers.input, buffers.output,
-        buffers.scratch, buffers.kv, static_cast<const Scalar*>(program.weights), buffers.logits,
-        buffers.block_trace, program.rotary_frequencies, program.max_context,
-        buffers.attention_scores, buffers.ffn_trace);
+    cuda::launch(stream, config, decoder_worker<Scalar>, program.instructions, program.streams,
+        program.tensors, position, program.hidden_size, program.intermediate_size, program.kv_heads,
+        program.head_dim, program.numeric, program.stack, token.immediate, token.ids, token.index,
+        buffers.input, buffers.output, buffers.scratch, buffers.kv,
+        static_cast<const Scalar*>(program.weights), buffers.logits, buffers.block_trace,
+        program.rotary_frequencies, program.max_context, buffers.attention_scores,
+        buffers.ffn_trace);
 }
 
 void enqueue_worker(cuda::stream& stream, const WorkerProgramView& program,

@@ -186,7 +186,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
     const auto model_kind = header.at("model_kind").get<std::string>();
     const bool full_stack = model_kind == "llama_decoder_stack";
     const int version = positive(header.at("format_version"), "format_version");
-    require(version == 4 && header.at("executor_abi") == kAbi &&
+    require(version == 5 && header.at("executor_abi") == kAbi &&
                 model_kind == (full_stack ? "llama_decoder_stack" : "llama_decoder_block"),
         "unsupported decoder plan header; regenerate the package with the current planner");
     const auto& model = document.at("model");
@@ -289,12 +289,6 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
                     storage.at("weight_bytes") == total && storage.at("stack") == expected_stack &&
                     total == weights.size(),
             "invalid decoder stack storage");
-        require(document.at("execution") ==
-                    json{{"prelude", bf16 ? "embedding_lookup_bf16" : "embedding_lookup_f32"},
-                        {"repeat_block_count", layers},
-                        {"postlude", bf16 ? json::array({"rms_norm_bf16", "logits_bf16"})
-                                          : json::array({"rms_norm_f32", "logits_f32"})}},
-            "invalid decoder stack execution stages");
         stack.embedding_offset = 0;
         stack.layer_weights_offset = static_cast<int>(layer_offset / weight_element_bytes);
         stack.layer_weight_stride = static_cast<int>(layer_stride / weight_element_bytes);

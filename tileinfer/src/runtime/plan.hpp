@@ -12,8 +12,8 @@ namespace tileinfer {
 using TokenId = std::int32_t;
 
 inline constexpr int kThreads = 1024;
-inline constexpr const char* kAbi = "tileinfer-decoder-v4";
-inline constexpr const char* kFingerprint = "decoder-wave-abi4-bf16-eager-simt-v2-sm86-b1024";
+inline constexpr const char* kAbi = "tileinfer-decoder-v5";
+inline constexpr const char* kFingerprint = "decoder-program-abi5-bf16-eager-simt-v1-sm86-b1024";
 
 // Storage precision for weights, activations and K/V; reductions use float32.
 enum class WeightDtype : std::uint32_t
@@ -22,21 +22,19 @@ enum class WeightDtype : std::uint32_t
     bfloat16,
 };
 
-// Names the validated arithmetic operations encoded in a decoder task.
+// Names one validated worker instruction; the worker's storage type selects precision.
 enum class Opcode : std::uint32_t
 {
-    rms_norm_f32 = 1,
-    gemv_f32 = 2,
-    rope_query_f32 = 3,
-    rope_cache_f32 = 4,
-    attention_prefix_f32 = 5,
-    silu_product_f32 = 6,
-    rms_norm_bf16 = 7,
-    gemv_bf16 = 8,
-    rope_query_bf16 = 9,
-    rope_cache_bf16 = 10,
-    attention_prefix_bf16 = 11,
-    silu_product_bf16 = 12,
+    barrier = 0, // every worker reaches each grid barrier in the same order
+    rms_norm = 1,
+    gemv = 2,
+    rope_query = 3,
+    rope_cache = 4,
+    attention_prefix = 5,
+    silu_product = 6,
+    embedding = 7,      // copies [begin,end) of the token's embedding row into hidden state
+    final_rms_norm = 8, // normalizes [begin,end) of the last layer's output
+    logits = 9,         // projects vocabulary rows [begin,end)
 };
 
 // Chooses the buffer whose element offsets a tensor record indexes.
@@ -82,16 +80,19 @@ enum class TensorId : std::uint32_t
 
 inline constexpr std::size_t kTensorCount = static_cast<std::size_t>(TensorId::count);
 inline constexpr std::uint32_t kNoTensor = std::numeric_limits<std::uint32_t>::max();
+// Marks instructions that belong to no decoder layer: barriers and stack stages.
+inline constexpr std::uint32_t kNoLayer = std::numeric_limits<std::uint32_t>::max();
 
 constexpr std::uint32_t tensor_index(TensorId id)
 {
     return static_cast<std::uint32_t>(id);
 }
 
-// Compact operands and owned output region for one scheduled GPU task.
+// Compact operands and owned output region for one worker instruction.
 struct TaskRecord
 {
     Opcode opcode;
+    std::uint32_t layer; // decoder layer whose weights, K/V and hidden buffers apply
     std::uint32_t a;
     std::uint32_t b;
     std::uint32_t c;
@@ -135,7 +136,7 @@ struct StackConfig
     bool full_stack;
 };
 
-// Gives one logical worker its contiguous task slice for a wave.
+// Gives one logical worker its contiguous instruction stream for a whole token.
 struct WorkerTaskRange
 {
     std::uint32_t begin;
@@ -184,13 +185,15 @@ struct LoadedPlan
     std::vector<TensorRecord> tensors;
     std::vector<float> rotary_frequencies;
     int wave_count;
+    int task_count;
     std::uint64_t scratch_bytes;
     std::uint64_t kv_bytes;
     std::uint64_t attention_bytes = 0;
     std::vector<std::uint8_t> weights;
-    std::vector<TaskRecord> tasks;
-    std::vector<WorkerTaskRange> ranges;
-    std::vector<std::vector<std::int64_t>> worker_loads;
+    // Worker streams, concatenated; each wave's tasks end in one barrier per worker.
+    std::vector<TaskRecord> instructions;
+    std::vector<WorkerTaskRange> streams;                // one per worker
+    std::vector<std::vector<std::int64_t>> worker_loads; // [wave][worker]
     std::string plan_sha256;
     std::string weights_sha256;
 };

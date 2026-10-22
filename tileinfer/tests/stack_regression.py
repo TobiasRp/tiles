@@ -294,7 +294,8 @@ def main() -> None:
             "layer stride": lambda plan: plan["storage"]["stack"].update(
                 layer_weight_stride=0
             ),
-            "stage": lambda plan: plan["execution"].update(prelude="logits_f32"),
+            "stage": lambda plan: plan["tasks"][0].update(opcode="logits_f32"),
+            "layer": lambda plan: plan["tasks"][-1].update(layer=0),
         }.items():
             bad = copy.deepcopy(original)
             mutate(bad)

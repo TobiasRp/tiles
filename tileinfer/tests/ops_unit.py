@@ -69,17 +69,23 @@ def fixtures() -> tuple[list[dict], list[torch.Tensor], list[torch.Tensor | None
                     result,
                 )
         x, w = random(93, dtype=dtype), random(53, 93, dtype=dtype)
-        add(
-            {
-                "op": "logits",
-                "dtype": label,
-                "width": 93,
-                "rows": 53,
-                "input": raw(x),
-                "weights": raw(w),
-            },
-            F.linear(x, w),
-        )
+        for begin, end in ((0, 53), (1, 52)):
+            # A worker owns only its vocabulary rows; the rest keep the sentinel.
+            expected = torch.full((53,), -123.0, device="cuda")
+            expected[begin:end] = F.linear(x, w).float()[begin:end]
+            add(
+                {
+                    "op": "logits",
+                    "dtype": label,
+                    "width": 93,
+                    "rows": 53,
+                    "input": raw(x),
+                    "weights": raw(w),
+                    "begin": begin,
+                    "end": end,
+                },
+                expected,
+            )
         if dtype == torch.bfloat16:
             # Both additions land exactly on ties-to-even boundaries.
             add(
@@ -103,9 +109,9 @@ def fixtures() -> tuple[list[dict], list[torch.Tensor], list[torch.Tensor | None
                 random(width, dtype=dtype),
                 random(width, dtype=dtype),
             )
+            normalized = x.float() * torch.rsqrt(x.float().square().mean() + 1e-5)
+            expected = normalized.to(dtype) * w
             for op in ("rms_norm", "final_norm"):
-                normalized = x.float() * torch.rsqrt(x.float().square().mean() + 1e-5)
-                expected = normalized.to(dtype) * w
                 add(
                     {
                         "op": op,
@@ -116,6 +122,21 @@ def fixtures() -> tuple[list[dict], list[torch.Tensor], list[torch.Tensor | None
                     },
                     expected,
                 )
+            # The final norm reduces the whole vector but writes only its rows.
+            partial = torch.full((width,), -123.0, device="cuda", dtype=dtype)
+            partial[1 : width - 1] = expected[1 : width - 1]
+            add(
+                {
+                    "op": "final_norm",
+                    "dtype": label,
+                    "width": width,
+                    "input": raw(x),
+                    "weights": raw(w),
+                    "begin": 1,
+                    "end": width - 1,
+                },
+                partial,
+            )
             add(
                 {
                     "op": "silu",
@@ -129,6 +150,19 @@ def fixtures() -> tuple[list[dict], list[torch.Tensor], list[torch.Tensor | None
             add(
                 {"op": "embedding", "dtype": label, "width": width, "weights": raw(w)},
                 w,
+            )
+            partial = torch.full((width,), -123.0, device="cuda", dtype=dtype)
+            partial[1 : width - 1] = w[1 : width - 1]
+            add(
+                {
+                    "op": "embedding",
+                    "dtype": label,
+                    "width": width,
+                    "weights": raw(w),
+                    "begin": 1,
+                    "end": width - 1,
+                },
+                partial,
             )
         for dh in (10, 64, 160):
             for position in (0, 1, 63, 4095, 8192):

@@ -4,8 +4,11 @@ Status: milestones 1–6 implemented; BF16 computation supersedes BF16-only
 weight storage in version 4, 2026-10-13. The current precision and migration
 contract is in [the BF16 implementation plan](bf16_compute_plan.md). Version-4
 packages use either float32 or BF16 weights, activations, and K/V; reductions
-and selected internal operations remain float32. Older package formats are no
-longer read and must be regenerated (2026-10-22). The historical milestone
+and selected internal operations remain float32. Version 5 (2026-10-22) keeps
+that arithmetic and stores the whole token as one flat task program:
+embedding, every layer, final normalization, and logits, scheduled into global
+waves. Older package formats are no longer read and must be regenerated; see
+[the megakernel plan](megakernel_next_steps.md). The historical milestone
 results below describe version 3.
 
 Historical status, 2026-10-12: The CPU reference,
@@ -149,11 +152,12 @@ new opcodes change its resource use.
 The version-2 planner chooses the earliest legal wave for each task and balances
 estimated work across logical workers. Its automatic tile-height heuristic
 compares candidate schedules and records every score in the planning report.
-The compiled worker executes the block wave loop and both stack stages in one
-cooperative launch. The stack package stores one block task template, repeats
-it across layers, reuses block scratch, and gives each layer its own K/V
-region and weight stride. Embedding lookup runs before the first block;
-final RMSNorm and logits run after the last. The output embedding may alias
+The compiled worker executes the whole token in one cooperative launch.
+Through version 4, the stack package stored one block task template that the
+kernel repeated across layers. Since version 5, the planner emits every
+layer's tasks, plus row-split embedding, final RMSNorm, and logits tasks, as one
+program. Layers reuse block scratch, and each layer has its own K/V region and
+weight stride. The output embedding may alias
 the input embedding by an explicit package flag. The target report declares
 `execution_ready: true` and records occupancy from this compiled kernel.
 

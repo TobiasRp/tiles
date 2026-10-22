@@ -7,9 +7,9 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from tileplan.cli import main
-from tileplan.decoder_plan import build, read_package
+from tileplan.decoder_plan import build, layer_view, read_package
 from tileplan.decoder_stack import build_stack
-from tileplan.probe import ABI, normalize
+from tileplan.probe import ABI, OPCODES, normalize
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -28,20 +28,7 @@ class VisualizationTest(unittest.TestCase):
                     },
                     "executor": {
                         "abi": ABI,
-                        "opcodes": [
-                            "rms_norm_f32",
-                            "gemv_f32",
-                            "rope_query_f32",
-                            "rope_cache_f32",
-                            "attention_prefix_f32",
-                            "silu_product_f32",
-                            "rms_norm_bf16",
-                            "gemv_bf16",
-                            "rope_query_bf16",
-                            "rope_cache_bf16",
-                            "attention_prefix_bf16",
-                            "silu_product_bf16",
-                        ],
+                        "opcodes": sorted(OPCODES),
                         "active_blocks_per_sm": 2,
                         "threads_per_block": 128,
                         "fingerprint": "fixture-worker",
@@ -97,7 +84,7 @@ class VisualizationTest(unittest.TestCase):
 
             flow_root = ElementTree.parse(flow).getroot()
             flow_svg = flow.read_text()
-            plan, _, _ = read_package(package)
+            plan = layer_view(read_package(package)[0])
             for wave in range(len(plan["waves"])):
                 self.assertIn(f"Wave {wave}", flow_svg)
             self.assertIn("full grid barrier", flow_svg)

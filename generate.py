@@ -18,7 +18,7 @@ CHECKPOINT = ROOT / "checkpoints" / "Llama-3.2-1B"
 EXECUTOR = INFER / "build" / "release" / "tile_runtime"
 VENV = PLAN / ".venv"
 # Package format accepted by the runtime built from this checkout.
-FORMAT = 4
+FORMAT = 5
 
 
 def run(command, *, cwd):

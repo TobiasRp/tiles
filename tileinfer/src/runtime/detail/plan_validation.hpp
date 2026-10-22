@@ -18,7 +18,8 @@ struct PlanShape
     int tile;
 };
 
-// Checks the supplied program without choosing tiles, waves, or workers.
+// Checks the supplied whole-token program without choosing tiles, waves, or
+// workers, then encodes one instruction stream per worker with explicit barriers.
 void validate_program(
     const nlohmann::json& document, const PlanShape& shape, int workers, LoadedPlan& result);
 

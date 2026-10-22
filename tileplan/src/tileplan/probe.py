@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-ABI = "tileinfer-decoder-v4"
+ABI = "tileinfer-decoder-v5"
 OPCODES = {
     "rms_norm_f32",
     "gemv_f32",
@@ -12,6 +12,9 @@ OPCODES = {
     "rope_cache_f32",
     "attention_prefix_f32",
     "silu_product_f32",
+    "embedding_f32",
+    "final_rms_norm_f32",
+    "logits_f32",
 }
 
 OPCODES |= {opcode.replace("_f32", "_bf16") for opcode in OPCODES}

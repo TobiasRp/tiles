@@ -16,7 +16,7 @@ from tileplan.llama32_import import (
     pack_safetensors,
     read_llama32_config,
 )
-from tileplan.probe import ABI, normalize
+from tileplan.probe import ABI, OPCODES, normalize
 
 
 def target() -> dict:
@@ -30,20 +30,7 @@ def target() -> dict:
             },
             "executor": {
                 "abi": ABI,
-                "opcodes": [
-                    "rms_norm_f32",
-                    "gemv_f32",
-                    "rope_query_f32",
-                    "rope_cache_f32",
-                    "attention_prefix_f32",
-                    "silu_product_f32",
-                    "rms_norm_bf16",
-                    "gemv_bf16",
-                    "rope_query_bf16",
-                    "rope_cache_bf16",
-                    "attention_prefix_bf16",
-                    "silu_product_bf16",
-                ],
+                "opcodes": sorted(OPCODES),
                 "active_blocks_per_sm": 2,
                 "threads_per_block": 128,
                 "fingerprint": "fixture-stack-kernel",

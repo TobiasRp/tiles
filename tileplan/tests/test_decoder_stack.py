@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from tileplan.decoder_plan import read_package
+from tileplan.decoder_plan import layer_view, read_package
 from tileplan.decoder_stack import (
     StackCache,
     StackSpec,
@@ -20,20 +20,10 @@ from tileplan.decoder_stack import (
     validate_stack,
 )
 from tileplan.probe import ABI, normalize
+from tileplan.probe import OPCODES as PROBE_OPCODES
 
 FIXTURE = Path(__file__).parent / "fixtures" / "decoder_m4"
-OPCODES = [
-    "rms_norm_f32",
-    "gemv_f32",
-    "rope_query_f32",
-    "rope_cache_f32",
-    "attention_prefix_f32",
-    "silu_product_f32",
-    "embedding_lookup_f32",
-    "logits_f32",
-]
-
-OPCODES += [opcode.replace("_f32", "_bf16") for opcode in OPCODES]
+OPCODES = sorted(PROBE_OPCODES)
 
 
 def target(threads: int = 128) -> dict:
@@ -95,7 +85,22 @@ class DecoderStackTest(unittest.TestCase):
             plan, packed, _ = read_package(package)
             self.assertEqual(plan["target"]["threads_per_block"], 256)
             self.assertEqual(plan["model"]["layers"], 3)
-            self.assertEqual(plan["execution"]["repeat_block_count"], 3)
+            # Embedding, three repeated nine-wave layers, final norm, and logits.
+            self.assertEqual(len(plan["waves"]), 1 + 3 * 9 + 2)
+            layers = [task["layer"] for task in plan["tasks"]]
+            workers, d = plan["target"]["worker_count"], plan["model"]["hidden_size"]
+            self.assertEqual(
+                layers.count(None),
+                2 * min(d, workers) + min(plan["model"]["vocab_size"], workers),
+            )
+            self.assertEqual(
+                [layers.count(layer) for layer in range(3)],
+                [len(layer_view(plan, layer)["tasks"]) for layer in range(3)],
+            )
+            self.assertEqual(
+                {task["opcode"] for task in plan["tasks"] if task["layer"] is None},
+                {"embedding_f32", "final_rms_norm_f32", "logits_f32"},
+            )
             self.assertEqual(plan["storage"]["scratch_bytes"], 1664)
             self.assertEqual(plan["storage"]["kv_bytes"], 3 * 768)
             self.assertTrue(plan["storage"]["stack"]["lm_head_alias"])
@@ -109,7 +114,10 @@ class DecoderStackTest(unittest.TestCase):
             )
             for mutate in (
                 lambda item: item["storage"]["stack"].update(layer_kv_stride=0),
-                lambda item: item["execution"].update(repeat_block_count=2),
+                lambda item: item["tasks"][0].update(layer=0),
+                lambda item: next(
+                    task for task in item["tasks"] if task["layer"] == 2
+                ).update(layer=None),
                 lambda item: item["target"].update(threads_per_block=0),
                 lambda item: item["target"].update(threads_per_block=True),
                 lambda item: item["tasks"][-1].update(predecessors=[]),

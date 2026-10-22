@@ -29,9 +29,11 @@ int main(int argc, char** argv)
                                {"active_blocks_per_sm", 1},
                                {"opcodes",
                                    {"rms_norm_f32", "gemv_f32", "rope_query_f32", "rope_cache_f32",
-                                       "attention_prefix_f32", "silu_product_f32", "rms_norm_bf16",
+                                       "attention_prefix_f32", "silu_product_f32", "embedding_f32",
+                                       "final_rms_norm_f32", "logits_f32", "rms_norm_bf16",
                                        "gemv_bf16", "rope_query_bf16", "rope_cache_bf16",
-                                       "attention_prefix_bf16", "silu_product_bf16"}}}}}
+                                       "attention_prefix_bf16", "silu_product_bf16",
+                                       "embedding_bf16", "final_rms_norm_bf16", "logits_bf16"}}}}}
                        .dump()
                 << '\n';
             return 0;
@@ -39,8 +41,8 @@ int main(int argc, char** argv)
         if (argc != 2)
             throw std::runtime_error("expected a package path");
         const auto plan = tileinfer::load_plan(argv[1], target);
-        std::cout << json{{"tasks", plan.tasks.size()}, {"waves", plan.wave_count},
-                         {"loads", plan.worker_loads},
+        std::cout << json{{"tasks", plan.task_count}, {"waves", plan.wave_count},
+                         {"instructions", plan.instructions.size()}, {"loads", plan.worker_loads},
                          {"rope_pairs", plan.rotary_frequencies.size()}}
                          .dump()
                   << '\n';

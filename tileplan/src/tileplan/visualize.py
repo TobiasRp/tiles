@@ -3,7 +3,7 @@
 from html import escape
 from pathlib import Path
 
-from .decoder_plan import read_package
+from .decoder_plan import layer_view, read_package
 from .tile_flow import render_tile_flow_svg
 
 COLORS = {
@@ -38,10 +38,7 @@ def render_schedule_svg(plan: dict, *, plan_sha256: str, note: str = "") -> str:
         )
     height = top + sum(wave_heights) + 52
     model, storage = plan["model"], plan["storage"]
-    stack = plan["header"]["model_kind"] in (
-        "llama_decoder_stack_f32",
-        "llama_decoder_stack",
-    )
+    stack = plan["header"]["model_kind"] == "llama_decoder_stack"
     title = (
         f"Full decoder: {model['layers']} layers"
         if stack
@@ -146,10 +143,7 @@ def render_schedule_svg(plan: dict, *, plan_sha256: str, note: str = "") -> str:
 def render_tensor_graph_svg(plan: dict, *, plan_sha256: str) -> str:
     """Draw the semantic decoder DAG, independent of its row-tile schedule."""
     model = plan["model"]
-    stack = plan["header"]["model_kind"] in (
-        "llama_decoder_stack_f32",
-        "llama_decoder_stack",
-    )
+    stack = plan["header"]["model_kind"] == "llama_decoder_stack"
     layers = model["layers"]
     d = model["hidden_size"]
     f = model["intermediate_size"]
@@ -474,12 +468,14 @@ def visualize(
     tile_flow_out: Path | None = None,
 ) -> Path:
     plan, _, digest = read_package(package)
+    # A stack repeats one layer schedule; draw that layer rather than every wave.
+    block = layer_view(plan)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(render_schedule_svg(plan, plan_sha256=digest, note=note))
+    out.write_text(render_schedule_svg(block, plan_sha256=digest, note=note))
     if tensor_graph_out is not None:
         tensor_graph_out.parent.mkdir(parents=True, exist_ok=True)
         tensor_graph_out.write_text(render_tensor_graph_svg(plan, plan_sha256=digest))
     if tile_flow_out is not None:
         tile_flow_out.parent.mkdir(parents=True, exist_ok=True)
-        tile_flow_out.write_text(render_tile_flow_svg(plan, plan_sha256=digest))
+        tile_flow_out.write_text(render_tile_flow_svg(block, plan_sha256=digest))
     return out

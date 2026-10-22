@@ -1,8 +1,10 @@
 # TilePlan
 
 TilePlan is the offline Python half of Tiles. It converts a checkpoint or
-synthetic fixture into `plan.json` and `weights.bin`: a tiled task DAG, wave
-schedule, tensor layout, and packed float32 or BF16 weights. Version-4 packages
+synthetic fixture into `plan.json` and `weights.bin`: a tiled task DAG for a
+whole token (embedding, every layer, final norm, and logits), its wave
+schedule over logical workers, tensor layout, and packed float32 or BF16
+weights. `visualize` draws one layer of that program. Version-5 packages
 use the same storage dtype for weights, activations, and K/V, with float32
 accumulation and selected float32 internal math. Python validates graph
 dependencies and planning metadata; [TileInfer](../tileinfer/README.md) checks

@@ -1,4 +1,4 @@
-"""Synthetic decoder stack and compact repeated-block package."""
+"""Synthetic decoder stack and whole-token decoder program package."""
 
 import json
 import math
@@ -20,11 +20,11 @@ from .decoder_plan import (
     WEIGHTS,
     _attention_bytes,
     _descriptors,
-    _graph,
     _json_bytes,
     _model_fields,
     _pack_array,
     _pack_weights,
+    _program,
     _regions,
     _require,
     _schedule,
@@ -301,8 +301,11 @@ def make_stack_plan_metadata(
         cursor = lm_offset + embedding_bytes
     scratch_regions, scratch_bytes = _regions(block, SCRATCH, 16, weight_bytes)
     kv_regions, layer_kv_bytes = _regions(block, ("K", "V"), 16, weight_bytes)
-    tasks = _graph(block, tile_rows, weight_dtype)
-    waves = _schedule(tasks, target["launch"]["worker_count"])
+    workers = target["launch"]["worker_count"]
+    tasks = _program(
+        block, tile_rows, weight_dtype, workers, spec.layers, spec.vocab_size
+    )
+    waves = _schedule(tasks, workers)
     stack = {
         "embedding_offset": 0,
         "embedding_bytes": embedding_bytes,
@@ -346,15 +349,6 @@ def make_stack_plan_metadata(
             "weight_bytes": cursor,
             "weights": weight_regions,
             "stack": stack,
-        },
-        "execution": {
-            "prelude": "embedding_lookup_bf16"
-            if weight_dtype == "bfloat16"
-            else "embedding_lookup_f32",
-            "repeat_block_count": spec.layers,
-            "postlude": ["rms_norm_bf16", "logits_bf16"]
-            if weight_dtype == "bfloat16"
-            else ["rms_norm_f32", "logits_f32"],
         },
         "tasks": tasks,
         "waves": waves,
@@ -445,29 +439,18 @@ def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
         "invalid stack storage",
     )
     _require(
-        plan["execution"]
-        == {
-            "prelude": "embedding_lookup_bf16"
-            if weight_dtype == "bfloat16"
-            else "embedding_lookup_f32",
-            "repeat_block_count": spec.layers,
-            "postlude": ["rms_norm_bf16", "logits_bf16"]
-            if weight_dtype == "bfloat16"
-            else ["rms_norm_f32", "logits_f32"],
-        },
-        "invalid stack execution stages",
-    )
-    _require(
         plan["integrity"]
         == {"weights_bytes": len(packed), "weights_sha256": sha256(packed).hexdigest()}
         and len(packed) == total,
         "stack weight checksum or size mismatch",
     )
-    tasks = _graph(block, tile_rows, weight_dtype)
+    tasks = _program(
+        block, tile_rows, weight_dtype, workers, spec.layers, spec.vocab_size
+    )
     waves = _schedule(tasks, workers)
     _require(
         plan["tasks"] == tasks and plan["waves"] == waves,
-        "invalid stack block graph or schedule",
+        "invalid stack program or schedule",
     )
 
 
@@ -506,8 +489,8 @@ def build_stack(
             "layers": spec.layers,
             "vocab_size": spec.vocab_size,
             "tile_rows": tile_rows,
-            "block_task_count": len(plan["tasks"]),
-            "block_wave_count": len(plan["waves"]),
+            "task_count": len(plan["tasks"]),
+            "wave_count": len(plan["waves"]),
             "scratch_bytes": plan["storage"]["scratch_bytes"],
             "kv_bytes": plan["storage"]["kv_bytes"],
             "weight_bytes": len(packed),

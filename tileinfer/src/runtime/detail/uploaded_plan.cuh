@@ -25,8 +25,8 @@ class UploadedPlan
     cuda::stream stream{device};
     cuda::device_memory_pool_ref& pool = cuda::device_default_memory_pool(device);
     cuda::device_buffer<std::uint8_t> weights;
-    cuda::device_buffer<TaskRecord> tasks;
-    cuda::device_buffer<WorkerTaskRange> ranges;
+    cuda::device_buffer<TaskRecord> instructions;
+    cuda::device_buffer<WorkerTaskRange> streams;
     cuda::device_buffer<TensorRecord> tensors;
     cuda::device_buffer<float> rotary_frequencies;
     int hidden_size;
@@ -34,7 +34,6 @@ class UploadedPlan
     int kv_heads;
     int head_dim;
     int workers;
-    int waves;
     int max_context;
     std::size_t scratch_count;
     std::size_t kv_count;

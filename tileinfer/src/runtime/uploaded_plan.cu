@@ -13,8 +13,8 @@ namespace tileinfer::detail {
 
 UploadedPlan::UploadedPlan(const LoadedPlan& plan)
     : weights(stream, pool, plan.weights.size(), cuda::no_init)
-    , tasks(stream, pool, plan.tasks.size(), cuda::no_init)
-    , ranges(stream, pool, plan.ranges.size(), cuda::no_init)
+    , instructions(stream, pool, plan.instructions.size(), cuda::no_init)
+    , streams(stream, pool, plan.streams.size(), cuda::no_init)
     , tensors(stream, pool, plan.tensors.size(), cuda::no_init)
     , rotary_frequencies(stream, pool, plan.rotary_frequencies.size(), cuda::no_init)
     , hidden_size(plan.hidden_size)
@@ -22,7 +22,6 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
     , kv_heads(plan.kv_heads)
     , head_dim(plan.head_dim)
     , workers(plan.workers)
-    , waves(plan.wave_count)
     , max_context(plan.max_context)
     , scratch_count(plan.scratch_bytes / element_bytes(plan.weight_dtype))
     , kv_count(plan.kv_bytes / element_bytes(plan.weight_dtype))
@@ -43,8 +42,8 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
     }
     try {
         cuda::copy_bytes(stream, plan.weights, weights);
-        cuda::copy_bytes(stream, plan.tasks, tasks);
-        cuda::copy_bytes(stream, plan.ranges, ranges);
+        cuda::copy_bytes(stream, plan.instructions, instructions);
+        cuda::copy_bytes(stream, plan.streams, streams);
         cuda::copy_bytes(stream, plan.tensors, tensors);
         cuda::copy_bytes(stream, plan.rotary_frequencies, rotary_frequencies);
         stream.sync();
@@ -56,9 +55,9 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
 
 WorkerProgramView UploadedPlan::view() const
 {
-    return {tasks.data(), ranges.data(), tensors.data(), weights.data(), rotary_frequencies.data(),
-        waves, workers, hidden_size, intermediate_size, kv_heads, head_dim, numeric, stack,
-        weight_dtype, max_context};
+    return {instructions.data(), streams.data(), tensors.data(), weights.data(),
+        rotary_frequencies.data(), workers, hidden_size, intermediate_size, kv_heads, head_dim,
+        numeric, stack, weight_dtype, max_context};
 }
 
 } // namespace tileinfer::detail

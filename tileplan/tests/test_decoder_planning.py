@@ -8,18 +8,10 @@ from pathlib import Path
 
 from tileplan.decoder_plan import build, read_package, summary, validate
 from tileplan.probe import ABI, normalize
+from tileplan.probe import OPCODES as PROBE_OPCODES
 
 FIXTURE = Path(__file__).parent / "fixtures" / "decoder_m1"
-OPCODES = [
-    "rms_norm_f32",
-    "gemv_f32",
-    "rope_query_f32",
-    "rope_cache_f32",
-    "attention_prefix_f32",
-    "silu_product_f32",
-]
-
-OPCODES += [opcode.replace("_f32", "_bf16") for opcode in OPCODES]
+OPCODES = sorted(PROBE_OPCODES)
 
 
 def target(workers: int = 4) -> dict:
@@ -63,7 +55,8 @@ class DecoderPlanningTest(unittest.TestCase):
     def test_versioned_package_and_earliest_balanced_waves(self) -> None:
         package = self.package()
         plan, weights, digest = read_package(package)
-        self.assertEqual(plan["header"]["format_version"], 4)
+        self.assertEqual(plan["header"]["format_version"], 5)
+        self.assertEqual({task["layer"] for task in plan["tasks"]}, {0})
         self.assertEqual(plan["header"]["model_kind"], "llama_decoder_block")
         self.assertEqual(plan["model"]["weight_dtype"], "float32")
         self.assertEqual(len(plan["waves"]), 9)

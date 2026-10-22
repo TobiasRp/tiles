@@ -36,6 +36,20 @@ def delay_producer(plan: dict) -> None:
     plan["waves"][task["wave"]]["workers"][worker].append(task["id"])
 
 
+def stale_scratch_read(plan: dict) -> None:
+    """Run a layer-0 RoPE after layer 1 has overwritten the shared Q scratch."""
+    tasks = plan["tasks"]
+    early = next(
+        t for t in tasks if t["layer"] == 0 and t["opcode"].startswith("rope_query")
+    )
+    late = next(
+        t for t in tasks if t["layer"] == 1 and t["opcode"].startswith("rope_query")
+    )
+    plan["waves"][early["wave"]]["workers"][early["worker"]].remove(early["id"])
+    early["wave"] = late["wave"]
+    plan["waves"][late["wave"]]["workers"][early["worker"]].append(early["id"])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--loader", type=Path, required=True)
@@ -163,6 +177,21 @@ def main() -> None:
                         0, []
                     ),
                 }
+                if kind == "stack":
+                    layers = original["model"]["layers"]
+                    mutations |= {
+                        "layer outside range": lambda p: next(
+                            t for t in p["tasks"] if t["layer"] is not None
+                        ).update(layer=layers),
+                        "stage tagged as a layer": lambda p: p["tasks"][0].update(
+                            layer=0
+                        ),
+                        "scratch reused by a later layer": stale_scratch_read,
+                    }
+                else:
+                    mutations["block task without a layer"] = lambda p: p["tasks"][
+                        0
+                    ].update(layer=None)
                 for label, mutate in mutations.items():
                     invalid = copy.deepcopy(original)
                     mutate(invalid)

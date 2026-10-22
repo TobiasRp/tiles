@@ -1,12 +1,15 @@
 # TileInfer
 
 TileInfer executes TilePlan decoder packages in C++23/CUDA20. One cooperative
-worker launch performs embedding lookup, the repeated decoder schedule, final
-normalization, and logits. GPU greedy selection feeds back the next token.
-The current RTX 3050 worker uses 1024 threads per block and one logical worker
-per SM; worker IDs have no physical SM affinity.
+worker launch executes a whole token: embedding lookup, every decoder layer,
+final normalization, and logits. The loader validates the package's flat task
+program and encodes one instruction stream per worker; grid barriers are
+explicit `barrier` instructions at the same stream positions in every worker.
+GPU greedy selection feeds back the next token. The current RTX 3050 worker
+uses 1024 threads per block and one logical worker per SM; worker IDs have no
+physical SM affinity.
 
-Version-4 packages use either float32 or BF16 weights, activations, and K/V.
+Version-5 packages use either float32 or BF16 weights, activations, and K/V.
 BF16 matrix operands accumulate in float32; RMSNorm statistics, softmax, RoPE
 frequency/trigonometric work, and SiLU internals retain float32 math. BF16
 rounding follows the pinned PyTorch eager operator boundaries. Public logits
@@ -46,13 +49,15 @@ The C++ API is in [runtime.hpp](src/runtime/runtime.hpp): `DecoderModel` shares
 uploaded weights; each `SequenceContext` owns its stream and K/V state.
 Prefill and generation return tickets; `wait` retrieves the result.
 [ops.cuh](src/runtime/ops.cuh) contains arithmetic and
-[worker_kernel.cu](src/runtime/worker_kernel.cu) the cooperative wave loop.
+[worker_kernel.cu](src/runtime/worker_kernel.cu) the instruction-stream loop;
+[plan_validation.cpp](src/runtime/plan_validation.cpp) checks operands, output
+ownership, and every read against its producer across layers and shared scratch.
 The blocking diagnostics API is linked only into the test harness.
 
 ## Historical measurements on RTX 3050
 
 These tables describe the superseded version-3 BF16-weight/float32-activation
-implementation. They do not measure the version-4 BF16-compute path. Current
+implementation. They do not measure the BF16-compute path. Current
 validation and controlled arithmetic-variant comparisons are described in
 [the BF16 implementation results](../docs/bf16_compute_results.md).
 

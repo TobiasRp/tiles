@@ -8,7 +8,7 @@
  * remain FP32. Block collectives require a one-dimensional kThreads-thread block
  * with block-uniform task/shape arguments and block-private SharedStorage.
  * Tensor IDs, dimensions, head indices and task ranges are host-validated.
- * Scalar/warp helpers and grid operations state their participation separately.
+ * Scalar and warp helpers state their participation separately.
  * No routine performs a grid barrier. Unless an exit barrier is documented,
  * the caller must synchronize before another thread consumes outputs or reuses
  * collective scratch; cross-block dependencies require a grid/stream boundary.
@@ -28,7 +28,7 @@
 
 namespace tileinfer::ops {
 
-/// Borrowed storage with a uniform Scalar dtype; optional ffn_trace widens diagnostics to FP32.
+/// Borrowed storage with a uniform Scalar dtype; optional traces widen diagnostics to FP32.
 template <typename Scalar>
 struct TensorViews
 {
@@ -38,7 +38,8 @@ struct TensorViews
     Scalar* kv;
     const Scalar* weights;
     Scalar* attention_scores;
-    float* ffn_trace;
+    float* ffn_trace;   ///< Last Wdown projection before its residual, or nullptr.
+    float* block_trace; ///< This layer's output hidden vector, or nullptr.
 };
 
 inline constexpr int kWarpSize = 32;
@@ -264,22 +265,28 @@ __device__ inline void rms_norm(const TaskRecord& task, const Context<Scalar>& c
 }
 
 /// Commit one owned row, rounding the projection before any residual addition.
-/// @param task,context Identify Wdown and an optional FP32 pre-residual diagnostic trace.
+/// @param task,context Identify Wdown and its optional FP32 diagnostic traces.
 /// @param output,residual Row vectors; residual is nullptr, disjoint from output, or aliases it exactly.
 /// @param row Output index exclusively owned by this thread.
 /// @param accumulation Complete FP32 dot product; no partial-K result is accepted.
-/// @post Writes output[row] and, for Wdown when requested, the rounded projection trace.
-/// This scalar epilogue has no collective or synchronization requirement.
+/// @post Writes output[row] and, for Wdown when requested, the rounded projection and
+/// the layer output. This scalar epilogue has no collective or synchronization requirement.
 template <typename Scalar>
 __device__ inline void store_projection(const TaskRecord& task, const Context<Scalar>& context,
     Scalar* output, const Scalar* residual, int row, float accumulation)
 {
     const Scalar projected = static_cast<Scalar>(accumulation);
-    if (context.views.ffn_trace && task.b == static_cast<cuda::std::uint32_t>(TensorId::Wdown))
+    const Scalar stored =
+        residual
+            ? static_cast<Scalar>(static_cast<float>(projected) + static_cast<float>(residual[row]))
+            : projected;
+    output[row] = stored;
+    if (task.b != static_cast<cuda::std::uint32_t>(TensorId::Wdown))
+        return;
+    if (context.views.ffn_trace)
         context.views.ffn_trace[row] = static_cast<float>(projected);
-    output[row] = residual ? static_cast<Scalar>(
-                                 static_cast<float>(projected) + static_cast<float>(residual[row]))
-                           : projected;
+    if (context.views.block_trace)
+        context.views.block_trace[row] = static_cast<float>(stored);
 }
 
 /// Compute complete dot products for the task's exclusive [begin,end) output rows.
@@ -478,96 +485,91 @@ __device__ inline void silu_product(const TaskRecord& task, const Context<Scalar
             static_cast<float>(up[index]));
 }
 
-/// Dispatch one loader-validated task uniformly across the calling block.
-/// @param task Opcode, bindings and owned output range; its dtype must agree with Scalar.
+/// Dispatch one loader-validated layer task uniformly across the calling block.
+/// @param task Opcode, bindings and owned output range; Scalar selects the precision.
 /// @param context Layer bindings, current prefix shape and block-private collective scratch.
 /// @post Output ownership follows the selected operation; the caller must finish the task's barriers.
-/// Device dispatch does not validate malformed opcode/dtype combinations.
+/// Barriers and stack-stage instructions are handled by the worker loop, not here.
 template <typename Scalar>
 __device__ inline void execute(const TaskRecord& task, const Context<Scalar>& context)
 {
     switch (task.opcode) {
-    case Opcode::rms_norm_f32:
-    case Opcode::rms_norm_bf16:
+    case Opcode::rms_norm:
         rms_norm(task, context);
         break;
-    case Opcode::gemv_f32:
-    case Opcode::gemv_bf16:
+    case Opcode::gemv:
         gemv(task, context);
         break;
-    case Opcode::rope_query_f32:
-    case Opcode::rope_query_bf16:
+    case Opcode::rope_query:
         rope_query(task, context);
         break;
-    case Opcode::rope_cache_f32:
-    case Opcode::rope_cache_bf16:
+    case Opcode::rope_cache:
         rope_append_kv(task, context);
         break;
-    case Opcode::attention_prefix_f32:
+    case Opcode::attention_prefix:
         if constexpr (cuda::std::is_same_v<Scalar, float>)
             attention_prefix_f32(task, context);
-        break;
-    case Opcode::attention_prefix_bf16:
-        if constexpr (cuda::std::is_same_v<Scalar, __nv_bfloat16>)
+        else
             attention_prefix_bf16(task, context);
         break;
-    case Opcode::silu_product_f32:
-    case Opcode::silu_product_bf16:
+    case Opcode::silu_product:
         silu_product(task, context);
+        break;
+    default:
         break;
     }
 }
 
-/// Copy a token embedding with unique element ownership across a one-dimensional grid.
+/// Copy elements [begin,end) of a token embedding into the hidden vector.
 /// @param token_id Validated vocabulary index; bounds are not checked here.
+/// @param begin,end Element range owned by the calling block, within [0, hidden_size].
 /// @param hidden_size Positive embedding row width.
 /// @param embedding,hidden Row-major embedding table and a disjoint hidden-vector destination.
-/// @pre All threads of a one-dimensional grid and blocks participate; weights are already visible.
-/// @post The hidden vector is copied without arithmetic conversion; readers need a grid/stream boundary.
+/// @post The range is copied without arithmetic conversion; readers need a grid/stream boundary.
 template <typename Scalar>
 __device__ inline void embedding_lookup(
-    TokenId token_id, int hidden_size, const Scalar* embedding, Scalar* hidden)
+    TokenId token_id, int begin, int end, int hidden_size, const Scalar* embedding, Scalar* hidden)
 {
-    for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < hidden_size;
-        index += gridDim.x * blockDim.x)
+    for (int index = begin + threadIdx.x; index < end; index += blockDim.x)
         hidden[index] = embedding[token_id * hidden_size + index];
 }
 
-/// Normalize the final hidden vector, partitioning output elements across the grid.
+/// Normalize elements [begin,end) of the final hidden vector.
 /// @param hidden,scale,normalized Hidden input, RMS scale and disjoint output vectors of hidden_size elements.
+/// @param begin,end Output range owned by the calling block, within [0, hidden_size].
 /// @param hidden_size,epsilon Positive vector width and FP32 stabilizer.
 /// @param shared_inverse_rms,reduction_scratch Block-private shared float and kNormReductionThreads floats.
-/// @pre All threads of a one-dimensional grid of kThreads-thread blocks read the same input.
+/// @pre Every thread of the block participates; the whole input vector is already visible.
 /// @pre Normalized output must not alias hidden or scale; block scratch is disjoint from the vectors.
 /// Each block computes its own inverse RMS to avoid inter-block synchronization; BF16 rounds before scaling.
 /// @post The caller must publish the completed output with a grid barrier before computing logits.
 template <typename Scalar>
 __device__ inline void final_rms_norm(const Scalar* hidden, const Scalar* scale, Scalar* normalized,
-    int hidden_size, float epsilon, float* shared_inverse_rms, float* reduction_scratch)
+    int begin, int end, int hidden_size, float epsilon, float* shared_inverse_rms,
+    float* reduction_scratch)
 {
     rms_norm_factor(hidden, hidden_size, epsilon, shared_inverse_rms, reduction_scratch);
-    for (int index = blockIdx.x * blockDim.x + threadIdx.x; index < hidden_size;
-        index += gridDim.x * blockDim.x)
+    for (int index = begin + threadIdx.x; index < end; index += blockDim.x)
         normalized[index] = static_cast<Scalar>(
             static_cast<float>(
                 static_cast<Scalar>(static_cast<float>(hidden[index]) * *shared_inverse_rms)) *
             static_cast<float>(scale[index]));
 }
 
-/// Compute vocabulary logits with warp-owned rows across the one-dimensional grid.
+/// Compute vocabulary logits [begin,end) with one warp per row.
 /// @param hidden,lm_head Globally visible normalized input and row-major [vocab_size,hidden_size] weights.
 /// @param[out] output Disjoint float32 API buffer; BF16 mathematical logits round before widening.
-/// @param hidden_size,vocab_size Positive matrix dimensions, uniform across the grid.
+/// @param begin,end Vocabulary rows owned by the calling block.
+/// @param hidden_size Positive matrix width, uniform across the block.
 /// @param shared Block-private reduction scratch; warps use separate slots.
-/// @pre All threads in a one-dimensional grid of kThreads-thread blocks participate.
+/// @pre Every thread of the block participates.
 /// @post Every logit has one writer, lane 0 of its warp; consumers require a grid/stream boundary.
 template <typename Scalar>
-__device__ inline void logits(const Scalar* hidden, const Scalar* lm_head, float* output,
-    int hidden_size, int vocab_size, SharedStorage& shared)
+__device__ inline void logits(const Scalar* hidden, const Scalar* lm_head, float* output, int begin,
+    int end, int hidden_size, SharedStorage& shared)
 {
     const int warp = threadIdx.x / kWarpSize;
-    for (int row = blockIdx.x * kWarpsPerBlock + warp; row < vocab_size;
-        row += gridDim.x * kWarpsPerBlock) {
+    for (int row = begin + warp; row < end; row += kWarpsPerBlock) {
         const float value = warp_dot(lm_head + static_cast<cuda::std::size_t>(row) * hidden_size,
             hidden, hidden_size, shared);
         if (threadIdx.x % kWarpSize == 0)
