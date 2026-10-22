@@ -190,9 +190,11 @@ struct LoadedPlan
     std::uint64_t kv_bytes;
     std::uint64_t attention_bytes = 0;
     std::vector<std::uint8_t> weights;
-    // Worker streams, concatenated; each wave's tasks end in one barrier per worker.
+    // Worker streams, concatenated; one barrier separates consecutive waves in every stream.
     std::vector<TaskRecord> instructions;
-    std::vector<WorkerTaskRange> streams;                // one per worker
+    std::vector<WorkerTaskRange> streams; // one per worker
+    // Host-only plan task ID of each instruction; -1 marks a barrier.
+    std::vector<std::int32_t> instruction_tasks;
     std::vector<std::vector<std::int64_t>> worker_loads; // [wave][worker]
     std::string plan_sha256;
     std::string weights_sha256;

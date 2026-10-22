@@ -59,12 +59,32 @@ struct DiagnosticContext::Impl
         detail::cleanup_noexcept([&] { stream.sync(); });
     }
 
-    void launch(int position, TokenId token_id)
+    void launch(int position, TokenId token_id, std::uint64_t* timeline = nullptr)
     {
         const detail::WorkerBuffers buffers{input.data(), output.data(), scratch.data(), kv.data(),
             logits.data(), capture_blocks ? block_trace->data() : nullptr, attention_scores.data(),
-            ffn_trace.data()};
+            ffn_trace.data(), timeline};
         detail::enqueue_worker(stream, model.view(), buffers, position, {token_id, nullptr, 0});
+    }
+
+    // Fills the visible prefix and warms up outside any timed region. Repeated
+    // launches at position overwrite only K/V[position], so every later launch
+    // sees the same context length and all earlier cache entries remain valid.
+    void prepare_fixed_position(int position, TokenId token_id, int warmup)
+    {
+        if (!model.stack.full_stack)
+            throw std::runtime_error("benchmark requires a decoder stack package");
+        if (position < 0 || position >= model.max_context || token_id < 0 ||
+            token_id >= model.stack.vocab_size || warmup < 0)
+            throw std::runtime_error("invalid benchmark arguments");
+        if (this->position != 0 || !valid || in_flight)
+            throw std::runtime_error("benchmark requires a fresh context");
+        for (int p = 0; p < position; ++p)
+            launch(p, token_id);
+        stream.sync();
+        for (int i = 0; i < warmup; ++i)
+            launch(position, token_id);
+        stream.sync();
     }
 };
 
@@ -164,24 +184,10 @@ std::vector<float> DiagnosticContext::run_token(TokenId token_id)
 BenchmarkResult DiagnosticContext::benchmark_token(
     int position, TokenId token_id, int warmup, int iterations, int rounds, bool profile)
 {
-    if (!impl_->model.stack.full_stack)
-        throw std::runtime_error("benchmark requires a decoder stack package");
-    if (position < 0 || position >= impl_->model.max_context || token_id < 0 ||
-        token_id >= impl_->model.stack.vocab_size || warmup < 0 || iterations <= 0 || rounds <= 0)
+    if (iterations <= 0 || rounds <= 0)
         throw std::runtime_error("invalid benchmark arguments");
-    if (impl_->position != 0 || !impl_->valid || impl_->in_flight)
-        throw std::runtime_error("benchmark requires a fresh context");
-
-    // Fill the visible prefix outside the timed region. Repeated launches at
-    // position overwrite only K/V[position], so every sample sees the same
-    // context length and all earlier cache entries remain valid.
     try {
-        for (int p = 0; p < position; ++p)
-            impl_->launch(p, token_id);
-        impl_->stream.sync();
-        for (int i = 0; i < warmup; ++i)
-            impl_->launch(position, token_id);
-        impl_->stream.sync();
+        impl_->prepare_fixed_position(position, token_id, warmup);
 
         std::vector<double> samples;
         samples.reserve(rounds);
@@ -205,6 +211,36 @@ BenchmarkResult DiagnosticContext::benchmark_token(
         impl_->stream.sync();
         const auto top = std::max_element(logits.begin(), logits.end());
         return {std::move(samples), static_cast<int>(top - logits.begin()), *top};
+    } catch (...) {
+        impl_->valid = false;
+        throw;
+    }
+}
+
+TimelineResult DiagnosticContext::timeline_token(
+    int position, TokenId token_id, int warmup, int samples)
+{
+    if (samples <= 0)
+        throw std::runtime_error("invalid timeline sample count");
+    try {
+        impl_->prepare_fixed_position(position, token_id, warmup);
+        const std::size_t words = detail::kTimelineFields * impl_->model.instructions.size();
+        cuda::device_buffer<std::uint64_t> timeline(
+            impl_->stream, impl_->pool, words, cuda::no_init);
+        TimelineResult result;
+        for (int sample = 0; sample < samples; ++sample) {
+            cuda::timed_event start{impl_->stream}, end{impl_->stream};
+            start.record(impl_->stream);
+            impl_->launch(position, token_id, timeline.data());
+            end.record(impl_->stream);
+            end.sync();
+            result.kernel_us.push_back(
+                cuda::std::chrono::duration<double, cuda::std::micro>(end - start).count());
+            auto& records = result.records.emplace_back(words);
+            cuda::copy_bytes(impl_->stream, timeline, records);
+            impl_->stream.sync();
+        }
+        return result;
     } catch (...) {
         impl_->valid = false;
         throw;

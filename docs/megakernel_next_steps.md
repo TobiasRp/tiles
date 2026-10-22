@@ -10,10 +10,11 @@ this was written, so no number below was re-measured. Values marked
 *estimate* are arithmetic from the model shape and the committed planner.
 They are not measurements.
 
-**Progress, 2026-10-22: the Section 3 cleanup and milestone S1 are done.**
-See [Section 8](#8-cleanup-and-s1-results) for what changed and the
-measurements. The next step is S0's instruments (roofline kernel, row-dot
-microbenchmark, device timeline trace), then S2.
+**Progress, 2026-10-22: the Section 3 cleanup, S1, and S0 are done.**
+[Section 8](#8-cleanup-and-s1-results) covers the cleanup and S1;
+[Section 9](#9-s0-results-where-the-time-goes) has the S0 measurements, which
+replace several estimates in Sections 1 and 2 (each marked **S0 measured**).
+The next step is S2, reordered by the measured budget.
 
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
@@ -57,6 +58,11 @@ A streaming-read kernel usually reaches about 90–93% of nominal bandwidth. If
 that holds here, the realistic floor is **about 12.0 ms/token** *(estimate)*.
 That leaves graph replay roughly 1 ms (7–8%) of headroom at short context.
 
+**S0 measured:** a streaming read reaches **212.9 GB/s** (95% of nominal), so
+the weight-only floor is **11.61 ms/token**. Graph replay at context 1
+(12.84 ms) is 1.23 ms above it; TileInfer (13.03 ms worker + 0.17 ms argmax)
+is 1.58 ms above it.
+
 Three conclusions follow:
 
 1. **Faster arithmetic will not help.** This is why native BF16 MMA did not
@@ -95,6 +101,11 @@ because busy SMs can pull more than 1/20 of DRAM bandwidth while others sit
 idle. How much more depends on how many bytes each SM keeps in flight. The
 device trace in S0 measures the actual cost.
 
+**S0 measured:** small. One worker streams about 30 GB/s and 8 workers already
+saturate DRAM, so a second or third round with 8–12 busy workers still runs
+near full bandwidth. The 64-row tiles cost at most 3.5% against an even split
+per GEMV. QKV and Wo waves achieve 180 GB/s and down 196 GB/s in the decoder.
+
 ### 2.2 Grid barriers
 
 The committed planner produces 9 waves per layer: norm, QKV, RoPE/cache,
@@ -102,6 +113,9 @@ attention, Wo, norm, gate/up, SiLU, down. Each wave ends with a
 `grid.sync()`. Adding embedding and final norm gives about **146 grid barriers
 per token**. At 2–5 µs each, including the tail of the slowest worker, that is
 0.3–0.7 ms *(estimate)*. During a barrier no worker issues weight loads.
+
+**S0 measured:** an empty wave costs 0.79 µs. In the decoder the latency from
+the last arrival to release is 0.13–0.16 ms per token, about 1 µs per barrier.
 
 ### 2.3 Serial low-bandwidth phases
 
@@ -112,6 +126,10 @@ In `final_norm`, every block repeats that sum. The tux tree has a
 PyTorch-order block reduction for BF16. Greedy selection is a separate kernel
 launch per token.
 
+**S0 measured:** 0.40 ms per token inside the worker (SiLU 0.22 ms, the two
+norms 0.15 ms, RoPE 0.08 ms) plus **0.165 ms for the greedy-selection kernel**,
+which scans all 128,256 logits with one 256-thread block.
+
 ### 2.4 Per-SM memory-level parallelism
 
 How well wave tails are hidden depends on how many outstanding bytes one SM
@@ -121,6 +139,10 @@ calls for roughly 120–130 KB in flight across the GPU, or about 6 KB per SM
 when all 20 are busy. When only 8 SMs are busy, each needs about 16 KB.
 Measure the row-dot routine alone (Section S0). That separates kernel
 efficiency from scheduling.
+
+**S0 measured:** the row-dot routine reaches 192–210 GB/s with 20 workers and
+about 30 GB/s with one. Its 2-byte loads are enough in this access pattern; a
+plain grid-stride stream of 2-byte loads reaches only 124 GB/s.
 
 ### 2.5 Attention at long context (not yet measured)
 
@@ -141,6 +163,12 @@ configuration)*. Graph replay therefore likely degrades faster than
 TileInfer. If so, long context is where the megakernel
 can show a clear win. Report it honestly as a win against *eager-attention*
 PyTorch (Section 6).
+
+**S0 measured, and the prediction was wrong.** Attention costs 0.25 ms at
+context 64, 2.4 ms at 1K, and **9.4 ms at 4K**, where it reaches only
+14 GB/s against 0.63 ms of unique K/V bytes. Graph replay degrades less: from
+context 1 to 4K it gains 7.5 ms per token, TileInfer 9.3 ms. TileInfer is
+slower than graph replay at every measured context.
 
 ## 3. Is a code/architecture cleanup needed?
 
@@ -284,7 +312,9 @@ reprobes the compiled worker, and runs clang-format, Ruff, ty, CTest, and
 Compute Sanitizer before any timing is reported (AGENTS.md). Each one adds a
 row to the ablation table in S6.
 
-### S0 — Baseline and instruments (no kernel behavior change)
+### S0 — Baseline and instruments (no kernel behavior change) — done
+
+Results are in [Section 9](#9-s0-results-where-the-time-goes).
 
 - Land the tux tree (Section 3) and tag the baseline.
 - **Bandwidth roofline.** Add a test-only streaming kernel that reads the
@@ -567,4 +597,152 @@ exploratory measurement; this is not a controlled shape/tile sweep. A
 plausible source is that each instruction is copied into registers once,
 rather than re-read by reference inside the row loops, but that has not been
 isolated.
+
+## 9. S0 results: where the time goes
+
+Measured on `tux`, 2026-10-22, at commit `80e9c66` plus the S0 instruments.
+GPU clocks were unlocked (SM about 1.95–1.97 GHz under load, memory 6.8 GHz).
+All timings are exploratory, not a controlled shape/tile sweep. Artifacts are
+in `runs/s0-2026-10-22/` on tux.
+
+### Instruments added
+
+- **Roofline and row-dot probe.** `tileinfer/tests/bandwidth_probe.cu` (test
+  build only) has two modes. `stream BYTES` sweeps streaming reads over the
+  package's byte count. `rowdot` runs the worker's own `ops::gemv` on every
+  Llama projection shape. It runs inside a cooperative kernel with a grid
+  barrier per GEMV, on 1–20 active workers, with an even split or the
+  planner's 64-row round-robin tiles. Iterations rotate through matrix copies,
+  so L2 reuse does not inflate bandwidth.
+- **Worker timeline.** `tile_runtime_test --timeline-stack PACKAGE POSITION
+  TOKEN WARMUP SAMPLES` records, per instruction, start and end SM cycles and
+  the start `%globaltimer`. `%globaltimer` ticks only every 1.024 µs on this
+  GPU, too coarse for 2–5 µs tasks. `tileplan.timeline` therefore fits each
+  worker's cycles to its timer samples and puts all 20 workers on one
+  nanosecond axis. Tracing adds 15–30 µs per token and is off unless
+  requested. The first version stored start times in registers across the
+  task and cost 10% even when disabled: at 64 registers per thread, those
+  live values forced spills. Start times are now stored immediately.
+- **Bubble budget and Gantt charts.** `tileinfer/tests/profile_timeline.py`
+  traces several contexts, keeps the median launch, and writes
+  `timeline-report.json` and two SVGs per context: the whole token and
+  layer 8. The analysis splits the token into waves at barrier releases.
+  Grouped by decoder phase, ideal streaming at 212.9 GB/s, excess work, and
+  barrier latency sum exactly to the traced kernel time.
+- The 4K-context package (BF16, tile 64) and the existing PyTorch
+  eager/graph comparison now cover contexts 1/256/1K/2K/4K.
+
+CTest gained a trace regression (task and barrier coverage, monotonic
+records, budget sums) and the sanitizer suite gained trace cases. CTest
+(13/13), the CPU/UBSan suite (4/4), clang-format, Ruff, ty, 27 Python tests,
+and all 56 Compute Sanitizer checks pass. The compiled worker is unchanged at
+64 registers/thread, 2,264 static shared bytes, and one block per SM.
+
+### Bandwidth
+
+| Measurement | Result |
+| --- | ---: |
+| Streaming read, best configuration (16-byte loads) | 212.9 GB/s |
+| Streaming read, 20 blocks × 1024 threads, 16-byte loads | 212.6 GB/s |
+| Streaming read, 20 × 1024, 2-byte loads (grid-stride) | 123.6 GB/s |
+| Weight-only floor (2.47 GB at 212.9 GB/s) | 11.61 ms |
+| Empty wave (one grid barrier) | 0.79 µs |
+| L2 cache | 1.5 MB |
+
+Row-dot routine (BF16, `ops::gemv`), GB/s by active workers with an even
+split, and per-GEMV time with all 20 workers:
+
+| Shape | 1 | 2 | 4 | 8 | 12 | 20 | 20 even, µs | 20 tile-64, µs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| QKV 3072×2048 | 27 | 55 | 114 | 191 | 200 | 200 | 63.0 | 65.2 |
+| Wo 2048×2048 | 29 | 58 | 111 | 185 | 188 | 192 | 43.6 | 43.5 |
+| gate+up 16384×2048 | 30 | 59 | 116 | 203 | 208 | 208 | 322.4 | 333.7 |
+| down 2048×8192 | 31 | 61 | 120 | 203 | 202 | 204 | 164.5 | 162.4 |
+| lm_head 128256×2048 | 30 | 59 | 117 | 207 | 210 | 210 | 2497.5 | — |
+
+One worker streams about 30 GB/s. Eight saturate DRAM. **Twelve of the 20 SMs
+are therefore not needed to keep DRAM busy.** That capacity is free for
+compute-light work (attention, norms, epilogues) if a schedule lets it
+overlap with streaming.
+
+### Context sweep (fixed position, ms per decoder call)
+
+| Context | PyTorch eager | PyTorch graph | TileInfer | TileInfer − graph |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 14.04 | 12.84 | 13.01 | +0.18 |
+| 256 | 14.89 | 13.37 | 13.58 | +0.22 |
+| 1024 | 15.87 | 14.63 | 15.33 | +0.70 |
+| 2048 | 17.47 | 16.22 | 17.63 | +1.41 |
+| 4096 | 21.62 | 20.30 | 22.29 | +1.99 |
+
+Every compared top token and logit passed the script's check. TileInfer
+excludes the separate greedy-selection kernel here; generation adds it.
+
+### Bubble budget per token (µs)
+
+| Context | Traced | Ideal stream | Barrier sync | Streaming excess | Attention excess | Small phases |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 13,026 | 11,607 | 159 | 774 | 101 | 384 |
+| 64 | 13,156 | 11,617 | 131 | 788 | 224 | 396 |
+| 256 | 13,593 | 11,647 | 138 | 782 | 631 | 395 |
+| 1024 | 15,352 | 11,765 | 145 | 797 | 2,252 | 393 |
+| 2048 | 17,665 | 11,922 | 151 | 790 | 4,409 | 392 |
+| 4096 | 22,291 | 12,238 | 139 | 800 | 8,717 | 397 |
+
+At context 64, by phase (16 waves each unless noted; sync is included in the
+duration):
+
+| Phase | Duration µs | Ideal µs | Achieved GB/s | Note |
+| --- | ---: | ---: | ---: | --- |
+| QKV | 1,117 | 946 | 180 | 48 tiles, 2–3 per worker |
+| Wo | 742 | 630 | 181 | 32 tiles |
+| gate+up | 5,358 | 5,043 | 200 | 256 tiles |
+| down | 2,733 | 2,521 | 196 | 32 tiles of 1 MB |
+| lm_head (1 wave) | 2,507 | 2,467 | 210 | one contiguous chunk per worker |
+| attention | 247 | 10 | 8.5 | one head per task |
+| SiLU·up | 219 | 0 | — | 128 tiny tasks, about 2 µs each |
+| attention / FFN norm | 75 / 78 | 0 | — | one worker reduces, 19 wait |
+| RoPE + cache | 75 | 0 | — | 40 tiny tasks |
+| embedding, final norm (1 wave each) | 6 | 0 | — | |
+
+**Explained to within the S0 criterion.** Traced kernel time matches the
+untraced fixed-position time to within 15–30 µs, the tracing cost. In
+generation (64 tokens after a 6-token prompt, 13,276 µs/token), Nsight
+Systems shows the worker at 13,103 µs and greedy selection at 165 µs per
+token, leaving 8 µs of launch gaps.
+
+### What this changes in the plan
+
+1. **The short-context gap to graph replay is about 0.35 ms (0.18 ms in the
+   worker plus the separate argmax kernel), and three cheap items exceed it.** These are the 0.165 ms argmax kernel (a parallel or
+   in-worker argmax should take a few µs), the 0.22 ms SiLU wave (fuse into
+   the gate/up epilogue), and the 0.15 ms of single-worker norms (each
+   consumer recomputes the statistic, or producers emit partials). Fusing
+   RoPE into the QKV epilogue saves another 0.08 ms. Together, about 0.6 ms
+   would put TileInfer below graph replay at short context. These go first
+   in S2.
+2. **Attention is the largest loss and grows linearly with context.** At 4K
+   it is 9.4 ms for 0.63 ms of unique bytes. GQA-grouped, context-split
+   attention (one task per KV head × chunk, reading each K/V row once, with
+   enough tasks for all 20 workers) is the second S2 item and the main
+   long-context lever.
+3. **Wave quantization matters less than estimated.** 2.1 assumed a fixed
+   per-SM share of bandwidth. The measured per-SM rate (30 GB/s, saturation
+   at 8 workers) means uneven rounds mostly still saturate DRAM. The
+   remaining streaming excess, 0.79 ms, is spread across QKV (172 µs), Wo
+   (112 µs), gate/up (316 µs), down (212 µs), and lm_head (40 µs). Each
+   streaming wave restarts its DRAM pipeline after a barrier, so S3 prefetch
+   is a better lever for most of it than byte-balanced tiles. Balanced tiles
+   stay in S2 but at lower priority.
+4. **Barrier latency is real but small:** about 1 µs per barrier, 0.14 ms per
+   token. Fusion in S2 removes about half the barriers.
+5. **Free SMs are the megakernel's opportunity.** Only 8 workers are needed
+   to saturate DRAM, so a dataflow schedule (S4) can run attention, norms,
+   and epilogues on the other SMs while weights stream. That is the
+   overlap a sequence of kernels cannot express.
+
+The measured ceiling also changes the showcase targets. At context 1 the
+floor is 11.61 ms and graph replay 12.84 ms, so about 9.6% is available. At
+4K, graph replay spends 20.3 ms against a 12.24 ms floor, so a near-ideal
+attention schedule could beat it by a wide margin there.
 

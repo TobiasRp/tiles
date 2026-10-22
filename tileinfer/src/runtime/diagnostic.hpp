@@ -2,6 +2,7 @@
 
 #include "runtime.hpp"
 
+#include <cstdint>
 #include <memory>
 #include <vector>
 
@@ -13,6 +14,14 @@ struct BenchmarkResult
     std::vector<double> samples_us;
     TokenId top_token;
     float top_logit;
+};
+
+// Per-instruction worker timings for repeated launches at one fixed position.
+struct TimelineResult
+{
+    std::vector<double> kernel_us; // CUDA event time of each traced launch
+    // Per launch: kTimelineFields words per encoded instruction (see launch.cuh).
+    std::vector<std::vector<std::uint64_t>> records;
 };
 
 // Blocking intermediate-value adapter used by correctness tests only.
@@ -33,6 +42,7 @@ class DiagnosticContext
     std::vector<float> run_token(TokenId token_id);
     BenchmarkResult benchmark_token(int position, TokenId token_id, int warmup, int iterations,
         int rounds, bool profile = false);
+    TimelineResult timeline_token(int position, TokenId token_id, int warmup, int samples);
     void enable_block_trace();
     [[nodiscard]] std::vector<float> block_trace_snapshot() const;
     [[nodiscard]] std::vector<float> scratch_snapshot() const;

@@ -118,6 +118,23 @@ The reference precision now follows the package; an explicit
 [profile_decode.py](tests/profile_decode.py) collects Nsight counters.
 Both expose their arguments through `--help`.
 
+To see where a token's time goes, measure the bandwidth roofline once, then
+trace the worker at chosen contexts. The trace records every instruction's
+start and end on every worker; the report splits the token into ideal
+streaming, per-phase excess, and barrier latency, and draws Gantt charts.
+
+```sh
+build/release/bandwidth_probe stream 2471628800 > ../runs/stream.json
+build/release/bandwidth_probe rowdot > ../runs/rowdot.json
+uv run --locked --project ../tileplan python tests/profile_timeline.py \
+  --executor build/release/tile_runtime_test --package "$PACKAGE" \
+  --stream-report ../runs/stream.json --positions 0 1023 --out ../runs/timeline
+```
+
+`bandwidth_probe rowdot` times the worker's GEMV routine on the Llama 3.2 1B
+projection shapes with 1–20 active workers. See
+[the S0 results](../docs/megakernel_next_steps.md#9-s0-results-where-the-time-goes).
+
 ## Checks
 
 CTest covers the CCCL cooperative-launch gate, loader/UBSan validation,

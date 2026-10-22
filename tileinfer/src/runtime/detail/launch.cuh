@@ -25,6 +25,11 @@ struct WorkerProgramView
     int max_context;
 };
 
+// Thread 0 of the executing worker records {start SM cycle, end SM cycle,
+// start %globaltimer ns} for each instruction. Cycles time short tasks; the
+// coarser global timer aligns workers, whose cycle counters are independent.
+inline constexpr int kTimelineFields = 3;
+
 // Borrows one sequence's mutable device storage for a worker launch.
 struct WorkerBuffers
 {
@@ -36,6 +41,8 @@ struct WorkerBuffers
     float* block_trace;
     void* attention_scores;
     float* ffn_trace = nullptr;
+    // Optional timeline of kTimelineFields words per encoded instruction.
+    std::uint64_t* timeline = nullptr;
 };
 
 // Reads a device ID when ids is set, otherwise passes the immediate ID.

@@ -455,6 +455,7 @@ void validate_program(const json& document, const PlanShape& s, int workers, Loa
 
     std::fill(seen.begin(), seen.end(), false);
     std::vector<std::vector<TaskRecord>> streams(workers);
+    std::vector<std::vector<std::int32_t>> stream_tasks(workers);
     TaskRecord barrier{};
     barrier.opcode = Opcode::barrier;
     barrier.layer = kNoLayer;
@@ -479,24 +480,30 @@ void validate_program(const json& document, const PlanShape& s, int workers, Loa
                     "worker work estimate overflow");
                 loads[worker] += tasks[id].work;
                 streams[worker].push_back(tasks[id].record);
+                stream_tasks[worker].push_back(id);
                 members.push_back(id);
             }
             // Every worker reaches the same barriers, including idle workers.
-            if (wave + 1 < result.wave_count)
+            if (wave + 1 < result.wave_count) {
                 streams[worker].push_back(barrier);
+                stream_tasks[worker].push_back(-1);
+            }
         }
         dataflow.run_wave(wave, members, tasks);
         result.worker_loads.push_back(std::move(loads));
     }
     require(std::all_of(seen.begin(), seen.end(), [](bool value) { return value; }),
         "task is absent from the schedule");
-    for (const auto& stream : streams) {
+    for (int worker = 0; worker < workers; ++worker) {
+        const auto& stream = streams[worker];
         require(
             result.instructions.size() + stream.size() <= std::numeric_limits<std::uint32_t>::max(),
             "too many worker instructions");
         result.streams.push_back({static_cast<std::uint32_t>(result.instructions.size()),
             static_cast<std::uint32_t>(stream.size())});
         result.instructions.insert(result.instructions.end(), stream.begin(), stream.end());
+        result.instruction_tasks.insert(result.instruction_tasks.end(),
+            stream_tasks[worker].begin(), stream_tasks[worker].end());
     }
 }
 } // namespace tileinfer::detail

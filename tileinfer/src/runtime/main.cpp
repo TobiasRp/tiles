@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cstdint>
 #include <fstream>
@@ -281,7 +282,8 @@ enum class Mode
     bench,
     block,
     state,
-    fixed_bench
+    fixed_bench,
+    timeline
 };
 
 struct Command
@@ -340,6 +342,16 @@ Command parse_command(int argc, char** argv)
         if (result.position < 0 || result.token < 0 || result.warmup < 0 ||
             result.iterations <= 0 || result.rounds <= 0)
             throw std::runtime_error("invalid benchmark arguments");
+        return result;
+    }
+    if (mode == "--timeline-stack" && argc == 7) {
+        Command result{Mode::timeline, argv[2]};
+        result.position = parse_int(argv[3]);
+        result.token = parse_int(argv[4]);
+        result.warmup = parse_int(argv[5]);
+        result.rounds = parse_int(argv[6]);
+        if (result.position < 0 || result.token < 0 || result.warmup < 0 || result.rounds <= 0)
+            throw std::runtime_error("invalid timeline arguments");
         return result;
     }
 #endif
@@ -494,6 +506,32 @@ int main(int argc, char** argv)
                 {"samples_us", measurement.samples_us}, {"mean_us", mean},
                 {"top_token", measurement.top_token}, {"top_logit", measurement.top_logit},
                 {"timing", "CUDA event batch average; kernel only"}};
+            break;
+        }
+        case Mode::timeline: {
+            tileinfer::DiagnosticContext context(plan);
+            const auto timeline = context.timeline_token(
+                command.position, command.token, command.warmup, command.rounds);
+            std::vector<int> workers;
+            for (std::size_t worker = 0; worker < plan.streams.size(); ++worker)
+                workers.insert(workers.end(), plan.streams[worker].count, static_cast<int>(worker));
+            json samples = json::array();
+            for (std::size_t i = 0; i < timeline.records.size(); ++i) {
+                std::array<std::vector<std::uint64_t>, 3> fields;
+                for (std::size_t word = 0; word < timeline.records[i].size(); ++word)
+                    fields[word % 3].push_back(timeline.records[i][word]);
+                samples.push_back({{"kernel_us", timeline.kernel_us[i]}, {"start_cycle", fields[0]},
+                    {"end_cycle", fields[1]}, {"start_ns", fields[2]}});
+            }
+            result = {{"plan_sha256", plan.plan_sha256}, {"weights_sha256", plan.weights_sha256},
+                {"position", command.position}, {"context_length", command.position + 1},
+                {"token_id", command.token}, {"warmup", command.warmup},
+                {"instruction_tasks", plan.instruction_tasks}, {"instruction_workers", workers},
+                {"samples", samples},
+                {"timing",
+                    "SM cycle counters per instruction; %globaltimer at instruction start for "
+                    "cross-worker alignment; kernel_us is the CUDA event time of the traced "
+                    "launch"}};
             break;
         }
 #endif

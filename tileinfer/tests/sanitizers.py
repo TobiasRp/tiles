@@ -93,6 +93,15 @@ def main() -> None:
             str(block),
             str(root / "block.json"),
         ]
+        cases[f"{dtype}-timeline"] = [
+            str(build_dir / "tile_runtime_test"),
+            "--timeline-stack",
+            str(stack),
+            "2",
+            "1",
+            "1",
+            "1",
+        ]
         cases[f"{dtype}-tickets"] = [
             str(build_dir / "sequence_context_smoke"),
             str(stack),

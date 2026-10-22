@@ -28,6 +28,41 @@ from tileplan.decoder_stack import (
     generate_stack_fixture,
 )
 from tileplan.probe import probe
+from tileplan.timeline import align, budget
+
+
+def check_timeline(executor: Path, package: Path) -> None:
+    """Trace a fixed-position launch and check its records and bubble budget."""
+    plan = json.loads((package / "plan.json").read_text())
+    trace = json.loads(
+        subprocess.check_output(
+            [str(executor), "--timeline-stack", str(package), "2", "1", "1", "2"],
+            text=True,
+            timeout=60,
+        )
+    )
+    workers = plan["target"]["worker_count"]
+    barriers = trace["instruction_tasks"].count(-1)
+    if (
+        len(trace["samples"]) != 2
+        or sorted(t for t in trace["instruction_tasks"] if t >= 0)
+        != list(range(len(plan["tasks"])))
+        or barriers != workers * (len(plan["waves"]) - 1)
+    ):
+        raise AssertionError("timeline does not cover every task and barrier once")
+    for sample in trace["samples"]:
+        if any(
+            end < start
+            for start, end in zip(
+                sample["start_cycle"], sample["end_cycle"], strict=True
+            )
+        ):
+            raise AssertionError("timeline instruction ends before it starts")
+    events, _ = align(trace)
+    report = budget(plan, events, 2, 200.0)
+    parts = report["ideal_stream_us"] + sum(report["components_us"].values())
+    if abs(parts - report["traced_kernel_us"]) > 1e-6:
+        raise AssertionError("bubble budget does not sum to the traced kernel time")
 
 
 def main() -> None:
@@ -174,6 +209,7 @@ def main() -> None:
                 traces = [decode_token(token, quantized, spec, cache) for token in ids]
             check_sequence(args.executor, package, root, ids, traces, spec)
             check_generation(args.executor, package, root, ids[:2], quantized, spec)
+            check_timeline(args.block_executor, package)
             # Zero logits tie across the whole vocabulary. Sampling must keep
             # the smallest token ID in every precision.
             tied_weights = root / "ties-weights.npz"

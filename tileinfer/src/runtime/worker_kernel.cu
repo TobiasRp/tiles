@@ -14,6 +14,13 @@ namespace tileinfer {
 using detail::check;
 namespace {
 
+__device__ inline cuda::std::uint64_t global_timer_ns()
+{
+    cuda::std::uint64_t value;
+    asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(value));
+    return value;
+}
+
 // Executes this block's validated instruction stream for one token. Barrier
 // instructions appear at the same stream positions in every worker.
 template <typename Scalar>
@@ -23,7 +30,7 @@ __global__ __launch_bounds__(kThreads, 1) void decoder_worker(const TaskRecord* 
     TokenId token_id, const TokenId* device_tokens, int token_index, void* raw_input,
     void* raw_output, void* raw_scratch, void* raw_kv, const Scalar* weights, float* logits,
     float* block_trace, const float* rotary_frequencies, int max_context, void* attention_scores,
-    float* ffn_trace)
+    float* ffn_trace, cuda::std::uint64_t* timeline)
 {
     // Layer l reads hidden(l) and writes hidden(l + 1). Selecting with a
     // conditional, not an indexed array, keeps both pointers in the global
@@ -44,10 +51,17 @@ __global__ __launch_bounds__(kThreads, 1) void decoder_worker(const TaskRecord* 
     const WorkerTaskRange stream = streams[blockIdx.x];
     for (cuda::std::uint32_t index = stream.begin; index < stream.begin + stream.count; ++index) {
         const TaskRecord task = instructions[index];
+        // Store start times immediately: values kept live across a task would
+        // compete for the worker's 64 registers per thread and cause spills.
+        if (timeline != nullptr && threadIdx.x == 0) {
+            auto* record = timeline + detail::kTimelineFields * index;
+            record[0] = clock64();
+            record[2] = global_timer_ns();
+        }
         switch (task.opcode) {
         case Opcode::barrier:
             cg::this_grid().sync();
-            continue;
+            break;
         case Opcode::embedding:
             ops::embedding_lookup(current_token, task.begin, task.end, hidden_size,
                 weights + stack.embedding_offset, hidden(0));
@@ -76,7 +90,10 @@ __global__ __launch_bounds__(kThreads, 1) void decoder_worker(const TaskRecord* 
             ops::execute(task, context);
         }
         }
-        __syncthreads();
+        if (task.opcode != Opcode::barrier)
+            __syncthreads();
+        if (timeline != nullptr && threadIdx.x == 0)
+            timeline[detail::kTimelineFields * index + 1] = clock64();
     }
 }
 
@@ -96,7 +113,7 @@ void enqueue_worker_typed(cuda::stream& stream, const WorkerProgramView& program
         buffers.input, buffers.output, buffers.scratch, buffers.kv,
         static_cast<const Scalar*>(program.weights), buffers.logits, buffers.block_trace,
         program.rotary_frequencies, program.max_context, buffers.attention_scores,
-        buffers.ffn_trace);
+        buffers.ffn_trace, buffers.timeline);
 }
 
 void enqueue_worker(cuda::stream& stream, const WorkerProgramView& program,
