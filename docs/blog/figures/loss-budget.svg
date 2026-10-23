@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 350" width="760" height="350" role="img" aria-label="Time per token above the bandwidth floor">
+<title>Time per token above the bandwidth floor</title>
+<rect width="100%" height="100%" fill="#fcfcfb"/>
+<text x="24.0" y="32.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="17" fill="#0b0b0b" text-anchor="start" font-weight="600">Time per token above the bandwidth floor</text>
+<text x="24.0" y="54.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#52514e" text-anchor="start" font-weight="400">Traced worker kernel minus ideal streaming of unique weight and K/V bytes at 212.9 GB/s</text>
+<rect x="96.0" y="71.0" width="10" height="10" rx="2" fill="#2a78d6"/>
+<text x="111.0" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">GEMVs below roofline</text>
+<rect x="254.0" y="71.0" width="10" height="10" rx="2" fill="#eb6834"/>
+<text x="269.0" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">small phases</text>
+<rect x="357.6" y="71.0" width="10" height="10" rx="2" fill="#1baf7a"/>
+<text x="372.6" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">attention</text>
+<rect x="440.8" y="71.0" width="10" height="10" rx="2" fill="#eda100"/>
+<text x="455.8" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">barrier latency</text>
+<line x1="96.0" x2="96.0" y1="94" y2="330" stroke="#e6e5e1" stroke-width="1"/>
+<text x="96.0" y="346.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">0 ms</text>
+<line x1="186.3" x2="186.3" y1="94" y2="330" stroke="#e6e5e1" stroke-width="1"/>
+<text x="186.3" y="346.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">2 ms</text>
+<line x1="276.6" x2="276.6" y1="94" y2="330" stroke="#e6e5e1" stroke-width="1"/>
+<text x="276.6" y="346.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">4 ms</text>
+<line x1="366.9" x2="366.9" y1="94" y2="330" stroke="#e6e5e1" stroke-width="1"/>
+<text x="366.9" y="346.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">6 ms</text>
+<line x1="457.1" x2="457.1" y1="94" y2="330" stroke="#e6e5e1" stroke-width="1"/>
+<text x="457.1" y="346.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">8 ms</text>
+<line x1="547.4" x2="547.4" y1="94" y2="330" stroke="#e6e5e1" stroke-width="1"/>
+<text x="547.4" y="346.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">10 ms</text>
+<text x="86.0" y="115.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">context 1</text>
+<rect x="96.0" y="100.0" width="33.0" height="22" fill="#2a78d6"><title>context 1: GEMVs below roofline 0.77 ms</title></rect>
+<rect x="131.0" y="100.0" width="15.4" height="22" fill="#eb6834"><title>context 1: small phases 0.38 ms</title></rect>
+<rect x="148.3" y="100.0" width="2.5" height="22" fill="#1baf7a"><title>context 1: attention 0.10 ms</title></rect>
+<path d="M152.9,100.0 h3.2 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-3.2 z" fill="#eda100"><title>context 1: barrier latency 0.16 ms</title></path>
+<text x="168.1" y="115.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">+1.42 ms over 11.61 ms ideal</text>
+<text x="86.0" y="155.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">context 64</text>
+<rect x="96.0" y="140.0" width="33.6" height="22" fill="#2a78d6"><title>context 64: GEMVs below roofline 0.79 ms</title></rect>
+<rect x="131.6" y="140.0" width="15.9" height="22" fill="#eb6834"><title>context 64: small phases 0.40 ms</title></rect>
+<rect x="149.5" y="140.0" width="8.1" height="22" fill="#1baf7a"><title>context 64: attention 0.22 ms</title></rect>
+<path d="M159.6,140.0 h1.9 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-1.9 z" fill="#eda100"><title>context 64: barrier latency 0.13 ms</title></path>
+<text x="173.5" y="155.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">+1.54 ms over 11.62 ms ideal</text>
+<text x="86.0" y="195.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">context 256</text>
+<rect x="96.0" y="180.0" width="33.3" height="22" fill="#2a78d6"><title>context 256: GEMVs below roofline 0.78 ms</title></rect>
+<rect x="131.3" y="180.0" width="15.8" height="22" fill="#eb6834"><title>context 256: small phases 0.40 ms</title></rect>
+<rect x="149.2" y="180.0" width="26.5" height="22" fill="#1baf7a"><title>context 256: attention 0.63 ms</title></rect>
+<path d="M177.6,180.0 h2.2 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-2.2 z" fill="#eda100"><title>context 256: barrier latency 0.14 ms</title></path>
+<text x="191.9" y="195.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">+1.95 ms over 11.65 ms ideal</text>
+<text x="86.0" y="235.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">context 1,024</text>
+<rect x="96.0" y="220.0" width="34.0" height="22" fill="#2a78d6"><title>context 1,024: GEMVs below roofline 0.80 ms</title></rect>
+<rect x="132.0" y="220.0" width="15.7" height="22" fill="#eb6834"><title>context 1,024: small phases 0.39 ms</title></rect>
+<rect x="149.7" y="220.0" width="99.7" height="22" fill="#1baf7a"><title>context 1,024: attention 2.25 ms</title></rect>
+<path d="M251.4,220.0 h2.5 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-2.5 z" fill="#eda100"><title>context 1,024: barrier latency 0.14 ms</title></path>
+<text x="265.9" y="235.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">+3.59 ms over 11.76 ms ideal</text>
+<text x="86.0" y="275.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">context 2,048</text>
+<rect x="96.0" y="260.0" width="33.7" height="22" fill="#2a78d6"><title>context 2,048: GEMVs below roofline 0.79 ms</title></rect>
+<rect x="131.7" y="260.0" width="15.7" height="22" fill="#eb6834"><title>context 2,048: small phases 0.39 ms</title></rect>
+<rect x="149.4" y="260.0" width="197.0" height="22" fill="#1baf7a"><title>context 2,048: attention 4.41 ms</title></rect>
+<path d="M348.4,260.0 h2.8 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-2.8 z" fill="#eda100"><title>context 2,048: barrier latency 0.15 ms</title></path>
+<text x="363.2" y="275.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">+5.74 ms over 11.92 ms ideal</text>
+<text x="86.0" y="315.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">context 4,096</text>
+<rect x="96.0" y="300.0" width="34.1" height="22" fill="#2a78d6"><title>context 4,096: GEMVs below roofline 0.80 ms</title></rect>
+<rect x="132.1" y="300.0" width="15.9" height="22" fill="#eb6834"><title>context 4,096: small phases 0.40 ms</title></rect>
+<rect x="150.1" y="300.0" width="391.5" height="22" fill="#1baf7a"><title>context 4,096: attention 8.72 ms</title></rect>
+<path d="M543.6,300.0 h2.3 a4,4 0 0 1 4,4 v14.0 a4,4 0 0 1 -4,4 h-2.3 z" fill="#eda100"><title>context 4,096: barrier latency 0.14 ms</title></path>
+<text x="557.8" y="315.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">+10.05 ms over 12.24 ms ideal</text>
+</svg>
