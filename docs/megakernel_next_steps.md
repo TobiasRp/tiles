@@ -10,11 +10,13 @@ this was written, so no number below was re-measured. Values marked
 *estimate* are arithmetic from the model shape and the committed planner.
 They are not measurements.
 
-**Progress, 2026-10-22: the Section 3 cleanup, S1, and S0 are done.**
+**Progress, 2026-10-23: the Section 3 cleanup, S1, S0 and S2 are done.**
 [Section 8](#8-cleanup-and-s1-results) covers the cleanup and S1;
 [Section 9](#9-s0-results-where-the-time-goes) has the S0 measurements, which
 replace several estimates in Sections 1 and 2 (each marked **S0 measured**).
-The next step is S2, reordered by the measured budget.
+S2 is written up in [the S2 post](blog/s2-fused-tasks-2026-10.md):
+TileInfer now matches CUDA Graph replay at context 1 and beats it by up to
+15% at 4K. The next step is S3, weight prefetch across barriers.
 
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
@@ -357,7 +359,11 @@ components.
 S0 baseline for float32 and BF16. The arithmetic and order do not change, so
 any difference is a bug. Timing should be unchanged within noise.
 
-### S2 — Fewer, better-balanced waves (still barriers)
+### S2 — Fewer, better-balanced waves (still barriers) — done
+
+Implemented as fused QKV/gate-up tasks, context-chunked attention, even row
+splits instead of tiles, and a faster argmax; results and what did not go as
+hoped are in [the S2 post](blog/s2-fused-tasks-2026-10.md).
 
 - **Byte-balanced tiles.** For each GEMV, split rows (or K) into exactly
   `k × workers` near-equal ranges. Concatenate Q, K, and V into one

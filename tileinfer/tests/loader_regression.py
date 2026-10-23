@@ -37,13 +37,17 @@ def delay_producer(plan: dict) -> None:
 
 
 def stale_scratch_read(plan: dict) -> None:
-    """Run a layer-0 RoPE after layer 1 has overwritten the shared Q scratch."""
+    """Run a layer-0 attention task after layer 1 has overwritten the shared Q."""
     tasks = plan["tasks"]
     early = next(
-        t for t in tasks if t["layer"] == 0 and t["opcode"].startswith("rope_query")
+        t
+        for t in tasks
+        if t["layer"] == 0 and t["opcode"].startswith("attention_scores")
     )
     late = next(
-        t for t in tasks if t["layer"] == 1 and t["opcode"].startswith("rope_query")
+        t
+        for t in tasks
+        if t["layer"] == 1 and t["opcode"].startswith("attention_scores")
     )
     plan["waves"][early["wave"]]["workers"][early["worker"]].remove(early["id"])
     early["wave"] = late["wave"]
@@ -79,7 +83,6 @@ def main() -> None:
                     source / "model.json",
                     source / "weights.npz",
                     target,
-                    7,
                     package,
                     dtype,
                 )
@@ -109,8 +112,6 @@ def main() -> None:
                 legal = copy.deepcopy(original)
                 rearrange(legal)
                 check(legal, True, "alternative assignment and ordering")
-                legal["model"]["tile_rows"] = 2**31 - 1
-                check(legal, True, "large tile metadata does not expand a graph")
                 for version in (2, 3):
                     retired = copy.deepcopy(original)
                     retired["header"].update(
@@ -134,9 +135,10 @@ def main() -> None:
                         attention_bytes=3
                     ),
                     "opcode precision": lambda p: p["tasks"][0].update(
-                        opcode="rms_norm_f32"
-                        if dtype == "bfloat16"
-                        else "rms_norm_bf16"
+                        opcode=p["tasks"][0]["opcode"]
+                        .replace("_bf16", "_x")
+                        .replace("_f32", "_bf16")
+                        .replace("_x", "_f32")
                     ),
                     "derived frequency overflow": lambda p: p["model"].update(
                         rope_factor=1e-45

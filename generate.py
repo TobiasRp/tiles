@@ -18,7 +18,7 @@ CHECKPOINT = ROOT / "checkpoints" / "Llama-3.2-1B"
 EXECUTOR = INFER / "build" / "release" / "tile_runtime"
 VENV = PLAN / ".venv"
 # Package format accepted by the runtime built from this checkout.
-FORMAT = 5
+FORMAT = 6
 
 
 def run(command, *, cwd):
@@ -148,8 +148,6 @@ def main():
                 target,
                 "--max-context",
                 max_context,
-                "--tile-rows",
-                "auto",
                 "--dtype",
                 args.dtype or "bfloat16",
                 "--out",

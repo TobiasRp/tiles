@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from tileplan.decoder_plan import build
+from tileplan.decoder_plan import TID, build
 from tileplan.decoder_reference import (
     DecoderSpec,
     ReferenceCache,
@@ -38,18 +38,21 @@ def main() -> None:
             fixture / "model.json",
             fixture / "weights.npz",
             root / "target.json",
-            4,
             package,
         )
         result = run(args.executor, "--inspect-plan", str(package))
         if result.returncode:
             raise AssertionError(result.stderr)
         report = json.loads(result.stdout)
+        plan = json.loads((package / "plan.json").read_text())
+        # Six waves per layer: Q/K/V heads, attention scores, attention values,
+        # output projection, gate/up, down.
         if (
-            report["wave_count"] != 9
-            or report["scratch_bytes"] != 1664
-            or report["kv_bytes"] != 768
-            or report["task_count"] != 92
+            report["wave_count"] != 6
+            or report["wave_count"] != len(plan["waves"])
+            or report["task_count"] != len(plan["tasks"])
+            or report["scratch_bytes"] != plan["storage"]["scratch_bytes"]
+            or report["kv_bytes"] != plan["storage"]["kv_bytes"]
         ):
             raise AssertionError(report)
         result = run(args.executor, "--state-smoke", str(package))
@@ -102,7 +105,6 @@ def main() -> None:
             fixture / "model.json",
             fixture / "weights.npz",
             root / "target.json",
-            7,
             tail_package,
         )
         request_path.write_text(json.dumps({"tokens": request["tokens"][:2]}))
@@ -126,7 +128,6 @@ def main() -> None:
             fixture / "model.json",
             fixture / "weights.npz",
             root / "target.json",
-            7,
             bf16_package,
             "bfloat16",
         )
@@ -141,7 +142,7 @@ def main() -> None:
         wq_region = next(
             region
             for region in bf16_plan["storage"]["weights"]
-            if region["tensor"] == 3
+            if region["tensor"] == TID["Wq"]
         )
         expected_wq = weights["Wq"].to(torch.bfloat16).view(torch.uint16).numpy()
         actual_wq = np.frombuffer(

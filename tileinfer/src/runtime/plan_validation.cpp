@@ -8,6 +8,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -42,15 +43,24 @@ enum class Stage
 };
 constexpr int kStageCount = 3;
 
+// Attention workspaces, indexed per (chunk, query head): element chunk * nq + head.
+enum class Workspace
+{
+    scores,   // the chunk's scores, later probabilities
+    stats,    // the chunk's softmax maximum and sum
+    partials, // the chunk's partial P*V
+};
+constexpr int kWorkspaceCount = 3;
+
 // Physical storage the worker reads or writes while executing one token.
-// Scratch is shared by all layers, the two hidden buffers alternate, and each
-// layer appends its own K/V row.
+// Scratch and attention workspaces are shared by all layers, the two hidden
+// buffers alternate, and each layer appends its own K/V row.
 struct Buffers
 {
     static constexpr int hidden = 0;  // hidden + (h % 2)
     static constexpr int scratch = 2; // scratch + tensor index
-    static constexpr int scores = scratch + static_cast<int>(kTensorCount);
-    static constexpr int logits = scores + 1;
+    static constexpr int workspace = scratch + static_cast<int>(kTensorCount);
+    static constexpr int logits = workspace + kWorkspaceCount;
     static constexpr int kv = logits + 1; // kv + 2 * layer + (0 for K, 1 for V)
 };
 
@@ -68,7 +78,7 @@ struct Access
 // A logical output region used to check complete, nonoverlapping ownership.
 struct Region
 {
-    int key; // layer * kTensorCount + tensor, or stage key after all layers
+    int key; // per layer: tensor index or workspace; stage keys follow all layers
     int begin;
     int end;
 };
@@ -84,6 +94,8 @@ struct CheckedTask
     std::vector<Region> owned;
 };
 
+constexpr int kLayerKeys = static_cast<int>(kTensorCount) + kWorkspaceCount;
+
 struct Program
 {
     const PlanShape& s;
@@ -94,24 +106,14 @@ struct Program
 
     [[nodiscard]] int width(Id tensor) const
     {
-        switch (tensor) {
-        case Id::k:
-        case Id::v:
-        case Id::K:
-        case Id::V:
+        if (tensor == Id::K || tensor == Id::V)
             return s.nkv * s.dh;
-        case Id::gate:
-        case Id::up:
-        case Id::product:
-            return s.f;
-        default:
-            return s.d;
-        }
+        return tensor == Id::product ? s.f : s.d;
     }
 
     [[nodiscard]] int stage_key(Stage stage) const
     {
-        return layers * static_cast<int>(kTensorCount) + static_cast<int>(stage);
+        return layers * kLayerKeys + static_cast<int>(stage);
     }
 
     [[nodiscard]] int stage_width(Stage stage) const
@@ -143,10 +145,12 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
         layer = index(task.at("layer"), layers);
         result.record.layer = static_cast<std::uint32_t>(layer);
     }
-    // Versions of this layer's input hidden state, output hidden state, and writes.
     const int input_hidden = Buffers::hidden + layer % 2;
     const int output_hidden = Buffers::hidden + (layer + 1) % 2;
     const int produced = layer + 1;
+    const int kv_width = s.nkv * s.dh;
+    const int group = s.nq / s.nkv;
+    const int lanes = s.chunks * s.nq; // workspace elements: chunk * nq + head
 
     json expected;
     json outputs = json::array();
@@ -170,11 +174,11 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
     auto write = [&](Id id, int begin, int end, bool listed = true) {
         result.writes.push_back({buffer(id), begin, end, version(id)});
         result.owned.push_back(
-            {layer * static_cast<int>(kTensorCount) + static_cast<int>(tensor_index(id)), begin,
-                end});
+            {layer * kLayerKeys + static_cast<int>(tensor_index(id)), begin, end});
         if (listed)
             outputs.push_back({{"tensor", tensor_index(id)}, {"rows", {begin, end}}});
     };
+    auto workspace = [&](Workspace kind) { return Buffers::workspace + static_cast<int>(kind); };
     auto rows = [&](int limit) {
         require(op.at("rows").is_array() && op.at("rows").size() == 2, "invalid rows");
         const int begin = index(op.at("rows")[0], limit);
@@ -182,29 +186,38 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
         require(end > begin, "empty or reversed task rows");
         result.record.begin = begin;
         result.record.end = end;
+        expected = {{"rows", {begin, end}}};
         return std::pair{begin, end};
-    };
-    auto operands = [&](Id a, Id b, Id c) {
-        result.record.a = tensor_index(a);
-        result.record.b = tensor_index(b);
-        result.record.c = tensor_index(c);
     };
     auto stage_output = [&](Stage kind, const char* name, int begin, int end) {
         result.owned.push_back({stage_key(kind), begin, end});
         outputs.push_back({{"stage", name}, {"rows", {begin, end}}});
     };
+    // Attention tasks name one K/V head and context chunk; return its query heads.
+    auto attention_chunk = [&](Workspace kind, const char* name) {
+        const int kv_head = index(op.at("kv_head"), s.nkv);
+        const int chunk = index(op.at("chunk"), s.chunks);
+        expected = {{"kv_head", kv_head}, {"chunk", chunk}};
+        result.record.kv_head = kv_head;
+        result.record.chunk = chunk;
+        const int first = chunk * s.nq + kv_head * group;
+        result.owned.push_back(
+            {layer * kLayerKeys + static_cast<int>(kTensorCount) + static_cast<int>(kind), first,
+                first + group});
+        outputs.push_back({{"workspace", name}, {"chunk", chunk},
+            {"heads", {kv_head * group, (kv_head + 1) * group}}});
+        return std::tuple{kv_head, chunk, first};
+    };
 
     if (code == "embedding") {
         result.record.opcode = Opcode::embedding;
         const auto [begin, end] = rows(s.d);
-        expected = {{"rows", {begin, end}}};
         result.writes.push_back({Buffers::hidden, begin, end, 0});
         stage_output(Stage::embedding, "embedding", begin, end);
         result.work = end - begin;
     } else if (code == "final_rms_norm") {
         result.record.opcode = Opcode::final_rms_norm;
         const auto [begin, end] = rows(s.d);
-        expected = {{"rows", {begin, end}}};
         result.reads.push_back({Buffers::hidden + layers % 2, 0, s.d, layers});
         result.writes.push_back({Buffers::hidden + (layers + 1) % 2, begin, end, layers + 1});
         stage_output(Stage::final_norm, "final_norm", begin, end);
@@ -212,109 +225,70 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
     } else if (code == "logits") {
         result.record.opcode = Opcode::logits;
         const auto [begin, end] = rows(vocab);
-        expected = {{"rows", {begin, end}}};
         result.reads.push_back({Buffers::hidden + (layers + 1) % 2, 0, s.d, layers + 1});
         result.writes.push_back({Buffers::logits, begin, end, 1});
         stage_output(Stage::logits, "logits", begin, end);
         result.work = static_cast<std::int64_t>(end - begin) * s.d;
-    } else if (code == "rms_norm") {
-        result.record.opcode = Opcode::rms_norm;
-        const bool first = op.at("input") == tensor_index(Id::x);
-        const Id input = first ? Id::x : Id::r;
-        const Id scale = first ? Id::attn_norm : Id::ffn_norm;
-        const Id output = first ? Id::u : Id::z;
-        expected = {{"input", tensor_index(input)}, {"scale", tensor_index(scale)},
-            {"output", tensor_index(output)}};
-        operands(input, scale, output);
-        read(input, 0, s.d);
-        write(output, 0, s.d);
-        result.work = s.d;
-    } else if (code == "gemv") {
-        result.record.opcode = Opcode::gemv;
-        struct Projection
-        {
-            Id input;
-            Id weight;
-            Id output;
-            Id residual;
-        };
-        constexpr std::array projections{Projection{Id::u, Id::Wq, Id::q, Id::none},
-            Projection{Id::u, Id::Wk, Id::k, Id::none}, Projection{Id::u, Id::Wv, Id::v, Id::none},
-            Projection{Id::attention, Id::Wo, Id::r, Id::x},
-            Projection{Id::z, Id::Wgate, Id::gate, Id::none},
-            Projection{Id::z, Id::Wup, Id::up, Id::none},
-            Projection{Id::product, Id::Wdown, Id::y, Id::r}};
-        const auto found = std::find_if(projections.begin(), projections.end(),
-            [&](auto p) { return op.at("weight") == tensor_index(p.weight); });
-        require(found != projections.end(), "unsupported GEMV weight");
-        const auto p = *found;
-        const auto [begin, end] = rows(width(p.output));
-        expected = {{"input", tensor_index(p.input)}, {"weight", tensor_index(p.weight)},
-            {"output", tensor_index(p.output)}, {"rows", {begin, end}},
-            {"addend", p.residual == Id::none ? json(nullptr) : json(tensor_index(p.residual))}};
-        operands(p.input, p.weight, p.output);
-        result.record.d = p.residual == Id::none ? kNoTensor : tensor_index(p.residual);
-        read(p.input, 0, width(p.input));
-        if (p.residual != Id::none)
-            read(p.residual, begin, end);
-        write(p.output, begin, end);
-        result.work = static_cast<std::int64_t>(end - begin) * width(p.input);
-    } else if (code == "rope_query") {
-        result.record.opcode = Opcode::rope_query;
-        const int head = index(op.at("head"), s.nq);
-        expected = {
-            {"input", tensor_index(Id::q)}, {"output", tensor_index(Id::q_rot)}, {"head", head}};
-        result.record.a = tensor_index(Id::q);
-        result.record.b = tensor_index(Id::q_rot);
-        result.record.head = head;
-        read(Id::q, head * s.dh, (head + 1) * s.dh);
-        write(Id::q_rot, head * s.dh, (head + 1) * s.dh);
-        result.work = s.dh;
-    } else if (code == "rope_cache") {
-        result.record.opcode = Opcode::rope_cache;
-        const int head = index(op.at("kv_head"), s.nkv);
-        expected = {{"key", tensor_index(Id::k)}, {"value", tensor_index(Id::v)},
-            {"key_cache", tensor_index(Id::K)}, {"value_cache", tensor_index(Id::V)},
-            {"kv_head", head}};
-        operands(Id::k, Id::v, Id::K);
-        result.record.d = tensor_index(Id::V);
-        result.record.kv_head = head;
-        read(Id::k, head * s.dh, (head + 1) * s.dh);
-        read(Id::v, head * s.dh, (head + 1) * s.dh);
-        for (Id cache : {Id::K, Id::V}) {
-            write(cache, head * s.dh, (head + 1) * s.dh, false);
+    } else if (code == "qkv") {
+        // One head of the concatenated [Q; K; V] projection.
+        result.record.opcode = Opcode::qkv;
+        const auto [begin, end] = rows(s.d + 2 * kv_width);
+        require(begin % s.dh == 0 && end == begin + s.dh, "QKV task must cover one head");
+        read(Id::x, 0, s.d);
+        if (begin < s.d) {
+            write(Id::q_rot, begin, end);
+        } else {
+            const Id cache = begin < s.d + kv_width ? Id::K : Id::V;
+            const int row = begin - (cache == Id::K ? s.d : s.d + kv_width);
+            write(cache, row, row + s.dh, false);
             outputs.push_back(
-                {{"tensor", tensor_index(cache)}, {"position", "current"}, {"head", head}});
+                {{"tensor", tensor_index(cache)}, {"position", "current"}, {"head", row / s.dh}});
         }
-        result.work = 2LL * s.dh;
-    } else if (code == "attention_prefix") {
-        result.record.opcode = Opcode::attention_prefix;
-        const int head = index(op.at("head"), s.nq);
-        const int kv_head = head / (s.nq / s.nkv);
-        expected = {{"query", tensor_index(Id::q_rot)}, {"key_cache", tensor_index(Id::K)},
-            {"value_cache", tensor_index(Id::V)}, {"output", tensor_index(Id::attention)},
-            {"head", head}, {"kv_head", kv_head}};
-        operands(Id::q_rot, Id::K, Id::V);
-        result.record.d = tensor_index(Id::attention);
-        result.record.head = head;
-        result.record.kv_head = kv_head;
-        read(Id::q_rot, head * s.dh, (head + 1) * s.dh);
+        result.work = static_cast<std::int64_t>(s.dh) * s.d;
+    } else if (code == "attention_scores") {
+        result.record.opcode = Opcode::attention_scores;
+        const auto [kv_head, chunk, first] = attention_chunk(Workspace::scores, "scores");
+        read(Id::q_rot, kv_head * group * s.dh, (kv_head + 1) * group * s.dh);
         read(Id::K, kv_head * s.dh, (kv_head + 1) * s.dh);
+        for (Workspace kind : {Workspace::scores, Workspace::stats})
+            result.writes.push_back({workspace(kind), first, first + group, produced});
+        result.work = static_cast<std::int64_t>(s.context) * s.dh * group / s.chunks;
+    } else if (code == "attention_values") {
+        result.record.opcode = Opcode::attention_values;
+        const auto [kv_head, chunk, first] = attention_chunk(Workspace::partials, "partials");
+        // The softmax combines every chunk's statistics for these heads.
+        for (int c = 0; c < s.chunks; ++c) {
+            const int heads = c * s.nq + kv_head * group;
+            result.reads.push_back({workspace(Workspace::stats), heads, heads + group, produced});
+        }
+        result.reads.push_back({workspace(Workspace::scores), first, first + group, produced});
         read(Id::V, kv_head * s.dh, (kv_head + 1) * s.dh);
-        write(Id::attention, head * s.dh, (head + 1) * s.dh);
-        // The head's score workspace row is private to this task.
-        result.writes.push_back({Buffers::scores, head, head + 1, produced});
-        result.work = 2LL * s.context * s.dh;
-    } else if (code == "silu_product") {
-        result.record.opcode = Opcode::silu_product;
+        result.writes.push_back({workspace(Workspace::scores), first, first + group, produced});
+        result.writes.push_back({workspace(Workspace::partials), first, first + group, produced});
+        result.work = static_cast<std::int64_t>(s.context) * s.dh * group / s.chunks;
+    } else if (code == "output_projection") {
+        result.record.opcode = Opcode::output_projection;
+        const auto [begin, end] = rows(s.d);
+        result.reads.push_back({workspace(Workspace::partials), 0, lanes, produced});
+        read(Id::x, begin, end);
+        write(Id::r, begin, end);
+        // The task owning row 0 also stores the combined attention vector.
+        if (begin == 0)
+            write(Id::attention, 0, s.d);
+        result.work = static_cast<std::int64_t>(end - begin) * s.d;
+    } else if (code == "gate_up") {
+        result.record.opcode = Opcode::gate_up;
         const auto [begin, end] = rows(s.f);
-        expected = {{"gate", tensor_index(Id::gate)}, {"up", tensor_index(Id::up)},
-            {"output", tensor_index(Id::product)}, {"rows", {begin, end}}};
-        operands(Id::gate, Id::up, Id::product);
-        read(Id::gate, begin, end);
-        read(Id::up, begin, end);
+        read(Id::r, 0, s.d);
         write(Id::product, begin, end);
-        result.work = end - begin;
+        result.work = 2LL * (end - begin) * s.d;
+    } else if (code == "down") {
+        result.record.opcode = Opcode::down;
+        const auto [begin, end] = rows(s.d);
+        read(Id::product, 0, s.f);
+        read(Id::r, begin, end);
+        write(Id::y, begin, end);
+        result.work = static_cast<std::int64_t>(end - begin) * s.f;
     } else {
         throw std::runtime_error("unsupported decoder opcode");
     }
@@ -329,7 +303,7 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
 // Requires every logical output to be written exactly once per token.
 void check_ownership(const Program& program, const std::vector<CheckedTask>& tasks)
 {
-    const auto keys = static_cast<std::size_t>(program.layers) * kTensorCount + kStageCount;
+    const auto keys = static_cast<std::size_t>(program.layers) * kLayerKeys + kStageCount;
     std::vector<std::vector<std::array<int, 2>>> writers(keys);
     for (const auto& task : tasks)
         for (const auto region : task.owned)
@@ -344,12 +318,17 @@ void check_ownership(const Program& program, const std::vector<CheckedTask>& tas
         }
         require(end == width, "incomplete output ownership");
     };
-    constexpr std::array produced{Id::u, Id::q, Id::k, Id::v, Id::q_rot, Id::K, Id::V,
-        Id::attention, Id::r, Id::z, Id::gate, Id::up, Id::product, Id::y};
-    for (int layer = 0; layer < program.layers; ++layer)
+    constexpr std::array produced{
+        Id::q_rot, Id::K, Id::V, Id::attention, Id::r, Id::product, Id::y};
+    const int lanes = program.s.chunks * program.s.nq;
+    for (int layer = 0; layer < program.layers; ++layer) {
         for (Id tensor : produced)
-            covered(layer * static_cast<int>(kTensorCount) + static_cast<int>(tensor_index(tensor)),
-                program.width(tensor));
+            covered(
+                layer * kLayerKeys + static_cast<int>(tensor_index(tensor)), program.width(tensor));
+        for (Workspace kind : {Workspace::scores, Workspace::partials})
+            covered(layer * kLayerKeys + static_cast<int>(kTensorCount) + static_cast<int>(kind),
+                lanes);
+    }
     for (Stage stage : {Stage::embedding, Stage::final_norm, Stage::logits}) {
         if (program.full_stack)
             covered(program.stage_key(stage), program.stage_width(stage));
@@ -375,7 +354,8 @@ class Dataflow
         cells_[Buffers::hidden + 1].assign(s.d, {-1});
         for (std::size_t id = 0; id < kTensorCount; ++id)
             cells_[Buffers::scratch + id].assign(program.width(static_cast<Id>(id)), {});
-        cells_[Buffers::scores].assign(s.nq, {});
+        for (int kind = 0; kind < kWorkspaceCount; ++kind)
+            cells_[Buffers::workspace + kind].assign(s.chunks * s.nq, {});
         cells_[Buffers::logits].assign(program.vocab, {});
         for (int layer = 0; layer < program.layers; ++layer)
             for (int value = 0; value < 2; ++value)

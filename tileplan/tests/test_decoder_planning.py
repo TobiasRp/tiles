@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tileplan.decoder_plan import build, read_package, summary, validate
+from tileplan.decoder_plan import build, read_package, validate
 from tileplan.probe import ABI, normalize
 from tileplan.probe import OPCODES as PROBE_OPCODES
 
@@ -41,31 +41,34 @@ class DecoderPlanningTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / "target.json").write_text(json.dumps(target()))
 
-    def package(self, name: str = "package", tile_rows: int = 8) -> Path:
+    def package(self, name: str = "package") -> Path:
         out = self.root / name
         build(
             FIXTURE / "model.json",
             FIXTURE / "weights.npz",
             self.root / "target.json",
-            tile_rows,
             out,
         )
         return out
 
     def test_versioned_package_and_earliest_balanced_waves(self) -> None:
         package = self.package()
-        plan, weights, digest = read_package(package)
-        self.assertEqual(plan["header"]["format_version"], 5)
+        plan, weights, _ = read_package(package)
+        self.assertEqual(plan["header"]["format_version"], 6)
         self.assertEqual({task["layer"] for task in plan["tasks"]}, {0})
         self.assertEqual(plan["header"]["model_kind"], "llama_decoder_block")
         self.assertEqual(plan["model"]["weight_dtype"], "float32")
-        self.assertEqual(len(plan["waves"]), 9)
-        self.assertEqual(len(plan["model"]["tensors"]), 24)
+        # Q/K/V heads, attention scores, attention values, Wo, gate/up, down.
+        self.assertEqual(len(plan["waves"]), 6)
+        self.assertEqual(len(plan["model"]["tensors"]), 17)
+        tensors = {item["id"]: item["name"] for item in plan["model"]["tensors"]}
+        self.assertEqual(
+            [tensors[entry["tensor"]] for entry in plan["storage"]["scratch"]],
+            ["q_rot", "attention", "r", "product"],
+        )
         self.assertEqual(len(plan["storage"]["kv"]), 2)
         self.assertEqual(plan["storage"]["kv_bytes"], 768)
-        self.assertEqual(plan["storage"]["scratch_bytes"], 1664)
         self.assertEqual(len(weights), plan["storage"]["weight_bytes"])
-        self.assertEqual(summary(plan, digest)["peak_bytes"], 39808)
         for task in plan["tasks"]:
             expected_wave = (
                 0
@@ -89,31 +92,28 @@ class DecoderPlanningTest(unittest.TestCase):
                     default=0,
                 ),
             )
+        # Two K/V heads on four workers: two context chunks each.
         self.assertEqual(
             [
-                task["operands"]["kv_head"]
+                (task["operands"]["kv_head"], task["operands"]["chunk"])
                 for task in plan["tasks"]
-                if task["opcode"] == "attention_prefix_f32"
+                if task["opcode"] == "attention_scores_f32"
             ],
-            [0, 0, 1, 1],
+            [(0, 0), (0, 1), (1, 0), (1, 1)],
         )
 
-    def test_auto_tiling_balances_compiled_target(self) -> None:
+    def test_work_splits_over_every_worker(self) -> None:
         (self.root / "target.json").write_text(json.dumps(target(20)))
-        package = self.root / "auto"
         report = build(
             FIXTURE / "model.json",
             FIXTURE / "weights.npz",
             self.root / "target.json",
-            "auto",
-            package,
+            self.root / "wide",
         )
-        self.assertEqual(report["model"]["tile_rows"], 4)
-        self.assertEqual(
-            min(report["tile_search"], key=lambda item: item["score"])["tile_rows"],
-            4,
-        )
-        self.assertEqual(report["idle_workers"][6], 0)
+        # Ten chunks per K/V head give every one of the 20 workers attention work,
+        # and each projection splits its rows into one range per worker.
+        self.assertEqual(report["model"]["attention_chunks"], 10)
+        self.assertEqual(report["idle_workers"][1:], [0, 0, 0, 0, 0])
 
     def test_package_is_reproducible(self) -> None:
         first, second = self.package(), self.package("again")
@@ -127,7 +127,6 @@ class DecoderPlanningTest(unittest.TestCase):
             FIXTURE / "model.json",
             FIXTURE / "weights.npz",
             self.root / "target.json",
-            8,
             bf16,
             "bfloat16",
         )
@@ -153,13 +152,13 @@ class DecoderPlanningTest(unittest.TestCase):
         attention = next(
             index
             for index, task in enumerate(plan["tasks"])
-            if task["opcode"] == "attention_prefix_f32"
+            if task["opcode"] == "attention_scores_f32"
         )
         for mutation in (
             lambda p: p["tasks"][attention]["operands"].update(kv_head=1),
             lambda p: p["tasks"][attention].update(predecessors=[]),
             lambda p: p["tasks"][attention].update(wave=0),
-            lambda p: p["tasks"][attention]["output"][0].update(rows=[1, 9]),
+            lambda p: p["tasks"][attention]["output"][0].update(chunk=1),
             lambda p: p["storage"]["kv"][1].update(offset=0),
             lambda p: p["waves"][0]["workers"][0].append(0),
         ):
@@ -170,7 +169,7 @@ class DecoderPlanningTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checksum"):
             validate(plan, weights[:-1] + bytes([weights[-1] ^ 1]))
 
-    def test_target_abi_and_tiling_are_checked(self) -> None:
+    def test_target_abi_is_checked(self) -> None:
         with self.assertRaisesRegex(ValueError, "capabilities"):
             normalize(
                 {
@@ -188,8 +187,6 @@ class DecoderPlanningTest(unittest.TestCase):
                     },
                 }
             )
-        with self.assertRaisesRegex(ValueError, "tile_rows"):
-            self.package("bad", tile_rows=0)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 410" width="760" height="410" role="img" aria-label="One-token decode latency vs. context length, before and after S2">
+<title>One-token decode latency vs. context length, before and after S2</title>
+<rect width="100%" height="100%" fill="#fcfcfb"/>
+<text x="24.0" y="32.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="17" fill="#0b0b0b" text-anchor="start" font-weight="600">One-token decode latency vs. context length, before and after S2</text>
+<text x="24.0" y="54.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#52514e" text-anchor="start" font-weight="400">Llama 3.2 1B, BF16, RTX 3050; fixed position, GPU-resident; same session; lower is better</text>
+<rect x="64.0" y="71.0" width="10" height="10" rx="2" fill="#2a78d6"/>
+<text x="79.0" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">TileInfer S2</text>
+<rect x="167.6" y="71.0" width="10" height="10" rx="2" fill="#eb6834"/>
+<text x="182.6" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">PyTorch CUDA Graph</text>
+<rect x="312.0" y="71.0" width="10" height="10" rx="2" fill="#1baf7a"/>
+<text x="327.0" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">PyTorch eager</text>
+<rect x="422.4" y="71.0" width="10" height="10" rx="2" fill="#eda100"/>
+<text x="437.4" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">TileInfer baseline</text>
+<line x1="64" x2="582" y1="362.0" y2="362.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="56.0" y="366.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">10 ms</text>
+<line x1="64" x2="582" y1="324.9" y2="324.9" stroke="#e6e5e1" stroke-width="1"/>
+<text x="56.0" y="328.9" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">12 ms</text>
+<line x1="64" x2="582" y1="287.7" y2="287.7" stroke="#e6e5e1" stroke-width="1"/>
+<text x="56.0" y="291.7" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">14 ms</text>
+<line x1="64" x2="582" y1="250.6" y2="250.6" stroke="#e6e5e1" stroke-width="1"/>
+<text x="56.0" y="254.6" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">16 ms</text>
+<line x1="64" x2="582" y1="213.4" y2="213.4" stroke="#e6e5e1" stroke-width="1"/>
+<text x="56.0" y="217.4" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">18 ms</text>
+<line x1="64" x2="582" y1="176.3" y2="176.3" stroke="#e6e5e1" stroke-width="1"/>
+<text x="56.0" y="180.3" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">20 ms</text>
+<line x1="64" x2="582" y1="139.1" y2="139.1" stroke="#e6e5e1" stroke-width="1"/>
+<text x="56.0" y="143.1" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">22 ms</text>
+<line x1="64" x2="582" y1="102.0" y2="102.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="56.0" y="106.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">24 ms</text>
+<text x="64.0" y="380.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">1</text>
+<text x="409.3" y="380.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">256</text>
+<text x="495.7" y="380.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">1,024</text>
+<text x="538.8" y="380.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">2,048</text>
+<text x="582.0" y="380.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">4,096</text>
+<text x="323.0" y="400.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">context length (tokens, log scale)</text>
+<polyline points="64.0,332.2 409.3,331.4 495.7,329.2 538.8,326.3 582.0,320.4" fill="none" stroke="#c9c8c2" stroke-width="2"/>
+<polyline points="64.0,308.0 409.3,303.9 495.7,291.6 538.8,275.8 582.0,226.8" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="64.0" cy="308.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>TileInfer S2, context 1: 12.91 ms</title></circle>
+<circle cx="409.3" cy="303.9" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>TileInfer S2, context 256: 13.13 ms</title></circle>
+<circle cx="495.7" cy="291.6" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>TileInfer S2, context 1,024: 13.79 ms</title></circle>
+<circle cx="538.8" cy="275.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>TileInfer S2, context 2,048: 14.64 ms</title></circle>
+<circle cx="582.0" cy="226.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>TileInfer S2, context 4,096: 17.28 ms</title></circle>
+<polyline points="64.0,307.7 409.3,298.6 495.7,275.5 538.8,245.0 582.0,169.3" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="64.0" cy="307.7" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>PyTorch CUDA Graph, context 1: 12.92 ms</title></circle>
+<circle cx="409.3" cy="298.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>PyTorch CUDA Graph, context 256: 13.42 ms</title></circle>
+<circle cx="495.7" cy="275.5" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>PyTorch CUDA Graph, context 1,024: 14.66 ms</title></circle>
+<circle cx="538.8" cy="245.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>PyTorch CUDA Graph, context 2,048: 16.30 ms</title></circle>
+<circle cx="582.0" cy="169.3" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>PyTorch CUDA Graph, context 4,096: 20.38 ms</title></circle>
+<polyline points="64.0,286.8 409.3,273.0 495.7,254.3 538.8,223.8 582.0,148.6" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="64.0" cy="286.8" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>PyTorch eager, context 1: 14.05 ms</title></circle>
+<circle cx="409.3" cy="273.0" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>PyTorch eager, context 256: 14.79 ms</title></circle>
+<circle cx="495.7" cy="254.3" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>PyTorch eager, context 1,024: 15.80 ms</title></circle>
+<circle cx="538.8" cy="223.8" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>PyTorch eager, context 2,048: 17.44 ms</title></circle>
+<circle cx="582.0" cy="148.6" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>PyTorch eager, context 4,096: 21.49 ms</title></circle>
+<polyline points="64.0,305.8 409.3,295.1 495.7,262.9 538.8,220.0 582.0,133.9" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="64.0" cy="305.8" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"><title>TileInfer baseline, context 1: 13.02 ms</title></circle>
+<circle cx="409.3" cy="295.1" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"><title>TileInfer baseline, context 256: 13.60 ms</title></circle>
+<circle cx="495.7" cy="262.9" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"><title>TileInfer baseline, context 1,024: 15.33 ms</title></circle>
+<circle cx="538.8" cy="220.0" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"><title>TileInfer baseline, context 2,048: 17.65 ms</title></circle>
+<circle cx="582.0" cy="133.9" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"><title>TileInfer baseline, context 4,096: 22.28 ms</title></circle>
+<text x="592.0" y="137.9" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">TileInfer baseline 22.3 ms</text>
+<text x="592.0" y="152.9" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">PyTorch eager 21.5 ms</text>
+<text x="592.0" y="173.3" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">PyTorch CUDA Graph 20.4 ms</text>
+<text x="592.0" y="230.8" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">TileInfer S2 17.3 ms</text>
+<text x="592.0" y="324.4" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">bandwidth floor</text>
+</svg>

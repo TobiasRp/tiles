@@ -27,17 +27,20 @@ class UploadedPlan
     cuda::device_buffer<std::uint8_t> weights;
     cuda::device_buffer<TaskRecord> instructions;
     cuda::device_buffer<WorkerTaskRange> streams;
-    cuda::device_buffer<TensorRecord> tensors;
     cuda::device_buffer<float> rotary_frequencies;
+    LayerLayout layout;
     int hidden_size;
     int intermediate_size;
+    int query_heads;
     int kv_heads;
     int head_dim;
     int workers;
     int max_context;
+    int attention_chunks;
     std::size_t scratch_count;
     std::size_t kv_count;
-    std::size_t attention_count;
+    std::size_t attention_count;         // scores workspace elements
+    std::size_t attention_partial_count; // FP32 partials and statistics
     std::vector<std::pair<std::size_t, std::size_t>> scratch_regions;
     NumericConfig numeric;
     StackConfig stack;

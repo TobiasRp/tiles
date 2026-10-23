@@ -85,7 +85,6 @@ class Llama32ImportTest(unittest.TestCase):
             spec,
             {name: value.float().numpy() for name, value in bf16.items()},
             target(),
-            7,
             "bfloat16",
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -97,7 +96,7 @@ class Llama32ImportTest(unittest.TestCase):
                 root / "model.safetensors",
             )
             package = root / "package"
-            report = pack_safetensors(root, spec, target(), 7, package, PINNED_REVISION)
+            report = pack_safetensors(root, spec, target(), package, PINNED_REVISION)
             plan, actual, _ = read_package(package)
             self.assertEqual(actual, packed)
             self.assertEqual(plan["storage"], expected["storage"])
@@ -109,17 +108,21 @@ class Llama32ImportTest(unittest.TestCase):
                 spec,
                 {name: value.float().numpy() for name, value in bf16.items()},
                 target(),
-                7,
                 "float32",
             )
             float32_package = root / "package-float32"
             pack_safetensors(
-                root, spec, target(), 7, float32_package, PINNED_REVISION, "float32"
+                root, spec, target(), float32_package, PINNED_REVISION, "float32"
             )
             float32_plan, float32_bytes, _ = read_package(float32_package)
             self.assertEqual(float32_bytes, expected_float32)
             self.assertEqual(float32_plan["model"]["activation_dtype"], "float32")
-            self.assertEqual(float32_plan["storage"]["attention_bytes"], 0)
+            # Both precisions keep a score workspace per query head and position.
+            model = float32_plan["model"]
+            self.assertEqual(
+                float32_plan["storage"]["attention_bytes"],
+                model["num_attention_heads"] * model["max_context"] * 4,
+            )
 
             # An unexpected tensor cannot silently be dropped.
             package2 = root / "package2"
@@ -129,7 +132,7 @@ class Llama32ImportTest(unittest.TestCase):
             extra["unexpected.weight"] = torch.ones(1, dtype=torch.bfloat16)
             save_file(extra, root / "model.safetensors")
             with self.assertRaisesRegex(ValueError, "names mismatch"):
-                pack_safetensors(root, spec, target(), 7, package2, PINNED_REVISION)
+                pack_safetensors(root, spec, target(), package2, PINNED_REVISION)
 
 
 if __name__ == "__main__":

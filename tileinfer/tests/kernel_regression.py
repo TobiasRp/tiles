@@ -108,7 +108,6 @@ def main() -> None:
                     fixture / "model.json",
                     fixture / "weights.npz",
                     root / "target.json",
-                    7,
                     package,
                     dtype,
                 )
@@ -192,7 +191,6 @@ def main() -> None:
                 fixture / "model.json",
                 fixture / "weights.npz",
                 root / "target.json",
-                7,
                 package,
                 dtype,
             )
@@ -225,7 +223,6 @@ def main() -> None:
                 fixture / "model.json",
                 tied_weights,
                 root / "target.json",
-                7,
                 tied_package,
                 dtype,
             )

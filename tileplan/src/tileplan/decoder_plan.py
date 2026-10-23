@@ -1,4 +1,4 @@
-"""Version-5 decoder package builder and independent package checks."""
+"""Version-6 decoder package builder and independent package checks."""
 
 import copy
 import json
@@ -15,19 +15,16 @@ import torch
 from .decoder_reference import WEIGHT_SHAPES, DecoderSpec
 from .probe import ABI, read_target
 
-FORMAT = 5
-GENERATOR = "tileplan-decoder-0.5"
+FORMAT = 6
+GENERATOR = "tileplan-decoder-0.6"
 WEIGHT_DTYPES = {"float32": 4, "bfloat16": 2}
+# Weights keep this order inside each layer's block of weights.bin.
 TENSOR_NAMES = (
     "x",
     "attn_norm",
-    "u",
     "Wq",
-    "q",
     "Wk",
-    "k",
     "Wv",
-    "v",
     "q_rot",
     "K",
     "V",
@@ -35,11 +32,8 @@ TENSOR_NAMES = (
     "Wo",
     "r",
     "ffn_norm",
-    "z",
     "Wgate",
-    "gate",
     "Wup",
-    "up",
     "product",
     "Wdown",
     "y",
@@ -91,7 +85,22 @@ def _validate_policy(model: dict) -> str:
 
 
 def _attention_bytes(spec: DecoderSpec, dtype: str) -> int:
-    return spec.num_attention_heads * spec.max_context * 2 if dtype == "bfloat16" else 0
+    """Scores, then probabilities, for every query head and visible position."""
+    return spec.num_attention_heads * spec.max_context * _weight_size(dtype)
+
+
+def _attention_partial_bytes(spec: DecoderSpec, chunks: int) -> int:
+    """FP32 partial P*V plus a maximum and a sum per query head and chunk."""
+    return chunks * spec.num_attention_heads * (spec.head_dim + 2) * 4
+
+
+def attention_chunks(spec: DecoderSpec, workers: int) -> int:
+    """Context chunks per K/V head: the fewest that give every worker equal work."""
+    return next(
+        chunks
+        for chunks in range(1, workers + 1)
+        if spec.num_key_value_heads * chunks % workers == 0
+    )
 
 
 def _json_bytes(value: dict) -> bytes:
@@ -110,14 +119,11 @@ def _strides(shape: tuple[int, ...]) -> list[int]:
 def _shape(spec: DecoderSpec, name: str) -> tuple[int, ...]:
     d = spec.hidden_size
     f = spec.intermediate_size
-    kv = spec.num_key_value_heads * spec.head_dim
     if name in WEIGHT_SHAPES:
         return WEIGHT_SHAPES[name](spec)
-    if name in ("x", "u", "q", "q_rot", "attention", "r", "z", "y"):
+    if name in ("x", "q_rot", "attention", "r", "y"):
         return (d,)
-    if name in ("k", "v"):
-        return (kv,)
-    if name in ("gate", "up", "product"):
+    if name == "product":
         return (f,)
     if name in ("K", "V"):
         return (1, spec.max_context, spec.num_key_value_heads, spec.head_dim)
@@ -222,181 +228,105 @@ def read_weights(path: Path, spec: DecoderSpec) -> dict[str, np.ndarray]:
     return weights
 
 
-def _graph(spec: DecoderSpec, tile_rows: int, dtype: str = "float32") -> list[dict]:
-    """Canonical region ownership and minimal data dependencies."""
+def _graph(spec: DecoderSpec, workers: int, chunks: int, dtype: str) -> list[dict]:
+    """One layer's tasks with their minimal data dependencies.
+
+    Projections read a whole input vector, so each depends on every producer
+    of that vector. Q/K/V tasks own one head, so RoPE and the cache write
+    fit in the same task. Attention splits every K/V head's context into
+    chunks; the remaining projections split their rows evenly over workers.
+    """
     d, f, dh = spec.hidden_size, spec.intermediate_size, spec.head_dim
-    kv_width = spec.num_key_value_heads * dh
+    nq, nkv = spec.num_attention_heads, spec.num_key_value_heads
+    group = nq // nkv
+    suffix = "_bf16" if dtype == "bfloat16" else "_f32"
     tasks: list[dict] = []
-    writers: dict[str, list[tuple[int, int, int]]] = {}
 
     def add(
-        opcode: str,
-        operands: dict,
-        output: list[dict],
-        predecessors: list[int],
-        work: int,
+        opcode: str, operands: dict, output: list, predecessors: list, work: int
     ) -> int:
-        task_id = len(tasks)
         tasks.append(
             {
-                "id": task_id,
-                "opcode": opcode.replace("_f32", "_bf16")
-                if dtype == "bfloat16"
-                else opcode,
+                "id": len(tasks),
+                "opcode": opcode + suffix,
                 "operands": operands,
                 "output": output,
                 "predecessors": sorted(set(predecessors)),
                 "estimated_work": work,
             }
         )
-        return task_id
+        return len(tasks) - 1
 
-    def owners(name: str, begin: int, end: int) -> list[int]:
-        return [task_id for lo, hi, task_id in writers[name] if lo < end and begin < hi]
+    def rows(tensor: str, begin: int, end: int) -> dict:
+        return {"tensor": TID[tensor], "rows": [begin, end]}
 
-    def tiled_gemv(
-        input_name: str,
-        weight: str,
-        output_name: str,
-        rows: int,
-        width: int,
-        predecessors: list[int],
-        addend: str | None = None,
-    ) -> None:
-        writers[output_name] = []
-        for begin in range(0, rows, tile_rows):
-            end = min(begin + tile_rows, rows)
-            task_id = add(
-                "gemv_f32",
-                {
-                    "input": TID[input_name],
-                    "weight": TID[weight],
-                    "output": TID[output_name],
-                    "rows": [begin, end],
-                    "addend": TID[addend] if addend else None,
-                },
-                [{"tensor": TID[output_name], "rows": [begin, end]}],
-                predecessors,
-                (end - begin) * width,
+    # Q, K and V heads in the order of the concatenated [Q; K; V] projection.
+    heads = []
+    for index in range(nq + 2 * nkv):
+        begin = index * dh
+        if index < nq:
+            output = [rows("q_rot", begin, begin + dh)]
+        else:
+            cache = "K" if index < nq + nkv else "V"
+            head = (index - nq) % nkv
+            output = [{"tensor": TID[cache], "position": "current", "head": head}]
+        heads.append(add("qkv", {"rows": [begin, begin + dh]}, output, [], dh * d))
+
+    chunk_work = 2 * spec.max_context * dh * group // chunks
+    scores, values = [], []
+    for kv_head in range(nkv):
+        queries = [kv_head * group, (kv_head + 1) * group]
+        inputs = heads[queries[0] : queries[1]]
+        inputs += [heads[nq + kv_head], heads[nq + nkv + kv_head]]
+        group_scores = [
+            add(
+                "attention_scores",
+                {"kv_head": kv_head, "chunk": chunk},
+                [{"workspace": "scores", "chunk": chunk, "heads": queries}],
+                inputs,
+                chunk_work,
             )
-            writers[output_name].append((begin, end, task_id))
-
-    first = add(
-        "rms_norm_f32",
-        {
-            "input": TID["x"],
-            "scale": TID["attn_norm"],
-            "output": TID["u"],
-        },
-        [{"tensor": TID["u"], "rows": [0, d]}],
-        [],
-        d,
-    )
-    writers["u"] = [(0, d, first)]
-    tiled_gemv("u", "Wq", "q", d, d, [first])
-    tiled_gemv("u", "Wk", "k", kv_width, d, [first])
-    tiled_gemv("u", "Wv", "v", kv_width, d, [first])
-    writers["q_rot"] = []
-    for head in range(spec.num_attention_heads):
-        begin, end = head * dh, (head + 1) * dh
-        task_id = add(
-            "rope_query_f32",
-            {
-                "input": TID["q"],
-                "output": TID["q_rot"],
-                "head": head,
-            },
-            [{"tensor": TID["q_rot"], "rows": [begin, end]}],
-            owners("q", begin, end),
-            dh,
+            for chunk in range(chunks)
+        ]
+        scores += group_scores
+        values += [
+            add(
+                "attention_values",
+                {"kv_head": kv_head, "chunk": chunk},
+                [{"workspace": "partials", "chunk": chunk, "heads": queries}],
+                group_scores,
+                chunk_work,
+            )
+            for chunk in range(chunks)
+        ]
+    attention = [
+        add(
+            "output_projection",
+            {"rows": [begin, end]},
+            [rows("r", begin, end)] + ([rows("attention", 0, d)] if begin == 0 else []),
+            values,
+            (end - begin) * d,
         )
-        writers["q_rot"].append((begin, end, task_id))
-    cache_tasks = []
-    for head in range(spec.num_key_value_heads):
-        begin, end = head * dh, (head + 1) * dh
-        task_id = add(
-            "rope_cache_f32",
-            {
-                "key": TID["k"],
-                "value": TID["v"],
-                "key_cache": TID["K"],
-                "value_cache": TID["V"],
-                "kv_head": head,
-            },
-            [
-                {"tensor": TID["K"], "position": "current", "head": head},
-                {"tensor": TID["V"], "position": "current", "head": head},
-            ],
-            owners("k", begin, end) + owners("v", begin, end),
-            2 * dh,
+        for begin, end in _split(d, workers)
+    ]
+    product = [
+        add(
+            "gate_up",
+            {"rows": [begin, end]},
+            [rows("product", begin, end)],
+            attention,
+            2 * (end - begin) * d,
         )
-        cache_tasks.append(task_id)
-    writers["attention"] = []
-    for head, kv_head in enumerate(spec.head_to_kv):
-        begin, end = head * dh, (head + 1) * dh
-        task_id = add(
-            "attention_prefix_f32",
-            {
-                "query": TID["q_rot"],
-                "key_cache": TID["K"],
-                "value_cache": TID["V"],
-                "output": TID["attention"],
-                "head": head,
-                "kv_head": kv_head,
-            },
-            [{"tensor": TID["attention"], "rows": [begin, end]}],
-            owners("q_rot", begin, end) + [cache_tasks[kv_head]],
-            2 * spec.max_context * dh,
+        for begin, end in _split(f, workers)
+    ]
+    for begin, end in _split(d, workers):
+        add(
+            "down",
+            {"rows": [begin, end]},
+            [rows("y", begin, end)],
+            product,
+            (end - begin) * f,
         )
-        writers["attention"].append((begin, end, task_id))
-    tiled_gemv(
-        "attention",
-        "Wo",
-        "r",
-        d,
-        d,
-        [task_id for _, _, task_id in writers["attention"]],
-        "x",
-    )
-    second = add(
-        "rms_norm_f32",
-        {
-            "input": TID["r"],
-            "scale": TID["ffn_norm"],
-            "output": TID["z"],
-        },
-        [{"tensor": TID["z"], "rows": [0, d]}],
-        [task_id for _, _, task_id in writers["r"]],
-        d,
-    )
-    writers["z"] = [(0, d, second)]
-    tiled_gemv("z", "Wgate", "gate", f, d, [second])
-    tiled_gemv("z", "Wup", "up", f, d, [second])
-    writers["product"] = []
-    for begin in range(0, f, tile_rows):
-        end = min(begin + tile_rows, f)
-        task_id = add(
-            "silu_product_f32",
-            {
-                "gate": TID["gate"],
-                "up": TID["up"],
-                "output": TID["product"],
-                "rows": [begin, end],
-            },
-            [{"tensor": TID["product"], "rows": [begin, end]}],
-            owners("gate", begin, end) + owners("up", begin, end),
-            end - begin,
-        )
-        writers["product"].append((begin, end, task_id))
-    tiled_gemv(
-        "product",
-        "Wdown",
-        "y",
-        d,
-        f,
-        [task_id for _, _, task_id in writers["product"]],
-        "r",
-    )
     return tasks
 
 
@@ -408,7 +338,6 @@ def _split(rows: int, parts: int) -> list[tuple[int, int]]:
 
 def _program(
     spec: DecoderSpec,
-    tile_rows: int,
     dtype: str,
     workers: int,
     layers: int = 1,
@@ -450,7 +379,7 @@ def _program(
         if vocab_size is not None
         else []
     )
-    template = _graph(spec, tile_rows, dtype)
+    template = _graph(spec, workers, attention_chunks(spec, workers), dtype)
     for layer in range(layers):
         offset = len(tasks)
         for task in template:
@@ -464,9 +393,7 @@ def _program(
             )
             tasks.append(repeated)
         previous = [
-            task["id"]
-            for task in tasks[offset:]
-            if task["operands"].get("weight") == TID["Wdown"]
+            task["id"] for task in tasks[offset:] if task["opcode"].startswith("down")
         ]
     if vocab_size is not None:
         normalized = stage(
@@ -545,37 +472,12 @@ def _schedule(tasks: list[dict], workers: int) -> list[dict]:
     return result
 
 
-def choose_tile_rows(spec: DecoderSpec, workers: int) -> tuple[int, list[dict]]:
-    """Choose a balanced schedule with a small per-task dispatch penalty.
-
-    This is an offline schedule heuristic, not a measured latency prediction.
-    """
-    candidates = []
-    for tile_rows in (2, 4, 8, 16):
-        tasks = _graph(spec, tile_rows)
-        waves = _schedule(tasks, workers)
-        critical_work = sum(max(wave["estimated_work"]) for wave in waves)
-        score = critical_work + 8 * len(tasks)
-        candidates.append(
-            {
-                "tile_rows": tile_rows,
-                "task_count": len(tasks),
-                "critical_work": critical_work,
-                "score": score,
-            }
-        )
-    best = min(candidates, key=lambda item: (item["score"], item["task_count"]))
-    return best["tile_rows"], candidates
-
-
 def make_plan(
     spec: DecoderSpec,
     weights: dict[str, np.ndarray],
     target: dict,
-    tile_rows: int,
     weight_dtype: str = "float32",
 ) -> tuple[dict, bytes]:
-    _require(type(tile_rows) is int and tile_rows > 0, "tile_rows must be positive")
     _require(set(weights) == set(WEIGHTS), "weight names mismatch")
     for name, value in weights.items():
         _require(
@@ -590,7 +492,8 @@ def make_plan(
     )
     kv_regions, kv_bytes = _regions(spec, ("K", "V"), 16, _weight_size(weight_dtype))
     workers = target["launch"]["worker_count"]
-    tasks = _program(spec, tile_rows, weight_dtype, workers)
+    chunks = attention_chunks(spec, workers)
+    tasks = _program(spec, weight_dtype, workers)
     waves = _schedule(tasks, workers)
     plan = {
         "header": {
@@ -610,7 +513,7 @@ def make_plan(
         "model": {
             **_model_fields(spec.as_dict(), weight_dtype),
             "layers": 1,
-            "tile_rows": tile_rows,
+            "attention_chunks": chunks,
             "tensors": _descriptors(spec, weight_dtype),
         },
         "storage": {
@@ -618,6 +521,7 @@ def make_plan(
             "output_bytes": spec.hidden_size * _weight_size(weight_dtype),
             "scratch_bytes": scratch_bytes,
             "attention_bytes": _attention_bytes(spec, weight_dtype),
+            "attention_partial_bytes": _attention_partial_bytes(spec, chunks),
             "scratch": scratch_regions,
             "kv_bytes": kv_bytes,
             "kv": kv_regions,
@@ -654,8 +558,6 @@ def validate(plan: dict, packed: bytes) -> None:
         model["head_to_kv"] == spec.head_to_kv and model["layers"] == 1,
         "unsupported model/head mapping",
     )
-    tile_rows = model["tile_rows"]
-    _require(type(tile_rows) is int and tile_rows > 0, "invalid tile rows")
     _require(
         model["tensors"] == _descriptors(spec, weight_dtype),
         "invalid tensor descriptors",
@@ -675,8 +577,11 @@ def validate(plan: dict, packed: bytes) -> None:
     _require(
         storage["input_bytes"] == spec.hidden_size * weight_bytes
         and storage["output_bytes"] == spec.hidden_size * weight_bytes
-        and storage["attention_bytes"] == _attention_bytes(spec, weight_dtype),
-        "invalid IO storage",
+        and storage["attention_bytes"] == _attention_bytes(spec, weight_dtype)
+        and model["attention_chunks"] == attention_chunks(spec, workers)
+        and storage["attention_partial_bytes"]
+        == _attention_partial_bytes(spec, model["attention_chunks"]),
+        "invalid IO or attention storage",
     )
     for names_in_class, key, alignment in (
         (WEIGHTS, "weights", 64),
@@ -700,7 +605,7 @@ def validate(plan: dict, packed: bytes) -> None:
         == {"weights_bytes": len(packed), "weights_sha256": sha256(packed).hexdigest()},
         "weight length or checksum mismatch",
     )
-    expected_tasks = _program(spec, tile_rows, weight_dtype, workers)
+    expected_tasks = _program(spec, weight_dtype, workers)
     expected_waves = _schedule(expected_tasks, workers)
     _require(
         plan["tasks"] == expected_tasks and plan["waves"] == expected_waves,
@@ -712,19 +617,13 @@ def build(
     model_path: Path,
     weights_path: Path,
     target_path: Path,
-    tile_rows: int | str,
     out: Path,
     weight_dtype: str = "float32",
 ) -> dict:
     spec = read_model(model_path)
     weights = read_weights(weights_path, spec)
     target = read_target(target_path)
-    candidates = None
-    if tile_rows == "auto":
-        tile_rows, candidates = choose_tile_rows(spec, target["launch"]["worker_count"])
-    elif isinstance(tile_rows, str):
-        tile_rows = int(tile_rows)
-    plan, packed = make_plan(spec, weights, target, tile_rows, weight_dtype)
+    plan, packed = make_plan(spec, weights, target, weight_dtype)
     if out.exists():
         raise FileExistsError(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -734,8 +633,6 @@ def build(
         data = _json_bytes(plan)
         (temporary / "plan.json").write_bytes(data)
         report = summary(plan, sha256(data).hexdigest())
-        if candidates is not None:
-            report["tile_search"] = candidates
         (temporary / "planning_report.json").write_bytes(_json_bytes(report))
         os.rename(temporary, out)
     except BaseException:
@@ -769,7 +666,7 @@ def summary(plan: dict, digest: str) -> dict:
             "weights_sha256": plan["integrity"]["weights_sha256"],
             "layers": plan["model"]["layers"],
             "vocab_size": plan["model"]["vocab_size"],
-            "tile_rows": plan["model"]["tile_rows"],
+            "attention_chunks": plan["model"]["attention_chunks"],
             "task_count": len(plan["tasks"]),
             "wave_count": len(waves),
             "layer_wave_count": len(layer_view(plan)["waves"]),
@@ -792,7 +689,7 @@ def summary(plan: dict, digest: str) -> dict:
                 "num_key_value_heads",
                 "head_dim",
                 "max_context",
-                "tile_rows",
+                "attention_chunks",
             )
         },
         "task_counts": {
@@ -807,7 +704,8 @@ def summary(plan: dict, digest: str) -> dict:
         "scratch_bytes": storage["scratch_bytes"],
         "kv_bytes": storage["kv_bytes"],
         "weight_bytes": storage["weight_bytes"],
-        "peak_bytes": storage.get("attention_bytes", 0)
+        "peak_bytes": storage["attention_bytes"]
+        + storage["attention_partial_bytes"]
         + sum(
             storage[name]
             for name in (

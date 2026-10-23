@@ -35,7 +35,6 @@ def main(argv: list[str] | None = None) -> int:
     planner = commands.add_parser("build", help="write a decoder block package")
     for name in ("model", "weights", "target", "out"):
         planner.add_argument(f"--{name}", type=_path, required=True)
-    planner.add_argument("--tile-rows", default="auto")
     planner.add_argument(
         "--dtype",
         "--weight-dtype",
@@ -48,7 +47,6 @@ def main(argv: list[str] | None = None) -> int:
     )
     for name in ("model", "weights", "target", "out"):
         stack_planner.add_argument(f"--{name}", type=_path, required=True)
-    stack_planner.add_argument("--tile-rows", default="auto")
     stack_planner.add_argument(
         "--dtype",
         "--weight-dtype",
@@ -62,7 +60,6 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("checkpoint", "target", "out"):
         importer.add_argument(f"--{name}", type=_path, required=True)
     importer.add_argument("--max-context", type=int, default=4096)
-    importer.add_argument("--tile-rows", default="auto")
     importer.add_argument("--revision", help="pinned Hugging Face commit SHA")
     importer.add_argument(
         "--dtype",
@@ -73,13 +70,9 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("inspect", "verify"):
         command = commands.add_parser(name, help=f"{name} a decoder package")
         command.add_argument("package", type=_path)
-    image = commands.add_parser(
-        "visualize", help="render schedule, tensor graph, and tile flow SVGs"
-    )
+    image = commands.add_parser("visualize", help="render one layer's schedule as SVG")
     image.add_argument("package", type=_path)
     image.add_argument("--out", type=_path, required=True)
-    image.add_argument("--tensor-graph-out", type=_path)
-    image.add_argument("--tile-flow-out", type=_path)
     image.add_argument("--note", default="")
     args = parser.parse_args(argv)
     try:
@@ -96,7 +89,6 @@ def main(argv: list[str] | None = None) -> int:
                 args.model,
                 args.weights,
                 args.target,
-                args.tile_rows,
                 args.out,
                 args.weight_dtype,
             )
@@ -105,7 +97,6 @@ def main(argv: list[str] | None = None) -> int:
                 args.model,
                 args.weights,
                 args.target,
-                args.tile_rows,
                 args.out,
                 args.weight_dtype,
             )
@@ -115,7 +106,6 @@ def main(argv: list[str] | None = None) -> int:
                 args.target,
                 args.out,
                 args.max_context,
-                args.tile_rows,
                 args.revision,
                 args.weight_dtype,
             )
@@ -128,20 +118,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             result = {
-                "visualization": str(
-                    visualize(
-                        args.package,
-                        args.out,
-                        note=args.note,
-                        tensor_graph_out=args.tensor_graph_out,
-                        tile_flow_out=args.tile_flow_out,
-                    )
-                )
+                "visualization": str(visualize(args.package, args.out, note=args.note))
             }
-            if args.tensor_graph_out is not None:
-                result["tensor_graph"] = str(args.tensor_graph_out)
-            if args.tile_flow_out is not None:
-                result["tile_flow"] = str(args.tile_flow_out)
     except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"tileplan {args.command}: {exc}", file=sys.stderr)
         return 2

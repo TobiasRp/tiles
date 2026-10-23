@@ -51,7 +51,6 @@ def main() -> None:
             tail / "model.json",
             tail / "weights.npz",
             root / "target.json",
-            7,
             block,
             dtype,
         )
@@ -60,7 +59,6 @@ def main() -> None:
             source / "model.json",
             source / "weights.npz",
             root / "target.json",
-            7,
             stack,
             dtype,
         )

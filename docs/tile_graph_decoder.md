@@ -7,7 +7,10 @@ packages use either float32 or BF16 weights, activations, and K/V; reductions
 and selected internal operations remain float32. Version 5 (2026-10-22) keeps
 that arithmetic and stores the whole token as one flat task program:
 embedding, every layer, final normalization, and logits, scheduled into global
-waves. Older package formats are no longer read and must be regenerated; see
+waves. Version 6 (2026-10-23) fuses RMSNorm, RoPE, the cache write and
+SiLU·up into the projection tasks and splits attention by K/V head and
+context chunk; see [the S2 write-up](blog/s2-fused-tasks-2026-10.md). Older
+package formats are no longer read and must be regenerated; see
 [the megakernel plan](megakernel_next_steps.md). The historical milestone
 results below describe version 3.
 

@@ -1,0 +1,336 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 406" width="760" height="406" role="img" aria-label="One decoder layer on 20 workers, context 4,096">
+<title>One decoder layer on 20 workers, context 4,096</title>
+<rect width="100%" height="100%" fill="#fcfcfb"/>
+<text x="24.0" y="32.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="17" fill="#0b0b0b" text-anchor="start" font-weight="600">One decoder layer on 20 workers, context 4,096</text>
+<text x="24.0" y="54.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#52514e" text-anchor="start" font-weight="400">Layer 8 of 16, 914 µs; each row is one worker (thread block), time runs right</text>
+<rect x="74.0" y="71.0" width="10" height="10" rx="2" fill="#2a78d6"/>
+<text x="89.0" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">weight streaming</text>
+<rect x="204.8" y="71.0" width="10" height="10" rx="2" fill="#eb6834"/>
+<text x="219.8" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">attention</text>
+<rect x="288.0" y="71.0" width="10" height="10" rx="2" fill="#1baf7a"/>
+<text x="303.0" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">small phases</text>
+<rect x="391.6" y="71.0" width="10" height="10" rx="2" fill="#c9c8c2"/>
+<text x="406.6" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">barrier wait</text>
+<text x="66.0" y="106.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#52514e" text-anchor="end" font-weight="400">w0</text>
+<text x="66.0" y="158.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#52514e" text-anchor="end" font-weight="400">w4</text>
+<text x="66.0" y="210.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#52514e" text-anchor="end" font-weight="400">w8</text>
+<text x="66.0" y="262.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#52514e" text-anchor="end" font-weight="400">w12</text>
+<text x="66.0" y="314.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#52514e" text-anchor="end" font-weight="400">w16</text>
+<rect x="74.00" y="97" width="0.40" height="11" fill="#c9c8c2"><title>worker 0: barrier wait, 1.5 µs</title></rect>
+<rect x="74.19" y="97" width="19.99" height="11" fill="#2a78d6"><title>worker 0: QKV, 28.4 µs</title></rect>
+<rect x="94.96" y="97" width="20.17" height="11" fill="#2a78d6"><title>worker 0: QKV, 28.7 µs</title></rect>
+<rect x="115.92" y="97" width="9.60" height="11" fill="#2a78d6"><title>worker 0: QKV, 14.1 µs</title></rect>
+<rect x="126.31" y="97" width="0.40" height="11" fill="#c9c8c2"><title>worker 0: barrier wait, 1.3 µs</title></rect>
+<rect x="127.42" y="97" width="55.42" height="11" fill="#eb6834"><title>worker 0: attention, 77.3 µs</title></rect>
+<rect x="183.81" y="97" width="55.79" height="11" fill="#eb6834"><title>worker 0: attention, 77.8 µs</title></rect>
+<rect x="240.57" y="97" width="0.40" height="11" fill="#c9c8c2"><title>worker 0: barrier wait, 1.0 µs</title></rect>
+<rect x="241.49" y="97" width="48.55" height="11" fill="#eb6834"><title>worker 0: attention, 67.8 µs</title></rect>
+<rect x="290.83" y="97" width="48.55" height="11" fill="#eb6834"><title>worker 0: attention, 67.8 µs</title></rect>
+<rect x="340.17" y="97" width="1.07" height="11" fill="#c9c8c2"><title>worker 0: barrier wait, 2.3 µs</title></rect>
+<rect x="342.03" y="97" width="32.60" height="11" fill="#2a78d6"><title>worker 0: Wo, 45.8 µs</title></rect>
+<rect x="375.60" y="97" width="0.40" height="11" fill="#c9c8c2"><title>worker 0: barrier wait, 1.0 µs</title></rect>
+<rect x="376.53" y="97" width="230.89" height="11" fill="#2a78d6"><title>worker 0: gate/up, 319.5 µs</title></rect>
+<rect x="610.80" y="97" width="0.40" height="11" fill="#c9c8c2"><title>worker 0: barrier wait, 1.0 µs</title></rect>
+<rect x="611.72" y="97" width="122.93" height="11" fill="#2a78d6"><title>worker 0: down, 170.5 µs</title></rect>
+<rect x="74.00" y="110" width="0.40" height="11" fill="#c9c8c2"><title>worker 1: barrier wait, 2.8 µs</title></rect>
+<rect x="74.37" y="110" width="19.99" height="11" fill="#2a78d6"><title>worker 1: QKV, 28.4 µs</title></rect>
+<rect x="95.15" y="110" width="19.99" height="11" fill="#2a78d6"><title>worker 1: QKV, 28.4 µs</title></rect>
+<rect x="115.92" y="110" width="9.60" height="11" fill="#2a78d6"><title>worker 1: QKV, 14.1 µs</title></rect>
+<rect x="126.31" y="110" width="0.40" height="11" fill="#c9c8c2"><title>worker 1: barrier wait, 1.3 µs</title></rect>
+<rect x="127.42" y="110" width="54.30" height="11" fill="#eb6834"><title>worker 1: attention, 75.8 µs</title></rect>
+<rect x="182.69" y="110" width="53.19" height="11" fill="#eb6834"><title>worker 1: attention, 74.2 µs</title></rect>
+<rect x="236.67" y="110" width="4.04" height="11" fill="#c9c8c2"><title>worker 1: barrier wait, 6.4 µs</title></rect>
+<rect x="241.68" y="110" width="49.48" height="11" fill="#eb6834"><title>worker 1: attention, 69.1 µs</title></rect>
+<rect x="292.13" y="110" width="45.40" height="11" fill="#eb6834"><title>worker 1: attention, 63.5 µs</title></rect>
+<rect x="338.50" y="110" width="2.92" height="11" fill="#c9c8c2"><title>worker 1: barrier wait, 4.9 µs</title></rect>
+<rect x="342.21" y="110" width="32.05" height="11" fill="#2a78d6"><title>worker 1: Wo, 45.1 µs</title></rect>
+<rect x="375.23" y="110" width="0.70" height="11" fill="#c9c8c2"><title>worker 1: barrier wait, 1.8 µs</title></rect>
+<rect x="376.71" y="110" width="230.70" height="11" fill="#2a78d6"><title>worker 1: gate/up, 319.2 µs</title></rect>
+<rect x="609.31" y="110" width="1.81" height="11" fill="#c9c8c2"><title>worker 1: barrier wait, 3.3 µs</title></rect>
+<rect x="611.91" y="110" width="122.93" height="11" fill="#2a78d6"><title>worker 1: down, 170.5 µs</title></rect>
+<rect x="74.19" y="123" width="20.17" height="11" fill="#2a78d6"><title>worker 2: QKV, 28.7 µs</title></rect>
+<rect x="95.15" y="123" width="19.99" height="11" fill="#2a78d6"><title>worker 2: QKV, 28.4 µs</title></rect>
+<rect x="115.92" y="123" width="9.60" height="11" fill="#2a78d6"><title>worker 2: QKV, 14.1 µs</title></rect>
+<rect x="126.31" y="123" width="0.40" height="11" fill="#c9c8c2"><title>worker 2: barrier wait, 1.0 µs</title></rect>
+<rect x="127.23" y="123" width="55.23" height="11" fill="#eb6834"><title>worker 2: attention, 77.1 µs</title></rect>
+<rect x="183.44" y="123" width="54.49" height="11" fill="#eb6834"><title>worker 2: attention, 76.0 µs</title></rect>
+<rect x="238.90" y="123" width="1.81" height="11" fill="#c9c8c2"><title>worker 2: barrier wait, 3.3 µs</title></rect>
+<rect x="241.49" y="123" width="46.14" height="11" fill="#eb6834"><title>worker 2: attention, 64.5 µs</title></rect>
+<rect x="288.61" y="123" width="47.44" height="11" fill="#eb6834"><title>worker 2: attention, 66.3 µs</title></rect>
+<rect x="336.83" y="123" width="4.41" height="11" fill="#c9c8c2"><title>worker 2: barrier wait, 6.9 µs</title></rect>
+<rect x="342.03" y="123" width="32.60" height="11" fill="#2a78d6"><title>worker 2: Wo, 45.8 µs</title></rect>
+<rect x="375.60" y="123" width="0.40" height="11" fill="#c9c8c2"><title>worker 2: barrier wait, 1.0 µs</title></rect>
+<rect x="376.53" y="123" width="231.44" height="11" fill="#2a78d6"><title>worker 2: gate/up, 320.3 µs</title></rect>
+<rect x="610.61" y="123" width="0.40" height="11" fill="#c9c8c2"><title>worker 2: barrier wait, 1.3 µs</title></rect>
+<rect x="611.72" y="123" width="122.93" height="11" fill="#2a78d6"><title>worker 2: down, 170.5 µs</title></rect>
+<rect x="74.00" y="136" width="0.40" height="11" fill="#c9c8c2"><title>worker 3: barrier wait, 1.0 µs</title></rect>
+<rect x="74.37" y="136" width="19.99" height="11" fill="#2a78d6"><title>worker 3: QKV, 28.4 µs</title></rect>
+<rect x="95.15" y="136" width="20.17" height="11" fill="#2a78d6"><title>worker 3: QKV, 28.7 µs</title></rect>
+<rect x="116.11" y="136" width="9.42" height="11" fill="#2a78d6"><title>worker 3: QKV, 13.8 µs</title></rect>
+<rect x="126.49" y="136" width="0.40" height="11" fill="#c9c8c2"><title>worker 3: barrier wait, 1.0 µs</title></rect>
+<rect x="127.42" y="136" width="53.93" height="11" fill="#eb6834"><title>worker 3: attention, 75.3 µs</title></rect>
+<rect x="182.14" y="136" width="54.49" height="11" fill="#eb6834"><title>worker 3: attention, 76.0 µs</title></rect>
+<rect x="237.41" y="136" width="3.30" height="11" fill="#c9c8c2"><title>worker 3: barrier wait, 5.4 µs</title></rect>
+<rect x="241.68" y="136" width="49.48" height="11" fill="#eb6834"><title>worker 3: attention, 69.1 µs</title></rect>
+<rect x="292.13" y="136" width="47.26" height="11" fill="#eb6834"><title>worker 3: attention, 66.0 µs</title></rect>
+<rect x="340.17" y="136" width="1.25" height="11" fill="#c9c8c2"><title>worker 3: barrier wait, 2.6 µs</title></rect>
+<rect x="342.21" y="136" width="32.05" height="11" fill="#2a78d6"><title>worker 3: Wo, 45.1 µs</title></rect>
+<rect x="375.60" y="136" width="0.40" height="11" fill="#c9c8c2"><title>worker 3: barrier wait, 1.3 µs</title></rect>
+<rect x="376.71" y="136" width="229.40" height="11" fill="#2a78d6"><title>worker 3: gate/up, 317.4 µs</title></rect>
+<rect x="609.13" y="136" width="2.00" height="11" fill="#c9c8c2"><title>worker 3: barrier wait, 3.6 µs</title></rect>
+<rect x="611.91" y="136" width="122.75" height="11" fill="#2a78d6"><title>worker 3: down, 170.2 µs</title></rect>
+<rect x="74.00" y="149" width="0.40" height="11" fill="#c9c8c2"><title>worker 4: barrier wait, 2.6 µs</title></rect>
+<rect x="74.37" y="149" width="19.99" height="11" fill="#2a78d6"><title>worker 4: QKV, 28.4 µs</title></rect>
+<rect x="95.15" y="149" width="20.17" height="11" fill="#2a78d6"><title>worker 4: QKV, 28.7 µs</title></rect>
+<rect x="116.11" y="149" width="9.42" height="11" fill="#2a78d6"><title>worker 4: QKV, 13.8 µs</title></rect>
+<rect x="126.49" y="149" width="0.40" height="11" fill="#c9c8c2"><title>worker 4: barrier wait, 1.0 µs</title></rect>
+<rect x="127.61" y="149" width="55.05" height="11" fill="#eb6834"><title>worker 4: attention, 76.8 µs</title></rect>
+<rect x="183.44" y="149" width="56.53" height="11" fill="#eb6834"><title>worker 4: attention, 78.8 µs</title></rect>
+<rect x="240.75" y="149" width="0.40" height="11" fill="#c9c8c2"><title>worker 4: barrier wait, 1.0 µs</title></rect>
+<rect x="241.68" y="149" width="48.18" height="11" fill="#eb6834"><title>worker 4: attention, 67.3 µs</title></rect>
+<rect x="290.65" y="149" width="46.51" height="11" fill="#eb6834"><title>worker 4: attention, 65.0 µs</title></rect>
+<rect x="337.95" y="149" width="3.48" height="11" fill="#c9c8c2"><title>worker 4: barrier wait, 5.6 µs</title></rect>
+<rect x="342.21" y="149" width="32.60" height="11" fill="#2a78d6"><title>worker 4: Wo, 45.8 µs</title></rect>
+<rect x="375.79" y="149" width="0.40" height="11" fill="#c9c8c2"><title>worker 4: barrier wait, 1.0 µs</title></rect>
+<rect x="376.71" y="149" width="226.81" height="11" fill="#2a78d6"><title>worker 4: gate/up, 313.9 µs</title></rect>
+<rect x="609.31" y="149" width="1.81" height="11" fill="#c9c8c2"><title>worker 4: barrier wait, 3.3 µs</title></rect>
+<rect x="611.91" y="149" width="122.93" height="11" fill="#2a78d6"><title>worker 4: down, 170.5 µs</title></rect>
+<rect x="735.81" y="149" width="0.40" height="11" fill="#c9c8c2"><title>worker 4: barrier wait, 3.1 µs</title></rect>
+<rect x="74.00" y="162" width="0.40" height="11" fill="#c9c8c2"><title>worker 5: barrier wait, 3.6 µs</title></rect>
+<rect x="74.37" y="162" width="19.80" height="11" fill="#2a78d6"><title>worker 5: QKV, 28.2 µs</title></rect>
+<rect x="95.15" y="162" width="19.99" height="11" fill="#2a78d6"><title>worker 5: QKV, 28.4 µs</title></rect>
+<rect x="115.92" y="162" width="9.60" height="11" fill="#2a78d6"><title>worker 5: QKV, 14.1 µs</title></rect>
+<rect x="126.31" y="162" width="0.40" height="11" fill="#c9c8c2"><title>worker 5: barrier wait, 1.3 µs</title></rect>
+<rect x="127.42" y="162" width="55.23" height="11" fill="#eb6834"><title>worker 5: attention, 77.1 µs</title></rect>
+<rect x="183.62" y="162" width="52.63" height="11" fill="#eb6834"><title>worker 5: attention, 73.5 µs</title></rect>
+<rect x="237.04" y="162" width="3.67" height="11" fill="#c9c8c2"><title>worker 5: barrier wait, 5.9 µs</title></rect>
+<rect x="241.68" y="162" width="47.81" height="11" fill="#eb6834"><title>worker 5: attention, 66.8 µs</title></rect>
+<rect x="290.28" y="162" width="47.44" height="11" fill="#eb6834"><title>worker 5: attention, 66.3 µs</title></rect>
+<rect x="338.69" y="162" width="2.74" height="11" fill="#c9c8c2"><title>worker 5: barrier wait, 4.6 µs</title></rect>
+<rect x="342.21" y="162" width="32.42" height="11" fill="#2a78d6"><title>worker 5: Wo, 45.6 µs</title></rect>
+<rect x="375.41" y="162" width="0.51" height="11" fill="#c9c8c2"><title>worker 5: barrier wait, 1.5 µs</title></rect>
+<rect x="376.71" y="162" width="229.59" height="11" fill="#2a78d6"><title>worker 5: gate/up, 317.7 µs</title></rect>
+<rect x="608.76" y="162" width="2.18" height="11" fill="#c9c8c2"><title>worker 5: barrier wait, 3.8 µs</title></rect>
+<rect x="611.72" y="162" width="122.93" height="11" fill="#2a78d6"><title>worker 5: down, 170.5 µs</title></rect>
+<rect x="735.63" y="162" width="0.40" height="11" fill="#c9c8c2"><title>worker 5: barrier wait, 3.1 µs</title></rect>
+<rect x="74.19" y="175" width="19.99" height="11" fill="#2a78d6"><title>worker 6: QKV, 28.4 µs</title></rect>
+<rect x="94.96" y="175" width="20.17" height="11" fill="#2a78d6"><title>worker 6: QKV, 28.7 µs</title></rect>
+<rect x="115.92" y="175" width="9.79" height="11" fill="#2a78d6"><title>worker 6: QKV, 14.3 µs</title></rect>
+<rect x="126.49" y="175" width="0.40" height="11" fill="#c9c8c2"><title>worker 6: barrier wait, 1.0 µs</title></rect>
+<rect x="127.42" y="175" width="54.67" height="11" fill="#eb6834"><title>worker 6: attention, 76.3 µs</title></rect>
+<rect x="182.88" y="175" width="55.05" height="11" fill="#eb6834"><title>worker 6: attention, 76.8 µs</title></rect>
+<rect x="238.71" y="175" width="1.81" height="11" fill="#c9c8c2"><title>worker 6: barrier wait, 3.3 µs</title></rect>
+<rect x="241.49" y="175" width="47.63" height="11" fill="#eb6834"><title>worker 6: attention, 66.6 µs</title></rect>
+<rect x="289.91" y="175" width="48.00" height="11" fill="#eb6834"><title>worker 6: attention, 67.1 µs</title></rect>
+<rect x="338.69" y="175" width="2.55" height="11" fill="#c9c8c2"><title>worker 6: barrier wait, 4.4 µs</title></rect>
+<rect x="342.03" y="175" width="32.79" height="11" fill="#2a78d6"><title>worker 6: Wo, 46.1 µs</title></rect>
+<rect x="375.60" y="175" width="0.40" height="11" fill="#c9c8c2"><title>worker 6: barrier wait, 1.0 µs</title></rect>
+<rect x="376.53" y="175" width="231.07" height="11" fill="#2a78d6"><title>worker 6: gate/up, 319.7 µs</title></rect>
+<rect x="609.68" y="175" width="1.25" height="11" fill="#c9c8c2"><title>worker 6: barrier wait, 2.6 µs</title></rect>
+<rect x="611.72" y="175" width="122.93" height="11" fill="#2a78d6"><title>worker 6: down, 170.5 µs</title></rect>
+<rect x="735.63" y="175" width="0.40" height="11" fill="#c9c8c2"><title>worker 6: barrier wait, 3.1 µs</title></rect>
+<rect x="74.00" y="188" width="0.40" height="11" fill="#c9c8c2"><title>worker 7: barrier wait, 2.0 µs</title></rect>
+<rect x="74.19" y="188" width="19.99" height="11" fill="#2a78d6"><title>worker 7: QKV, 28.4 µs</title></rect>
+<rect x="94.96" y="188" width="19.99" height="11" fill="#2a78d6"><title>worker 7: QKV, 28.4 µs</title></rect>
+<rect x="115.73" y="188" width="9.79" height="11" fill="#2a78d6"><title>worker 7: QKV, 14.3 µs</title></rect>
+<rect x="126.31" y="188" width="0.40" height="11" fill="#c9c8c2"><title>worker 7: barrier wait, 1.0 µs</title></rect>
+<rect x="127.42" y="188" width="54.30" height="11" fill="#eb6834"><title>worker 7: attention, 75.8 µs</title></rect>
+<rect x="182.69" y="188" width="54.12" height="11" fill="#eb6834"><title>worker 7: attention, 75.5 µs</title></rect>
+<rect x="237.78" y="188" width="2.92" height="11" fill="#c9c8c2"><title>worker 7: barrier wait, 4.9 µs</title></rect>
+<rect x="241.49" y="188" width="45.59" height="11" fill="#eb6834"><title>worker 7: attention, 63.7 µs</title></rect>
+<rect x="287.87" y="188" width="46.88" height="11" fill="#eb6834"><title>worker 7: attention, 65.5 µs</title></rect>
+<rect x="335.54" y="188" width="5.71" height="11" fill="#c9c8c2"><title>worker 7: barrier wait, 8.7 µs</title></rect>
+<rect x="342.21" y="188" width="32.23" height="11" fill="#2a78d6"><title>worker 7: Wo, 45.3 µs</title></rect>
+<rect x="375.23" y="188" width="0.51" height="11" fill="#c9c8c2"><title>worker 7: barrier wait, 1.5 µs</title></rect>
+<rect x="376.53" y="188" width="229.77" height="11" fill="#2a78d6"><title>worker 7: gate/up, 318.0 µs</title></rect>
+<rect x="608.94" y="188" width="2.00" height="11" fill="#c9c8c2"><title>worker 7: barrier wait, 3.6 µs</title></rect>
+<rect x="611.72" y="188" width="122.75" height="11" fill="#2a78d6"><title>worker 7: down, 170.2 µs</title></rect>
+<rect x="735.63" y="188" width="0.40" height="11" fill="#c9c8c2"><title>worker 7: barrier wait, 3.1 µs</title></rect>
+<rect x="74.00" y="201" width="0.40" height="11" fill="#c9c8c2"><title>worker 8: barrier wait, 2.0 µs</title></rect>
+<rect x="74.19" y="201" width="20.17" height="11" fill="#2a78d6"><title>worker 8: QKV, 28.7 µs</title></rect>
+<rect x="95.15" y="201" width="20.17" height="11" fill="#2a78d6"><title>worker 8: QKV, 28.7 µs</title></rect>
+<rect x="116.11" y="201" width="10.53" height="11" fill="#c9c8c2"><title>worker 8: barrier wait, 15.4 µs</title></rect>
+<rect x="127.42" y="201" width="55.05" height="11" fill="#eb6834"><title>worker 8: attention, 76.8 µs</title></rect>
+<rect x="183.25" y="201" width="54.30" height="11" fill="#eb6834"><title>worker 8: attention, 75.8 µs</title></rect>
+<rect x="238.53" y="201" width="2.18" height="11" fill="#c9c8c2"><title>worker 8: barrier wait, 3.8 µs</title></rect>
+<rect x="241.49" y="201" width="49.85" height="11" fill="#eb6834"><title>worker 8: attention, 69.6 µs</title></rect>
+<rect x="292.13" y="201" width="48.37" height="11" fill="#eb6834"><title>worker 8: attention, 67.6 µs</title></rect>
+<rect x="341.29" y="201" width="0.40" height="11" fill="#c9c8c2"><title>worker 8: barrier wait, 1.0 µs</title></rect>
+<rect x="342.21" y="201" width="31.86" height="11" fill="#2a78d6"><title>worker 8: Wo, 44.8 µs</title></rect>
+<rect x="375.60" y="201" width="0.40" height="11" fill="#c9c8c2"><title>worker 8: barrier wait, 1.3 µs</title></rect>
+<rect x="376.71" y="201" width="232.00" height="11" fill="#2a78d6"><title>worker 8: gate/up, 321.0 µs</title></rect>
+<rect x="610.05" y="201" width="1.07" height="11" fill="#c9c8c2"><title>worker 8: barrier wait, 2.3 µs</title></rect>
+<rect x="611.91" y="201" width="122.93" height="11" fill="#2a78d6"><title>worker 8: down, 170.5 µs</title></rect>
+<rect x="74.19" y="214" width="19.99" height="11" fill="#2a78d6"><title>worker 9: QKV, 28.4 µs</title></rect>
+<rect x="94.96" y="214" width="19.99" height="11" fill="#2a78d6"><title>worker 9: QKV, 28.4 µs</title></rect>
+<rect x="115.92" y="214" width="10.71" height="11" fill="#c9c8c2"><title>worker 9: barrier wait, 15.6 µs</title></rect>
+<rect x="127.42" y="214" width="53.19" height="11" fill="#eb6834"><title>worker 9: attention, 74.2 µs</title></rect>
+<rect x="181.58" y="214" width="53.75" height="11" fill="#eb6834"><title>worker 9: attention, 75.0 µs</title></rect>
+<rect x="236.11" y="214" width="4.59" height="11" fill="#c9c8c2"><title>worker 9: barrier wait, 7.2 µs</title></rect>
+<rect x="241.49" y="214" width="45.77" height="11" fill="#eb6834"><title>worker 9: attention, 64.0 µs</title></rect>
+<rect x="288.05" y="214" width="47.63" height="11" fill="#eb6834"><title>worker 9: attention, 66.6 µs</title></rect>
+<rect x="336.46" y="214" width="4.78" height="11" fill="#c9c8c2"><title>worker 9: barrier wait, 7.4 µs</title></rect>
+<rect x="342.03" y="214" width="32.60" height="11" fill="#2a78d6"><title>worker 9: Wo, 45.8 µs</title></rect>
+<rect x="375.60" y="214" width="0.40" height="11" fill="#c9c8c2"><title>worker 9: barrier wait, 1.0 µs</title></rect>
+<rect x="376.53" y="214" width="229.77" height="11" fill="#2a78d6"><title>worker 9: gate/up, 318.0 µs</title></rect>
+<rect x="609.13" y="214" width="1.81" height="11" fill="#c9c8c2"><title>worker 9: barrier wait, 3.3 µs</title></rect>
+<rect x="611.72" y="214" width="122.93" height="11" fill="#2a78d6"><title>worker 9: down, 170.5 µs</title></rect>
+<rect x="735.81" y="214" width="0.40" height="11" fill="#c9c8c2"><title>worker 9: barrier wait, 2.8 µs</title></rect>
+<rect x="74.19" y="227" width="19.99" height="11" fill="#2a78d6"><title>worker 10: QKV, 28.4 µs</title></rect>
+<rect x="94.96" y="227" width="19.99" height="11" fill="#2a78d6"><title>worker 10: QKV, 28.4 µs</title></rect>
+<rect x="115.92" y="227" width="10.53" height="11" fill="#c9c8c2"><title>worker 10: barrier wait, 15.4 µs</title></rect>
+<rect x="127.42" y="227" width="55.05" height="11" fill="#eb6834"><title>worker 10: attention, 76.8 µs</title></rect>
+<rect x="183.44" y="227" width="54.49" height="11" fill="#eb6834"><title>worker 10: attention, 76.0 µs</title></rect>
+<rect x="238.71" y="227" width="2.00" height="11" fill="#c9c8c2"><title>worker 10: barrier wait, 3.6 µs</title></rect>
+<rect x="241.49" y="227" width="47.44" height="11" fill="#eb6834"><title>worker 10: attention, 66.3 µs</title></rect>
+<rect x="289.91" y="227" width="46.51" height="11" fill="#eb6834"><title>worker 10: attention, 65.0 µs</title></rect>
+<rect x="337.20" y="227" width="4.04" height="11" fill="#c9c8c2"><title>worker 10: barrier wait, 6.4 µs</title></rect>
+<rect x="342.03" y="227" width="32.42" height="11" fill="#2a78d6"><title>worker 10: Wo, 45.6 µs</title></rect>
+<rect x="375.41" y="227" width="0.40" height="11" fill="#c9c8c2"><title>worker 10: barrier wait, 1.3 µs</title></rect>
+<rect x="376.53" y="227" width="231.63" height="11" fill="#2a78d6"><title>worker 10: gate/up, 320.5 µs</title></rect>
+<rect x="610.24" y="227" width="0.70" height="11" fill="#c9c8c2"><title>worker 10: barrier wait, 1.8 µs</title></rect>
+<rect x="611.72" y="227" width="123.49" height="11" fill="#2a78d6"><title>worker 10: down, 171.3 µs</title></rect>
+<rect x="74.00" y="240" width="0.40" height="11" fill="#c9c8c2"><title>worker 11: barrier wait, 2.8 µs</title></rect>
+<rect x="74.37" y="240" width="19.80" height="11" fill="#2a78d6"><title>worker 11: QKV, 28.2 µs</title></rect>
+<rect x="95.15" y="240" width="19.99" height="11" fill="#2a78d6"><title>worker 11: QKV, 28.4 µs</title></rect>
+<rect x="115.92" y="240" width="10.71" height="11" fill="#c9c8c2"><title>worker 11: barrier wait, 15.6 µs</title></rect>
+<rect x="127.42" y="240" width="54.30" height="11" fill="#eb6834"><title>worker 11: attention, 75.8 µs</title></rect>
+<rect x="182.51" y="240" width="53.75" height="11" fill="#eb6834"><title>worker 11: attention, 75.0 µs</title></rect>
+<rect x="237.04" y="240" width="3.85" height="11" fill="#c9c8c2"><title>worker 11: barrier wait, 6.1 µs</title></rect>
+<rect x="241.68" y="240" width="48.92" height="11" fill="#eb6834"><title>worker 11: attention, 68.4 µs</title></rect>
+<rect x="291.58" y="240" width="46.51" height="11" fill="#eb6834"><title>worker 11: attention, 65.0 µs</title></rect>
+<rect x="339.06" y="240" width="2.37" height="11" fill="#c9c8c2"><title>worker 11: barrier wait, 4.1 µs</title></rect>
+<rect x="342.21" y="240" width="32.05" height="11" fill="#2a78d6"><title>worker 11: Wo, 45.1 µs</title></rect>
+<rect x="375.23" y="240" width="0.70" height="11" fill="#c9c8c2"><title>worker 11: barrier wait, 1.8 µs</title></rect>
+<rect x="376.71" y="240" width="231.63" height="11" fill="#2a78d6"><title>worker 11: gate/up, 320.5 µs</title></rect>
+<rect x="609.50" y="240" width="1.44" height="11" fill="#c9c8c2"><title>worker 11: barrier wait, 2.8 µs</title></rect>
+<rect x="611.72" y="240" width="123.12" height="11" fill="#2a78d6"><title>worker 11: down, 170.8 µs</title></rect>
+<rect x="74.00" y="253" width="20.17" height="11" fill="#2a78d6"><title>worker 12: QKV, 28.7 µs</title></rect>
+<rect x="94.96" y="253" width="19.99" height="11" fill="#2a78d6"><title>worker 12: QKV, 28.4 µs</title></rect>
+<rect x="115.73" y="253" width="10.71" height="11" fill="#c9c8c2"><title>worker 12: barrier wait, 15.6 µs</title></rect>
+<rect x="127.42" y="253" width="54.67" height="11" fill="#eb6834"><title>worker 12: attention, 76.3 µs</title></rect>
+<rect x="182.88" y="253" width="54.67" height="11" fill="#eb6834"><title>worker 12: attention, 76.3 µs</title></rect>
+<rect x="238.53" y="253" width="2.18" height="11" fill="#c9c8c2"><title>worker 12: barrier wait, 3.8 µs</title></rect>
+<rect x="241.49" y="253" width="49.48" height="11" fill="#eb6834"><title>worker 12: attention, 69.1 µs</title></rect>
+<rect x="291.76" y="253" width="47.26" height="11" fill="#eb6834"><title>worker 12: attention, 66.0 µs</title></rect>
+<rect x="339.80" y="253" width="1.44" height="11" fill="#c9c8c2"><title>worker 12: barrier wait, 2.8 µs</title></rect>
+<rect x="342.03" y="253" width="32.60" height="11" fill="#2a78d6"><title>worker 12: Wo, 45.8 µs</title></rect>
+<rect x="375.41" y="253" width="0.40" height="11" fill="#c9c8c2"><title>worker 12: barrier wait, 1.3 µs</title></rect>
+<rect x="376.53" y="253" width="230.70" height="11" fill="#2a78d6"><title>worker 12: gate/up, 319.2 µs</title></rect>
+<rect x="609.87" y="253" width="1.07" height="11" fill="#c9c8c2"><title>worker 12: barrier wait, 2.3 µs</title></rect>
+<rect x="611.72" y="253" width="122.93" height="11" fill="#2a78d6"><title>worker 12: down, 170.5 µs</title></rect>
+<rect x="74.00" y="266" width="0.40" height="11" fill="#c9c8c2"><title>worker 13: barrier wait, 1.5 µs</title></rect>
+<rect x="74.37" y="266" width="19.99" height="11" fill="#2a78d6"><title>worker 13: QKV, 28.4 µs</title></rect>
+<rect x="95.15" y="266" width="19.99" height="11" fill="#2a78d6"><title>worker 13: QKV, 28.4 µs</title></rect>
+<rect x="115.92" y="266" width="10.71" height="11" fill="#c9c8c2"><title>worker 13: barrier wait, 15.6 µs</title></rect>
+<rect x="127.61" y="266" width="53.56" height="11" fill="#eb6834"><title>worker 13: attention, 74.8 µs</title></rect>
+<rect x="182.14" y="266" width="54.12" height="11" fill="#eb6834"><title>worker 13: attention, 75.5 µs</title></rect>
+<rect x="237.04" y="266" width="3.67" height="11" fill="#c9c8c2"><title>worker 13: barrier wait, 5.9 µs</title></rect>
+<rect x="241.68" y="266" width="47.44" height="11" fill="#eb6834"><title>worker 13: attention, 66.3 µs</title></rect>
+<rect x="289.91" y="266" width="48.37" height="11" fill="#eb6834"><title>worker 13: attention, 67.6 µs</title></rect>
+<rect x="339.25" y="266" width="2.18" height="11" fill="#c9c8c2"><title>worker 13: barrier wait, 3.8 µs</title></rect>
+<rect x="342.21" y="266" width="32.23" height="11" fill="#2a78d6"><title>worker 13: Wo, 45.3 µs</title></rect>
+<rect x="375.41" y="266" width="0.51" height="11" fill="#c9c8c2"><title>worker 13: barrier wait, 1.5 µs</title></rect>
+<rect x="376.71" y="266" width="231.26" height="11" fill="#2a78d6"><title>worker 13: gate/up, 320.0 µs</title></rect>
+<rect x="608.94" y="266" width="2.00" height="11" fill="#c9c8c2"><title>worker 13: barrier wait, 3.6 µs</title></rect>
+<rect x="611.91" y="266" width="122.75" height="11" fill="#2a78d6"><title>worker 13: down, 170.2 µs</title></rect>
+<rect x="74.00" y="279" width="20.17" height="11" fill="#2a78d6"><title>worker 14: QKV, 28.7 µs</title></rect>
+<rect x="94.96" y="279" width="19.99" height="11" fill="#2a78d6"><title>worker 14: QKV, 28.4 µs</title></rect>
+<rect x="115.92" y="279" width="10.53" height="11" fill="#c9c8c2"><title>worker 14: barrier wait, 15.4 µs</title></rect>
+<rect x="127.23" y="279" width="55.23" height="11" fill="#eb6834"><title>worker 14: attention, 77.1 µs</title></rect>
+<rect x="183.25" y="279" width="55.23" height="11" fill="#eb6834"><title>worker 14: attention, 77.1 µs</title></rect>
+<rect x="239.27" y="279" width="1.25" height="11" fill="#c9c8c2"><title>worker 14: barrier wait, 2.6 µs</title></rect>
+<rect x="241.31" y="279" width="47.63" height="11" fill="#eb6834"><title>worker 14: attention, 66.6 µs</title></rect>
+<rect x="289.91" y="279" width="47.44" height="11" fill="#eb6834"><title>worker 14: attention, 66.3 µs</title></rect>
+<rect x="338.13" y="279" width="3.11" height="11" fill="#c9c8c2"><title>worker 14: barrier wait, 5.1 µs</title></rect>
+<rect x="342.03" y="279" width="31.49" height="11" fill="#2a78d6"><title>worker 14: Wo, 44.3 µs</title></rect>
+<rect x="375.23" y="279" width="0.51" height="11" fill="#c9c8c2"><title>worker 14: barrier wait, 1.5 µs</title></rect>
+<rect x="376.53" y="279" width="232.00" height="11" fill="#2a78d6"><title>worker 14: gate/up, 321.0 µs</title></rect>
+<rect x="610.61" y="279" width="0.40" height="11" fill="#c9c8c2"><title>worker 14: barrier wait, 1.3 µs</title></rect>
+<rect x="611.72" y="279" width="122.93" height="11" fill="#2a78d6"><title>worker 14: down, 170.5 µs</title></rect>
+<rect x="735.63" y="279" width="0.40" height="11" fill="#c9c8c2"><title>worker 14: barrier wait, 3.1 µs</title></rect>
+<rect x="74.00" y="292" width="0.40" height="11" fill="#c9c8c2"><title>worker 15: barrier wait, 2.8 µs</title></rect>
+<rect x="74.19" y="292" width="20.17" height="11" fill="#2a78d6"><title>worker 15: QKV, 28.7 µs</title></rect>
+<rect x="95.15" y="292" width="19.99" height="11" fill="#2a78d6"><title>worker 15: QKV, 28.4 µs</title></rect>
+<rect x="115.92" y="292" width="10.71" height="11" fill="#c9c8c2"><title>worker 15: barrier wait, 15.6 µs</title></rect>
+<rect x="127.61" y="292" width="53.56" height="11" fill="#eb6834"><title>worker 15: attention, 74.8 µs</title></rect>
+<rect x="181.95" y="292" width="54.30" height="11" fill="#eb6834"><title>worker 15: attention, 75.8 µs</title></rect>
+<rect x="237.23" y="292" width="3.67" height="11" fill="#c9c8c2"><title>worker 15: barrier wait, 5.9 µs</title></rect>
+<rect x="241.68" y="292" width="45.59" height="11" fill="#eb6834"><title>worker 15: attention, 63.7 µs</title></rect>
+<rect x="288.05" y="292" width="45.96" height="11" fill="#eb6834"><title>worker 15: attention, 64.3 µs</title></rect>
+<rect x="334.79" y="292" width="6.63" height="11" fill="#c9c8c2"><title>worker 15: barrier wait, 10.0 µs</title></rect>
+<rect x="342.21" y="292" width="32.23" height="11" fill="#2a78d6"><title>worker 15: Wo, 45.3 µs</title></rect>
+<rect x="375.41" y="292" width="0.51" height="11" fill="#c9c8c2"><title>worker 15: barrier wait, 1.5 µs</title></rect>
+<rect x="376.71" y="292" width="231.81" height="11" fill="#2a78d6"><title>worker 15: gate/up, 320.8 µs</title></rect>
+<rect x="609.31" y="292" width="1.63" height="11" fill="#c9c8c2"><title>worker 15: barrier wait, 3.1 µs</title></rect>
+<rect x="611.72" y="292" width="122.93" height="11" fill="#2a78d6"><title>worker 15: down, 170.5 µs</title></rect>
+<rect x="735.63" y="292" width="0.40" height="11" fill="#c9c8c2"><title>worker 15: barrier wait, 3.1 µs</title></rect>
+<rect x="74.00" y="305" width="0.40" height="11" fill="#c9c8c2"><title>worker 16: barrier wait, 2.6 µs</title></rect>
+<rect x="74.37" y="305" width="20.17" height="11" fill="#2a78d6"><title>worker 16: QKV, 28.7 µs</title></rect>
+<rect x="95.33" y="305" width="19.99" height="11" fill="#2a78d6"><title>worker 16: QKV, 28.4 µs</title></rect>
+<rect x="116.29" y="305" width="10.34" height="11" fill="#c9c8c2"><title>worker 16: barrier wait, 15.1 µs</title></rect>
+<rect x="127.61" y="305" width="55.60" height="11" fill="#eb6834"><title>worker 16: attention, 77.6 µs</title></rect>
+<rect x="184.18" y="305" width="53.38" height="11" fill="#eb6834"><title>worker 16: attention, 74.5 µs</title></rect>
+<rect x="238.34" y="305" width="2.55" height="11" fill="#c9c8c2"><title>worker 16: barrier wait, 4.4 µs</title></rect>
+<rect x="241.68" y="305" width="48.00" height="11" fill="#eb6834"><title>worker 16: attention, 67.1 µs</title></rect>
+<rect x="290.46" y="305" width="48.74" height="11" fill="#eb6834"><title>worker 16: attention, 68.1 µs</title></rect>
+<rect x="339.99" y="305" width="1.44" height="11" fill="#c9c8c2"><title>worker 16: barrier wait, 2.8 µs</title></rect>
+<rect x="342.40" y="305" width="32.42" height="11" fill="#2a78d6"><title>worker 16: Wo, 45.6 µs</title></rect>
+<rect x="375.79" y="305" width="0.40" height="11" fill="#c9c8c2"><title>worker 16: barrier wait, 1.0 µs</title></rect>
+<rect x="376.71" y="305" width="231.07" height="11" fill="#2a78d6"><title>worker 16: gate/up, 319.7 µs</title></rect>
+<rect x="610.98" y="305" width="0.40" height="11" fill="#c9c8c2"><title>worker 16: barrier wait, 1.0 µs</title></rect>
+<rect x="611.91" y="305" width="122.56" height="11" fill="#2a78d6"><title>worker 16: down, 170.0 µs</title></rect>
+<rect x="735.81" y="305" width="0.40" height="11" fill="#c9c8c2"><title>worker 16: barrier wait, 3.1 µs</title></rect>
+<rect x="74.00" y="318" width="0.40" height="11" fill="#c9c8c2"><title>worker 17: barrier wait, 3.3 µs</title></rect>
+<rect x="74.37" y="318" width="19.99" height="11" fill="#2a78d6"><title>worker 17: QKV, 28.4 µs</title></rect>
+<rect x="95.15" y="318" width="19.99" height="11" fill="#2a78d6"><title>worker 17: QKV, 28.4 µs</title></rect>
+<rect x="115.92" y="318" width="10.71" height="11" fill="#c9c8c2"><title>worker 17: barrier wait, 15.6 µs</title></rect>
+<rect x="127.61" y="318" width="54.49" height="11" fill="#eb6834"><title>worker 17: attention, 76.0 µs</title></rect>
+<rect x="182.88" y="318" width="53.75" height="11" fill="#eb6834"><title>worker 17: attention, 75.0 µs</title></rect>
+<rect x="237.41" y="318" width="3.30" height="11" fill="#c9c8c2"><title>worker 17: barrier wait, 5.4 µs</title></rect>
+<rect x="241.68" y="318" width="46.33" height="11" fill="#eb6834"><title>worker 17: attention, 64.8 µs</title></rect>
+<rect x="288.98" y="318" width="45.03" height="11" fill="#eb6834"><title>worker 17: attention, 63.0 µs</title></rect>
+<rect x="334.79" y="318" width="6.63" height="11" fill="#c9c8c2"><title>worker 17: barrier wait, 10.0 µs</title></rect>
+<rect x="342.21" y="318" width="32.42" height="11" fill="#2a78d6"><title>worker 17: Wo, 45.6 µs</title></rect>
+<rect x="375.60" y="318" width="0.40" height="11" fill="#c9c8c2"><title>worker 17: barrier wait, 1.3 µs</title></rect>
+<rect x="376.71" y="318" width="231.44" height="11" fill="#2a78d6"><title>worker 17: gate/up, 320.3 µs</title></rect>
+<rect x="609.13" y="318" width="2.00" height="11" fill="#c9c8c2"><title>worker 17: barrier wait, 3.6 µs</title></rect>
+<rect x="611.91" y="318" width="122.75" height="11" fill="#2a78d6"><title>worker 17: down, 170.2 µs</title></rect>
+<rect x="735.63" y="318" width="0.40" height="11" fill="#c9c8c2"><title>worker 17: barrier wait, 3.3 µs</title></rect>
+<rect x="74.00" y="331" width="0.40" height="11" fill="#c9c8c2"><title>worker 18: barrier wait, 2.8 µs</title></rect>
+<rect x="74.19" y="331" width="20.17" height="11" fill="#2a78d6"><title>worker 18: QKV, 28.7 µs</title></rect>
+<rect x="95.15" y="331" width="20.17" height="11" fill="#2a78d6"><title>worker 18: QKV, 28.7 µs</title></rect>
+<rect x="116.11" y="331" width="10.71" height="11" fill="#c9c8c2"><title>worker 18: barrier wait, 15.6 µs</title></rect>
+<rect x="127.61" y="331" width="54.86" height="11" fill="#eb6834"><title>worker 18: attention, 76.5 µs</title></rect>
+<rect x="183.25" y="331" width="55.79" height="11" fill="#eb6834"><title>worker 18: attention, 77.8 µs</title></rect>
+<rect x="240.01" y="331" width="0.70" height="11" fill="#c9c8c2"><title>worker 18: barrier wait, 1.8 µs</title></rect>
+<rect x="241.68" y="331" width="50.04" height="11" fill="#eb6834"><title>worker 18: attention, 69.9 µs</title></rect>
+<rect x="292.69" y="331" width="45.96" height="11" fill="#eb6834"><title>worker 18: attention, 64.3 µs</title></rect>
+<rect x="339.62" y="331" width="1.81" height="11" fill="#c9c8c2"><title>worker 18: barrier wait, 3.3 µs</title></rect>
+<rect x="342.21" y="331" width="32.79" height="11" fill="#2a78d6"><title>worker 18: Wo, 46.1 µs</title></rect>
+<rect x="375.79" y="331" width="0.40" height="11" fill="#c9c8c2"><title>worker 18: barrier wait, 1.0 µs</title></rect>
+<rect x="376.71" y="331" width="231.63" height="11" fill="#2a78d6"><title>worker 18: gate/up, 320.5 µs</title></rect>
+<rect x="609.87" y="331" width="1.25" height="11" fill="#c9c8c2"><title>worker 18: barrier wait, 2.6 µs</title></rect>
+<rect x="611.91" y="331" width="123.49" height="11" fill="#2a78d6"><title>worker 18: down, 171.3 µs</title></rect>
+<rect x="74.00" y="344" width="0.40" height="11" fill="#c9c8c2"><title>worker 19: barrier wait, 3.1 µs</title></rect>
+<rect x="74.19" y="344" width="20.17" height="11" fill="#2a78d6"><title>worker 19: QKV, 28.7 µs</title></rect>
+<rect x="95.15" y="344" width="19.99" height="11" fill="#2a78d6"><title>worker 19: QKV, 28.4 µs</title></rect>
+<rect x="115.92" y="344" width="10.71" height="11" fill="#c9c8c2"><title>worker 19: barrier wait, 15.6 µs</title></rect>
+<rect x="127.42" y="344" width="53.75" height="11" fill="#eb6834"><title>worker 19: attention, 75.0 µs</title></rect>
+<rect x="182.14" y="344" width="54.12" height="11" fill="#eb6834"><title>worker 19: attention, 75.5 µs</title></rect>
+<rect x="237.04" y="344" width="3.67" height="11" fill="#c9c8c2"><title>worker 19: barrier wait, 5.9 µs</title></rect>
+<rect x="241.68" y="344" width="50.41" height="11" fill="#eb6834"><title>worker 19: attention, 70.4 µs</title></rect>
+<rect x="292.87" y="344" width="46.51" height="11" fill="#eb6834"><title>worker 19: attention, 65.0 µs</title></rect>
+<rect x="340.17" y="344" width="1.25" height="11" fill="#c9c8c2"><title>worker 19: barrier wait, 2.6 µs</title></rect>
+<rect x="342.21" y="344" width="31.86" height="11" fill="#2a78d6"><title>worker 19: Wo, 44.8 µs</title></rect>
+<rect x="375.60" y="344" width="0.40" height="11" fill="#c9c8c2"><title>worker 19: barrier wait, 1.0 µs</title></rect>
+<rect x="376.71" y="344" width="231.44" height="11" fill="#2a78d6"><title>worker 19: gate/up, 320.3 µs</title></rect>
+<rect x="608.94" y="344" width="2.00" height="11" fill="#c9c8c2"><title>worker 19: barrier wait, 3.6 µs</title></rect>
+<rect x="611.91" y="344" width="122.75" height="11" fill="#2a78d6"><title>worker 19: down, 170.2 µs</title></rect>
+<rect x="735.63" y="344" width="0.40" height="11" fill="#c9c8c2"><title>worker 19: barrier wait, 3.1 µs</title></rect>
+<text x="74.0" y="372.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="middle" font-weight="400">0 µs</text>
+<text x="218.9" y="372.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="middle" font-weight="400">200 µs</text>
+<text x="363.8" y="372.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="middle" font-weight="400">400 µs</text>
+<text x="508.7" y="372.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="middle" font-weight="400">600 µs</text>
+<text x="653.6" y="372.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="middle" font-weight="400">800 µs</text>
+</svg>

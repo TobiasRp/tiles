@@ -1,4 +1,9 @@
-"""Isolated CUDA operator tests using the decoder's actual device routines."""
+"""Isolated CUDA operator tests using the decoder's actual device routines.
+
+Each case runs one fused task (or, for attention, every chunk of every head
+followed by the output projection) on a single block. Expected values come
+from PyTorch with the same BF16 rounding boundaries as eager inference.
+"""
 
 import argparse
 import json
@@ -12,27 +17,47 @@ os.environ.setdefault("TORCH_DISABLE_NATIVE_JIT", "1")
 import torch
 import torch.nn.functional as F
 
+SENTINEL = -123.0
 
-def fixtures() -> tuple[list[dict], list[torch.Tensor], list[torch.Tensor | None]]:
+
+def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
+    """Cases as (case, checked output buffer, expected values, optional extra check)."""
     torch.manual_seed(237)
     torch.backends.cuda.preferred_blas_library("cublaslt")
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (False, False)
-    cases, outputs, probabilities = [], [], []
+    cases: list[tuple[dict, str, torch.Tensor, dict | None]] = []
 
     def random(*shape, dtype):
         return torch.randn(shape, device="cuda").to(dtype)
 
-    def add(case, expected, probs=None):
-        cases.append(case)
-        outputs.append(expected.float().flatten().cpu())
-        probabilities.append(None if probs is None else probs.float().flatten().cpu())
-
     def raw(value):
         return value.float().flatten().cpu().tolist()
 
+    def norm(x, scale):
+        """Eager RMSNorm: FP32 statistic, normalized value rounded before the scale."""
+        normalized = x.float() * torch.rsqrt(x.float().square().mean() + 1e-5)
+        return normalized.to(x.dtype) * scale
+
+    def rope(head, position, frequencies):
+        angle = position * frequencies
+        c, s = angle.cos().to(head.dtype), angle.sin().to(head.dtype)
+        first, second = head.chunk(2)
+        return torch.cat((first * c - second * s, second * c + first * s))
+
+    def owned(size, begin, end, values, dtype):
+        """Values in [begin,end) and the sentinel elsewhere."""
+        result = torch.full((size,), SENTINEL, device="cuda", dtype=dtype)
+        result[begin:end] = values[begin:end]
+        return result
+
+    def add(case, buffer, expected, extra=None):
+        cases.append((case, buffer, expected.float().flatten().cpu(), extra))
+
     for dtype in (torch.float32, torch.bfloat16):
         label = "bfloat16" if dtype == torch.bfloat16 else "float32"
+
+        # Down projection: rows of W @ product plus the residual, with row and K tails.
         for rows, width in (
             (1, 1),
             (7, 15),
@@ -42,162 +67,126 @@ def fixtures() -> tuple[list[dict], list[torch.Tensor], list[torch.Tensor | None
             (35, 2048),
             (19, 8192),
         ):
-            x, w, residual = (
+            product, w, residual = (
                 random(width, dtype=dtype),
                 random(rows, width, dtype=dtype),
                 random(rows, dtype=dtype),
             )
-            for use_residual in (False, True):
-                projected = F.linear(x, w)
-                expected = projected + residual if use_residual else projected
+            for with_residual in (False, True):
+                r = residual if with_residual else torch.zeros_like(residual)
                 begin, end = (1, rows - 1) if rows > 2 else (0, rows)
-                result = torch.full((rows,), -123.0, device="cuda", dtype=dtype)
-                result[begin:end] = expected[begin:end]
                 add(
                     {
-                        "op": "gemv",
+                        "op": "down",
                         "dtype": label,
-                        "width": width,
-                        "rows": rows,
-                        "input": raw(x),
-                        "weights": raw(w),
-                        "aux": raw(residual),
-                        "residual": use_residual,
+                        "hidden": rows,
+                        "intermediate": width,
+                        "product": raw(product),
+                        "Wdown": raw(w),
+                        "r": raw(r),
                         "begin": begin,
                         "end": end,
                     },
-                    result,
+                    "y",
+                    owned(rows, begin, end, F.linear(product, w) + r, dtype),
                 )
+
+        # Logits: whole and partial vocabulary ranges.
         x, w = random(93, dtype=dtype), random(53, 93, dtype=dtype)
         for begin, end in ((0, 53), (1, 52)):
-            # A worker owns only its vocabulary rows; the rest keep the sentinel.
-            expected = torch.full((53,), -123.0, device="cuda")
+            expected = torch.full((53,), SENTINEL, device="cuda")
             expected[begin:end] = F.linear(x, w).float()[begin:end]
             add(
                 {
                     "op": "logits",
                     "dtype": label,
-                    "width": 93,
+                    "hidden": 93,
                     "rows": 53,
-                    "input": raw(x),
+                    "x": raw(x),
                     "weights": raw(w),
                     "begin": begin,
                     "end": end,
                 },
+                "logits",
                 expected,
             )
-        if dtype == torch.bfloat16:
-            # Both additions land exactly on ties-to-even boundaries.
-            add(
-                {
-                    "op": "gemv",
-                    "dtype": label,
-                    "width": 2,
-                    "rows": 1,
-                    "input": [1.0, 1.0],
-                    "weights": [1.0, 1 / 256],
-                    "aux": [1 / 256],
-                    "residual": True,
-                    "exact": True,
-                },
-                torch.tensor([1.0]),
-            )
-        # Expose round-before-residual with a non-BF16 projection accumulator.
+
+        # Final norm and embedding rows, whole and partial.
         for width in (10, 64, 333, 2048):
-            x, w, up = (
-                random(width, dtype=dtype),
-                random(width, dtype=dtype),
-                random(width, dtype=dtype),
-            )
-            normalized = x.float() * torch.rsqrt(x.float().square().mean() + 1e-5)
-            expected = normalized.to(dtype) * w
-            for op in ("rms_norm", "final_norm"):
+            x, w = random(width, dtype=dtype), random(width, dtype=dtype)
+            for begin, end in ((0, width), (1, width - 1)):
+                base = {"dtype": label, "hidden": width, "begin": begin, "end": end}
                 add(
-                    {
-                        "op": op,
-                        "dtype": label,
-                        "width": width,
-                        "input": raw(x),
-                        "weights": raw(w),
-                    },
-                    expected,
+                    {**base, "op": "final_norm", "x": raw(x), "weights": raw(w)},
+                    "y",
+                    owned(width, begin, end, norm(x, w), dtype),
                 )
-            # The final norm reduces the whole vector but writes only its rows.
-            partial = torch.full((width,), -123.0, device="cuda", dtype=dtype)
-            partial[1 : width - 1] = expected[1 : width - 1]
-            add(
-                {
-                    "op": "final_norm",
-                    "dtype": label,
-                    "width": width,
-                    "input": raw(x),
-                    "weights": raw(w),
-                    "begin": 1,
-                    "end": width - 1,
-                },
-                partial,
-            )
-            add(
-                {
-                    "op": "silu",
-                    "dtype": label,
-                    "width": width,
-                    "input": raw(x),
-                    "aux": raw(up),
-                },
-                F.silu(x) * up,
-            )
-            add(
-                {"op": "embedding", "dtype": label, "width": width, "weights": raw(w)},
-                w,
-            )
-            partial = torch.full((width,), -123.0, device="cuda", dtype=dtype)
-            partial[1 : width - 1] = w[1 : width - 1]
-            add(
-                {
-                    "op": "embedding",
-                    "dtype": label,
-                    "width": width,
-                    "weights": raw(w),
-                    "begin": 1,
-                    "end": width - 1,
-                },
-                partial,
-            )
-        for dh in (10, 64, 160):
+                add(
+                    {**base, "op": "embedding", "weights": raw(w), "exact": True},
+                    "y",
+                    owned(width, begin, end, w, dtype),
+                )
+
+        # One Q, K or V head: normalized input, projection, RoPE, cache write.
+        for nq, nkv, dh in ((4, 2, 10), (4, 1, 64), (2, 1, 160)):
+            d = nq * dh
+            kv_width = nkv * dh
             for position in (0, 1, 63, 4095, 8192):
-                q = random(3, dh, dtype=dtype)
+                x, scale = random(d, dtype=dtype), random(d, dtype=dtype)
+                wq, wk, wv = (
+                    random(d, d, dtype=dtype) / 8,
+                    random(kv_width, d, dtype=dtype) / 8,
+                    random(kv_width, d, dtype=dtype) / 8,
+                )
                 frequencies = 1.0 / (
                     500000.0 ** (torch.arange(0, dh, 2, device="cuda").float() / dh)
                 )
-                angle = position * frequencies
-                c, s = angle.cos().to(dtype), angle.sin().to(dtype)
-                first, second = q[1].chunk(2)
-                result = torch.full_like(q, -123.0)
-                result[1] = torch.cat((first * c - second * s, second * c + first * s))
-                add(
-                    {
-                        "op": "rope",
-                        "dtype": label,
-                        "width": 3 * dh,
-                        "heads": 3,
-                        "head": 1,
-                        "head_dim": dh,
-                        "position": position,
-                        "input": raw(q),
-                        "frequencies": raw(frequencies),
-                    },
-                    result,
+                u = norm(x, scale)
+                q, k, v = F.linear(u, wq), F.linear(u, wk), F.linear(u, wv)
+                base = {
+                    "op": "qkv",
+                    "dtype": label,
+                    "hidden": d,
+                    "heads": nq,
+                    "kv_heads": nkv,
+                    "head_dim": dh,
+                    "position": position,
+                    "x": raw(x),
+                    "attn_norm": raw(scale),
+                    "Wq": raw(wq),
+                    "Wk": raw(wk),
+                    "Wv": raw(wv),
+                    "frequencies": raw(frequencies),
+                }
+                head, kv_head = nq - 1, nkv - 1
+                expected = torch.full((d,), SENTINEL, device="cuda", dtype=dtype)
+                expected[head * dh : (head + 1) * dh] = rope(
+                    q[head * dh : (head + 1) * dh], position, frequencies
                 )
-        for length, dh in (
-            (1, 10),
-            (2, 64),
-            (17, 64),
-            (65, 160),
-            (257, 10),
-            (1025, 64),
+                add({**base, "begin": head * dh}, "q_rot", expected)
+                cache = torch.full(
+                    ((position + 1) * kv_width,), SENTINEL, device="cuda", dtype=dtype
+                )
+                row = position * kv_width + kv_head * dh
+                key = cache.clone()
+                key[row : row + dh] = rope(
+                    k[kv_head * dh : (kv_head + 1) * dh], position, frequencies
+                )
+                add({**base, "begin": d + kv_head * dh}, "key_cache", key)
+                value = cache.clone()
+                value[row : row + dh] = v[kv_head * dh : (kv_head + 1) * dh]
+                add(
+                    {**base, "begin": d + kv_width + kv_head * dh}, "value_cache", value
+                )
+
+        # Attention over the visible prefix, split into chunks, for every head.
+        for (length, dh), chunks in zip(
+            ((1, 10), (2, 64), (17, 64), (65, 160), (257, 10), (1025, 64)),
+            (3, 1, 5, 2, 4, 5),
+            strict=True,
         ):
-            capacity, nq, nkv, head, kv_head = length + 3, 4, 2, 3, 1
+            capacity, nq, nkv = length + 3, 4, 2
+            d = nq * dh
             for kind in ("random", "flat", "peaked"):
                 q = random(nq, dh, dtype=dtype)
                 k, v = (
@@ -212,57 +201,104 @@ def fixtures() -> tuple[list[dict], list[torch.Tensor], list[torch.Tensor | None
                 # Unused capacity must not participate in attention.
                 k[length:] = 1000
                 v[length:] = 1000
-                score = (q[head][None, :] @ k[:length, kv_head].T) * (dh**-0.5)
-                probs = torch.softmax(score, dim=-1, dtype=torch.float32).to(dtype)
-                attended = probs @ v[:length, kv_head]
-                expected = torch.full((nq, dh), -123.0, device="cuda", dtype=dtype)
-                expected[head] = attended[0]
+                attended, probabilities = (
+                    [],
+                    torch.full((nq, capacity), SENTINEL, device="cuda", dtype=dtype),
+                )
+                for head in range(nq):
+                    kv_head = head // (nq // nkv)
+                    score = (q[head][None, :] @ k[:length, kv_head].T) * (dh**-0.5)
+                    probs = torch.softmax(score, dim=-1, dtype=torch.float32).to(dtype)
+                    probabilities[head, :length] = probs[0]
+                    attended.append((probs @ v[:length, kv_head])[0])
                 add(
                     {
                         "op": "attention",
                         "dtype": label,
-                        "width": nq * dh,
+                        "hidden": d,
                         "heads": nq,
                         "kv_heads": nkv,
-                        "head": head,
-                        "kv_head": kv_head,
                         "head_dim": dh,
                         "position": length - 1,
                         "capacity": capacity,
-                        "input": raw(q),
-                        "kv": raw(torch.stack((k, v))),
+                        "chunks": chunks,
+                        "q_rot": raw(q),
+                        "key_cache": raw(k),
+                        "value_cache": raw(v),
+                        "Wo": raw(torch.eye(d, device="cuda")),
                     },
-                    expected,
-                    probs if dtype == torch.bfloat16 else None,
+                    "attention",
+                    torch.cat(attended),
+                    {"buffer": "scores", "expected": probabilities.flatten()},
                 )
+
+        # Gate and up rows of the normalized input, combined as SiLU(gate) * up.
+        for d, f in ((10, 7), (64, 93), (333, 41), (2048, 64)):
+            r, scale = random(d, dtype=dtype), random(d, dtype=dtype)
+            gate, up = random(f, d, dtype=dtype) / 8, random(f, d, dtype=dtype) / 8
+            z = norm(r, scale)
+            product = F.silu(F.linear(z, gate)) * F.linear(z, up)
+            begin, end = (1, f - 1) if f > 2 else (0, f)
+            add(
+                {
+                    "op": "gate_up",
+                    "dtype": label,
+                    "hidden": d,
+                    "intermediate": f,
+                    "r": raw(r),
+                    "ffn_norm": raw(scale),
+                    "Wgate": raw(gate),
+                    "Wup": raw(up),
+                    "begin": begin,
+                    "end": end,
+                },
+                "product",
+                owned(f, begin, end, product, dtype),
+            )
+
         if dtype == torch.bfloat16:
+            # Sixteen 2048-wide norms must match PyTorch bit for bit.
             for _ in range(16):
                 x, w = random(2048, dtype=dtype), random(2048, dtype=dtype)
-                normalized = x.float() * torch.rsqrt(x.float().square().mean() + 1e-5)
                 add(
                     {
-                        "op": "rms_norm",
+                        "op": "final_norm",
                         "dtype": label,
-                        "width": 2048,
-                        "input": raw(x),
+                        "hidden": 2048,
+                        "x": raw(x),
                         "weights": raw(w),
                         "exact": True,
                     },
-                    normalized.to(dtype) * w,
+                    "y",
+                    norm(x, w),
                 )
-        x = torch.zeros(64, device="cuda", dtype=dtype)
-        w = torch.ones_like(x)
+            # Projection then residual: both additions land on ties-to-even boundaries.
+            for sign in (1.0, -1.0):
+                add(
+                    {
+                        "op": "down",
+                        "dtype": label,
+                        "hidden": 1,
+                        "intermediate": 2,
+                        "product": [1.0, 1.0],
+                        "Wdown": [sign, sign / 256],
+                        "r": [sign / 256],
+                        "exact": True,
+                    },
+                    "y",
+                    torch.tensor([sign]),
+                )
         add(
             {
-                "op": "rms_norm",
+                "op": "final_norm",
                 "dtype": label,
-                "width": 64,
-                "input": raw(x),
-                "weights": raw(w),
+                "hidden": 64,
+                "weights": [1.0] * 64,
             },
-            x,
+            "y",
+            torch.zeros(64),
         )
-    for dtype in (torch.float32, torch.bfloat16):
+
         boundary = torch.tensor(
             [
                 0.0,
@@ -279,28 +315,15 @@ def fixtures() -> tuple[list[dict], list[torch.Tensor], list[torch.Tensor | None
         add(
             {
                 "op": "embedding",
-                "dtype": "bfloat16" if dtype == torch.bfloat16 else "float32",
-                "width": boundary.numel(),
+                "dtype": label,
+                "hidden": boundary.numel(),
                 "weights": raw(boundary),
                 "exact_bits": True,
             },
+            "y",
             boundary,
         )
-    add(
-        {
-            "op": "gemv",
-            "dtype": "bfloat16",
-            "width": 2,
-            "rows": 1,
-            "input": [1.0, 1.0],
-            "weights": [-1.0, -1 / 256],
-            "aux": [-1 / 256],
-            "residual": True,
-            "exact": True,
-        },
-        torch.tensor([-1.0]),
-    )
-    return cases, outputs, probabilities
+    return cases
 
 
 def main() -> None:
@@ -309,52 +332,51 @@ def main() -> None:
     parser.add_argument("--write-cases", type=Path)
     args = parser.parse_args()
     with torch.inference_mode():
-        cases, expected, probabilities = fixtures()
+        cases = fixtures()
+    payload = json.dumps([case for case, _, _, _ in cases])
     if args.write_cases:
-        args.write_cases.write_text(json.dumps(cases))
+        args.write_cases.write_text(payload)
         return
     with tempfile.TemporaryDirectory(prefix="ops-unit-") as directory:
         path = Path(directory) / "cases.json"
-        path.write_text(json.dumps(cases))
+        path.write_text(payload)
         completed = subprocess.run(
             [str(args.executor), str(path)],
             check=True,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=300,
         )
     results = json.loads(completed.stdout)
-    for index, (case, reference, result, probs) in enumerate(
-        zip(cases, expected, results, probabilities, strict=True)
+    for index, ((case, buffer, reference, extra), result) in enumerate(
+        zip(cases, results, strict=True)
     ):
-        actual = torch.tensor(result["output"])
+        actual = torch.tensor(result[buffer][: reference.numel()])
         bf16 = case["dtype"] == "bfloat16"
-        tolerance = (
-            {"atol": 1e-2, "rtol": 1e-2} if bf16 else {"atol": 1e-4, "rtol": 5e-5}
-        )
+        atol, rtol = (1e-2, 1e-2) if bf16 else (1e-4, 5e-5)
         try:
             if bf16:
                 assert torch.equal(actual, actual.to(torch.bfloat16).float())
-            torch.testing.assert_close(
-                actual, reference, atol=tolerance["atol"], rtol=tolerance["rtol"]
+            torch.testing.assert_close(actual, reference, atol=atol, rtol=rtol)
+            # Rows a task does not own keep the sentinel exactly.
+            assert torch.equal(
+                actual[reference == SENTINEL], reference[reference == SENTINEL]
             )
-            # Inactive rows and unselected heads are an exact ownership check.
-            assert torch.equal(actual[reference == -123], reference[reference == -123])
-            if case["op"] in ("embedding", "silu") or case.get("exact", False):
+            if case.get("exact", False):
                 assert torch.equal(actual, reference)
             if case.get("exact_bits", False):
                 assert torch.equal(
                     actual.view(torch.int32), reference.view(torch.int32)
                 )
-            if probs is not None:
-                begin = case["head"] * case["capacity"]
-                observed = torch.tensor(
-                    result["probabilities"][begin : begin + probs.numel()]
-                )
-                torch.testing.assert_close(observed, probs, atol=5e-4, rtol=1e-2)
+            if extra is not None and bf16:
+                observed = torch.tensor(result[extra["buffer"]])
+                expected = extra["expected"].float().cpu()
+                torch.testing.assert_close(observed, expected, atol=5e-4, rtol=1e-2)
         except (AssertionError, RuntimeError) as error:
             raise AssertionError(
-                f"operator case {index}: {case['op']} {case['dtype']} shape={case.get('rows', 1)}x{case['width']} position={case.get('position', 0)}"
+                f"operator case {index}: {case['op']} {case['dtype']} "
+                f"hidden={case.get('hidden')} position={case.get('position', 0)} "
+                f"chunks={case.get('chunks', 1)}"
             ) from error
     print(f"{len(cases)} isolated CUDA operator cases passed (FP32, BF16).")
 

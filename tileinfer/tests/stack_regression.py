@@ -227,32 +227,26 @@ def main() -> None:
             np.stack([layer.v.float().cpu().numpy() for layer in cache.layers]),
             expected_v,
         )
-        for tile_rows in (4, 7):
-            package = root / f"package-{tile_rows}"
-            build_stack(
-                fixture / "model.json",
-                fixture / "weights.npz",
-                root / "target.json",
-                tile_rows,
-                package,
-            )
-            result = run(args.executor, "--inspect-plan", str(package))
-            if result.returncode:
-                raise AssertionError(result.stderr)
-            report = json.loads(result.stdout)
-            if report["layers"] != spec.layers or report["kv_bytes"] != 2304:
-                raise AssertionError(report)
-            check_sequence(args.executor, package, root, ids, traces, spec)
-            check_generation(args.executor, package, root, ids[:2], weights, spec)
-            if args.sequence_smoke and tile_rows == 4:
-                context_result = run(args.sequence_smoke, str(package))
-                if context_result.returncode:
-                    raise AssertionError(context_result.stderr)
-        if args.ring_smoke:
-            for ring_package in (root / "package-4",):
-                ring_result = run(args.ring_smoke, str(ring_package))
-                if ring_result.returncode:
-                    raise AssertionError(ring_result.stderr)
+        package = root / "package"
+        build_stack(
+            fixture / "model.json",
+            fixture / "weights.npz",
+            root / "target.json",
+            package,
+        )
+        result = run(args.executor, "--inspect-plan", str(package))
+        if result.returncode:
+            raise AssertionError(result.stderr)
+        report = json.loads(result.stdout)
+        if report["layers"] != spec.layers or report["kv_bytes"] != 2304:
+            raise AssertionError(report)
+        check_sequence(args.executor, package, root, ids, traces, spec)
+        check_generation(args.executor, package, root, ids[:2], weights, spec)
+        for smoke in (args.sequence_smoke, args.ring_smoke):
+            if smoke:
+                smoke_result = run(smoke, str(package))
+                if smoke_result.returncode:
+                    raise AssertionError(smoke_result.stderr)
         original_weight_bytes = report["weight_bytes"]
 
         bf16_package = root / "bf16-stack"
@@ -260,7 +254,6 @@ def main() -> None:
             fixture / "model.json",
             fixture / "weights.npz",
             root / "target.json",
-            7,
             bf16_package,
             "bfloat16",
         )
@@ -312,7 +305,6 @@ def main() -> None:
             untied_fixture / "model.json",
             untied_fixture / "weights.npz",
             root / "target.json",
-            7,
             untied_package,
         )
         untied_weights = fixed_stack_weights(untied)
@@ -337,7 +329,6 @@ def main() -> None:
             untied_fixture / "model.json",
             untied_fixture / "weights.npz",
             root / "target.json",
-            7,
             untied_bf16_package,
             "bfloat16",
         )

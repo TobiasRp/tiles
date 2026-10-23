@@ -15,36 +15,32 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
     : weights(stream, pool, plan.weights.size(), cuda::no_init)
     , instructions(stream, pool, plan.instructions.size(), cuda::no_init)
     , streams(stream, pool, plan.streams.size(), cuda::no_init)
-    , tensors(stream, pool, plan.tensors.size(), cuda::no_init)
     , rotary_frequencies(stream, pool, plan.rotary_frequencies.size(), cuda::no_init)
+    , layout(plan.layout)
     , hidden_size(plan.hidden_size)
     , intermediate_size(plan.intermediate_size)
+    , query_heads(plan.query_heads)
     , kv_heads(plan.kv_heads)
     , head_dim(plan.head_dim)
     , workers(plan.workers)
     , max_context(plan.max_context)
+    , attention_chunks(plan.attention_chunks)
     , scratch_count(plan.scratch_bytes / element_bytes(plan.weight_dtype))
     , kv_count(plan.kv_bytes / element_bytes(plan.weight_dtype))
     , attention_count(plan.attention_bytes / element_bytes(plan.weight_dtype))
+    , attention_partial_count(plan.attention_partial_bytes / sizeof(float))
     , numeric(plan.numeric)
     , stack(plan.stack)
     , weight_dtype(plan.weight_dtype)
 {
-    for (const auto id :
-        {TensorId::u, TensorId::q, TensorId::k, TensorId::v, TensorId::q_rot, TensorId::attention,
-            TensorId::r, TensorId::z, TensorId::gate, TensorId::up, TensorId::product}) {
-        const std::size_t count =
-            id == TensorId::k || id == TensorId::v ? kv_heads * head_dim
-            : id == TensorId::gate || id == TensorId::up || id == TensorId::product
-                ? intermediate_size
-                : hidden_size;
+    for (const auto id : {TensorId::q_rot, TensorId::attention, TensorId::r, TensorId::product}) {
+        const std::size_t count = id == TensorId::product ? intermediate_size : hidden_size;
         scratch_regions.emplace_back(plan.tensors[tensor_index(id)].offset, count);
     }
     try {
         cuda::copy_bytes(stream, plan.weights, weights);
         cuda::copy_bytes(stream, plan.instructions, instructions);
         cuda::copy_bytes(stream, plan.streams, streams);
-        cuda::copy_bytes(stream, plan.tensors, tensors);
         cuda::copy_bytes(stream, plan.rotary_frequencies, rotary_frequencies);
         stream.sync();
     } catch (...) {
@@ -55,9 +51,9 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
 
 WorkerProgramView UploadedPlan::view() const
 {
-    return {instructions.data(), streams.data(), tensors.data(), weights.data(),
-        rotary_frequencies.data(), workers, hidden_size, intermediate_size, kv_heads, head_dim,
-        numeric, stack, weight_dtype, max_context};
+    return {instructions.data(), streams.data(), layout, weights.data(), rotary_frequencies.data(),
+        workers, hidden_size, intermediate_size, query_heads, kv_heads, head_dim, max_context,
+        attention_chunks, numeric, stack, weight_dtype};
 }
 
 } // namespace tileinfer::detail

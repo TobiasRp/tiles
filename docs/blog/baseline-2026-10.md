@@ -254,6 +254,9 @@ uv run --locked --project tileplan python docs/blog/make_figures.py \
   runs/s0-2026-10-22 docs/blog/figures
 ```
 
+The figure step needs the scripts at commit `13f71c4`; later versions of
+`tileplan/timeline.py` read only the current package format.
+
 The figures use a fixed, colorblind-validated categorical palette. Each mark
 carries a tooltip when the SVG is opened directly, and every figure has its
 data table above.

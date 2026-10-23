@@ -4,7 +4,11 @@ TilePlan is the offline Python half of Tiles. It converts a checkpoint or
 synthetic fixture into `plan.json` and `weights.bin`: a tiled task DAG for a
 whole token (embedding, every layer, final norm, and logits), its wave
 schedule over logical workers, tensor layout, and packed float32 or BF16
-weights. `visualize` draws one layer of that program. Version-5 packages
+weights. Each layer has six task waves: one Q, K or V head per task (with its
+RMSNorm, RoPE and cache write fused in); attention scores and attention
+values per K/V head and context chunk; and the output, gate/up (with
+SiLU·up) and down projections split into one row range per worker.
+`visualize` draws one layer of that program. Version-6 packages
 use the same storage dtype for weights, activations, and K/V, with float32
 accumulation and selected float32 internal math. Python validates graph
 dependencies and planning metadata; [TileInfer](../tileinfer/README.md) checks
@@ -42,7 +46,7 @@ uv run --locked --project tileplan python -m tileplan probe \
   --executor tileinfer/build/release/tile_runtime --out runs/demo/target.json
 uv run --locked --project tileplan python -m tileplan import-llama32 \
   --checkpoint checkpoints/Llama-3.2-1B --target runs/demo/target.json \
-  --max-context 4096 --tile-rows 64 --out runs/demo/package
+  --max-context 4096 --out runs/demo/package
 uv run --locked --project tileplan python -m tileplan verify runs/demo/package
 ```
 
@@ -57,9 +61,9 @@ Matrix arithmetic uses FP32 SIMT multiplication and accumulation over BF16
 operands; [the measured comparison](../docs/bf16_compute_results.md) explains
 why the native Tensor Core variant was removed.
 
-`--tile-rows auto` uses an offline load-balancing heuristic over 2/4/8/16 rows;
-it does not benchmark the GPU. Explicit tile sizes should be selected with
-independent pilot and final measurements for the chosen arithmetic variant.
+There is no tile-size parameter. Projections split their rows evenly over the
+target's workers, and attention uses the fewest context chunks per K/V head
+that give every worker equal work (five for Llama 3.2 1B on 20 SMs).
 
 Other commands are available through `python -m tileplan --help`:
 
@@ -68,12 +72,11 @@ Other commands are available through `python -m tileplan --help`:
 | `build` / `build-stack` | Package a synthetic block or decoder stack. |
 | `reference` / `stack-reference` | Generate deterministic CPU reference fixtures. |
 | `inspect` / `verify` | Summarize or validate a package. |
-| `visualize` | Draw the schedule, tensor graph, and selected tile dependencies. |
+| `visualize` | Draw one layer's wave schedule. |
 
 ```sh
 uv run --locked --project tileplan python -m tileplan visualize runs/demo/package \
-  --out runs/demo/schedule.svg --tensor-graph-out runs/demo/tensors.svg \
-  --tile-flow-out runs/demo/tiles.svg
+  --out runs/demo/schedule.svg
 ```
 
 ## Checks

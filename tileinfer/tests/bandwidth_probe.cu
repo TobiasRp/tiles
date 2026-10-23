@@ -72,41 +72,32 @@ __global__ void stream_elements(const Bf16* data, std::size_t count, unsigned* s
         sink[0] = 1;
 }
 
-// One GEMV per iteration using the worker's ops::gemv, followed by a grid
+// One GEMV per iteration using the worker's ops::project_rows, followed by a grid
 // barrier as in a decoder wave. Blocks at or above `active` only join the
 // barriers. tile == 0 splits rows evenly over active blocks; otherwise tiles
 // of `tile` rows go round-robin, matching the planner's equal-work greedy
 // assignment. Iterations rotate through matrix copies to defeat L2 reuse.
 __global__ __launch_bounds__(kThreads, 1) void rowdot(const Bf16* matrices,
-    std::size_t matrix_elements, int copies, const TensorRecord* records, Bf16* input, Bf16* output,
-    TaskRecord task, int rows, int width, int active, int tile, int iterations)
+    std::size_t matrix_elements, int copies, const Bf16* input, Bf16* output, int rows, int width,
+    int active, int tile, int iterations)
 {
     __shared__ ops::SharedStorage shared;
-    NumericConfig numeric{};
-    const ops::BlockShape shape{width, width, 1, 2, 0, 1, numeric, nullptr};
     for (int iteration = 0; iteration < iterations; ++iteration) {
-        const ops::Context<Bf16> context{records,
-            {input, output, nullptr, nullptr,
-                matrices + static_cast<std::size_t>(iteration % copies) * matrix_elements, nullptr,
-                nullptr, nullptr},
-            shape, &shared};
+        const Bf16* matrix =
+            matrices + static_cast<std::size_t>(iteration % copies) * matrix_elements;
+        // The zero output doubles as the residual, as in the decoder's projections.
+        auto project = [&](int begin, int end) {
+            ops::project_rows(
+                begin, end, matrix, input, width, output, output, nullptr, nullptr, shared);
+            __syncthreads();
+        };
         if (static_cast<int>(blockIdx.x) < active) {
-            if (tile == 0) {
-                task.begin = static_cast<std::uint32_t>(
-                    static_cast<std::int64_t>(rows) * blockIdx.x / active);
-                task.end = static_cast<std::uint32_t>(
-                    static_cast<std::int64_t>(rows) * (blockIdx.x + 1) / active);
-                if (task.end > task.begin)
-                    ops::gemv(task, context);
-                __syncthreads();
-            } else {
-                for (int first = blockIdx.x * tile; first < rows; first += active * tile) {
-                    task.begin = first;
-                    task.end = first + tile < rows ? first + tile : rows;
-                    ops::gemv(task, context);
-                    __syncthreads();
-                }
-            }
+            if (tile == 0)
+                project(static_cast<int>(static_cast<std::int64_t>(rows) * blockIdx.x / active),
+                    static_cast<int>(static_cast<std::int64_t>(rows) * (blockIdx.x + 1) / active));
+            else
+                for (int first = blockIdx.x * tile; first < rows; first += active * tile)
+                    project(first, first + tile < rows ? first + tile : rows);
         }
         cooperative_groups::this_grid().sync();
     }
@@ -185,35 +176,23 @@ json rowdot_sweep(int sm_count)
     constexpr std::size_t kCopyBytes = std::size_t{256} << 20;
     constexpr std::size_t kTargetBytes = std::size_t{2} << 30;
 
-    std::vector<TensorRecord> records(kTensorCount, {StorageClass::scratch, 0});
-    records[tensor_index(TensorId::x)] = {StorageClass::input, 0};
-    records[tensor_index(TensorId::Wq)] = {StorageClass::weight, 0};
-    records[tensor_index(TensorId::q)] = {StorageClass::output, 0};
-    cuda::device_buffer<TensorRecord> d_records(stream, pool, records.size(), cuda::no_init);
-    cuda::copy_bytes(stream, records, d_records);
     const int max_width = 8192, max_rows = 128256;
     cuda::device_buffer<Bf16> input(stream, pool, max_width, cuda::no_init);
     cuda::device_buffer<Bf16> output(stream, pool, max_rows, cuda::no_init);
     check(cudaMemsetAsync(input.data(), 0, max_width * sizeof(Bf16), stream.get()), "fill");
+    check(cudaMemsetAsync(output.data(), 0, max_rows * sizeof(Bf16), stream.get()), "fill");
     const auto config = cuda::make_config(
         cuda::block_dims<kThreads>(), cuda::grid_dims(sm_count), cuda::cooperative_launch{});
-    // A Wq-like projection binding: input x, weight matrix, output q.
-    TaskRecord task{};
-    task.opcode = Opcode::gemv;
-    task.a = tensor_index(TensorId::x);
-    task.b = tensor_index(TensorId::Wq);
-    task.c = tensor_index(TensorId::q);
-    task.d = kNoTensor;
 
     json rows = json::array();
     auto time = [&](const Bf16* matrices, std::size_t elements, int copies, int matrix_rows,
                     int width, int active, int tile, int iterations) {
-        cuda::launch(stream, config, rowdot, matrices, elements, copies, d_records.data(),
-            input.data(), output.data(), task, matrix_rows, width, active, tile, 1);
+        cuda::launch(stream, config, rowdot, matrices, elements, copies, input.data(),
+            output.data(), matrix_rows, width, active, tile, 1);
         cuda::timed_event start{stream};
         start.record(stream);
-        cuda::launch(stream, config, rowdot, matrices, elements, copies, d_records.data(),
-            input.data(), output.data(), task, matrix_rows, width, active, tile, iterations);
+        cuda::launch(stream, config, rowdot, matrices, elements, copies, input.data(),
+            output.data(), matrix_rows, width, active, tile, iterations);
         cuda::timed_event end{stream};
         end.record(stream);
         end.sync();

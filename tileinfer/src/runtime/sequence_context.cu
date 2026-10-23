@@ -49,6 +49,7 @@ struct SequenceContext::Impl
     detail::ActivationBuffer scratch;
     detail::ActivationBuffer kv;
     detail::ActivationBuffer attention_scores;
+    cuda::device_buffer<float> attention_partials;
     cuda::device_buffer<float> logits;
     std::optional<cuda::device_buffer<float>> block_trace;
     cuda::device_buffer<TokenId> tokens;
@@ -70,6 +71,7 @@ struct SequenceContext::Impl
         , scratch(stream, pool, model->scratch_count, model->weight_dtype)
         , kv(stream, pool, model->kv_count, model->weight_dtype)
         , attention_scores(stream, pool, model->attention_count, model->weight_dtype)
+        , attention_partials(stream, pool, model->attention_partial_count, cuda::no_init)
         , logits(stream, pool, model->stack.vocab_size, cuda::no_init)
         , tokens(stream, pool, model->max_context, cuda::no_init)
         , generated(stream, pool, model->max_context, cuda::no_init)
@@ -111,7 +113,8 @@ struct SequenceContext::Impl
             block_trace.emplace(stream, pool,
                 static_cast<std::size_t>(model->stack.layers) * model->hidden_size, cuda::no_init);
         const detail::WorkerBuffers buffers{input.data(), output.data(), scratch.data(), kv.data(),
-            logits.data(), trace ? block_trace->data() : nullptr, attention_scores.data()};
+            logits.data(), trace ? block_trace->data() : nullptr, attention_scores.data(),
+            attention_partials.data()};
         detail::enqueue_worker(
             stream, model->view(), buffers, position, {-1, token_ids, token_index});
     }

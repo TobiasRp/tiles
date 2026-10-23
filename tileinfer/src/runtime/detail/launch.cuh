@@ -11,18 +11,20 @@ struct WorkerProgramView
 {
     const TaskRecord* instructions;
     const WorkerTaskRange* streams; // one per worker
-    const TensorRecord* tensors;
+    LayerLayout layout;
     const void* weights;
     const float* rotary_frequencies;
     int workers;
     int hidden_size;
     int intermediate_size;
+    int query_heads;
     int kv_heads;
     int head_dim;
+    int max_context;
+    int attention_chunks;
     NumericConfig numeric;
     StackConfig stack;
     WeightDtype weight_dtype;
-    int max_context;
 };
 
 // Thread 0 of the executing worker records {start SM cycle, end SM cycle,
@@ -40,6 +42,7 @@ struct WorkerBuffers
     float* logits;
     float* block_trace;
     void* attention_scores;
+    float* attention_partials; // FP32 partial P*V, then chunk statistics
     float* ffn_trace = nullptr;
     // Optional timeline of kTimelineFields words per encoded instruction.
     std::uint64_t* timeline = nullptr;

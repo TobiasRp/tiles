@@ -14,7 +14,7 @@ from typing import Any
 import torch
 from safetensors import safe_open
 
-from .decoder_plan import WEIGHTS, _json_bytes, _require, _shape, choose_tile_rows
+from .decoder_plan import WEIGHTS, _json_bytes, _require, _shape
 from .decoder_reference import DecoderSpec
 from .decoder_stack import StackSpec, make_stack_plan_metadata, validate_stack
 from .probe import read_target
@@ -211,7 +211,6 @@ def pack_safetensors(
     checkpoint: Path,
     spec: StackSpec,
     target: dict,
-    tile_rows: int,
     out: Path,
     revision: str | None = None,
     dtype: str = "bfloat16",
@@ -232,7 +231,7 @@ def pack_safetensors(
     out.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{out.name}-", dir=out.parent))
     try:
-        plan = make_stack_plan_metadata(spec, target, tile_rows, dtype, "0" * 64)
+        plan = make_stack_plan_metadata(spec, target, dtype, "0" * 64)
         storage = plan["storage"]
         stack = storage["stack"]
         weight_regions = {entry["tensor"]: entry for entry in storage["weights"]}
@@ -311,7 +310,7 @@ def pack_safetensors(
             "layers": spec.layers,
             "vocab_size": spec.vocab_size,
             "max_context": spec.block.max_context,
-            "tile_rows": tile_rows,
+            "attention_chunks": plan["model"]["attention_chunks"],
             "weight_bytes": storage["weight_bytes"],
             "kv_bytes": storage["kv_bytes"],
         }
@@ -328,21 +327,9 @@ def import_llama32(
     target_path: Path,
     out: Path,
     max_context: int = 4096,
-    tile_rows: int | str = "auto",
     revision: str | None = None,
     dtype: str = "bfloat16",
 ) -> dict:
     spec = read_llama32_config(checkpoint / "config.json", max_context)
     target = read_target(target_path)
-    candidates = None
-    if tile_rows == "auto":
-        tile_rows, candidates = choose_tile_rows(
-            spec.block, target["launch"]["worker_count"]
-        )
-    elif isinstance(tile_rows, str):
-        tile_rows = int(tile_rows)
-    report = pack_safetensors(checkpoint, spec, target, tile_rows, out, revision, dtype)
-    if candidates is not None:
-        report["tile_search"] = candidates
-        (out / "planning_report.json").write_bytes(_json_bytes(report))
-    return report
+    return pack_safetensors(checkpoint, spec, target, out, revision, dtype)

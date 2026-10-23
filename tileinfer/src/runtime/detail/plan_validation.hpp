@@ -15,7 +15,7 @@ struct PlanShape
     int nkv;
     int dh;
     int context;
-    int tile;
+    int chunks; // attention context chunks per K/V head
 };
 
 // Checks the supplied whole-token program without choosing tiles, waves, or

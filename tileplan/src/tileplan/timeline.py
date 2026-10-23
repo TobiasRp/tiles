@@ -19,32 +19,22 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from html import escape
 
-from .decoder_plan import TID
-
 PHASES = (
     "embedding",
-    "attn_norm",
     "qkv",
-    "rope",
     "attention",
     "wo",
-    "ffn_norm",
     "gate_up",
-    "silu",
     "down",
     "final_norm",
     "lm_head",
 )
 COLORS = {
     "embedding": "#94a3b8",
-    "attn_norm": "#60a5fa",
     "qkv": "#22c55e",
-    "rope": "#facc15",
     "attention": "#f472b6",
     "wo": "#16a34a",
-    "ffn_norm": "#3b82f6",
     "gate_up": "#15803d",
-    "silu": "#a855f7",
     "down": "#166534",
     "final_norm": "#1d4ed8",
     "lm_head": "#0f766e",
@@ -81,46 +71,33 @@ class Wave:
 
 def phase(task: dict) -> str:
     """Name the decoder phase a plan task belongs to."""
-    opcode = task["opcode"].rsplit("_", 1)[0]
-    operands = task["operands"]
-    if opcode == "gemv":
-        weight = operands["weight"]
-        if weight in (TID["Wq"], TID["Wk"], TID["Wv"]):
-            return "qkv"
-        if weight == TID["Wo"]:
-            return "wo"
-        return "down" if weight == TID["Wdown"] else "gate_up"
-    if opcode == "rms_norm":
-        return "attn_norm" if operands["input"] == TID["x"] else "ffn_norm"
     return {
-        "rope_query": "rope",
-        "rope_cache": "rope",
-        "attention_prefix": "attention",
-        "silu_product": "silu",
+        "qkv": "qkv",
+        "attention_scores": "attention",
+        "attention_values": "attention",
+        "output_projection": "wo",
+        "gate_up": "gate_up",
+        "down": "down",
         "embedding": "embedding",
         "final_rms_norm": "final_norm",
         "logits": "lm_head",
-    }[opcode]
+    }[task["opcode"].rsplit("_", 1)[0]]
 
 
 def streamed_bytes(task: dict, model: dict, position: int) -> int:
     """Weight or K/V bytes a task reads; activations are omitted."""
     element = 2 if model["weight_dtype"] == "bfloat16" else 4
-    operands = task["operands"]
     opcode = task["opcode"].rsplit("_", 1)[0]
-    if opcode in ("gemv", "logits", "embedding"):
-        begin, end = operands["rows"]
-        if opcode == "embedding":
-            return (end - begin) * element
-        width = (
-            model["intermediate_size"]
-            if opcode == "gemv" and operands["weight"] == TID["Wdown"]
-            else model["hidden_size"]
-        )
-        return (end - begin) * width * element
-    if opcode == "attention_prefix":
-        return 2 * (position + 1) * model["head_dim"] * element
-    return 0
+    d, f = model["hidden_size"], model["intermediate_size"]
+    if opcode.startswith("attention"):
+        # Scores read the chunk's K rows of one K/V head; values read its V rows.
+        length, chunks = position + 1, model["attention_chunks"]
+        chunk = task["operands"]["chunk"]
+        steps = length * (chunk + 1) // chunks - length * chunk // chunks
+        return steps * model["head_dim"] * element
+    begin, end = task["operands"]["rows"]
+    width = {"embedding": 1, "gate_up": 2 * d, "down": f}.get(opcode, d)
+    return 0 if opcode == "final_rms_norm" else (end - begin) * width * element
 
 
 def align(trace: dict, sample: int = 0) -> tuple[list[Event], dict]:
@@ -197,20 +174,11 @@ def budget(
     for event in events:
         if event.task >= 0:
             by_wave[tasks[event.task]["wave"]].append(event)
-    element = 2 if model["weight_dtype"] == "bfloat16" else 4
     waves = []
     for wave in range(wave_count):
         members = by_wave[wave]
         names = [phase(tasks[e.task]) for e in members]
-        unique = 0
-        kv_heads = set()
-        for e in members:
-            task = tasks[e.task]
-            if task["opcode"].startswith("attention_prefix"):
-                kv_heads.add((task["layer"], task["operands"]["kv_head"]))
-            else:
-                unique += streamed_bytes(task, model, position)
-        unique += len(kv_heads) * 2 * (position + 1) * model["head_dim"] * element
+        unique = sum(streamed_bytes(tasks[e.task], model, position) for e in members)
         finish = {w: starts[wave] for w in range(workers)}
         for e in members:
             finish[e.worker] = max(finish[e.worker], e.end)

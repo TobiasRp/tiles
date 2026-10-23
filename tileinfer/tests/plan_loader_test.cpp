@@ -20,22 +20,15 @@ int main(int argc, char** argv)
         target.active_blocks_per_sm = 1;
         if (argc == 2 && std::string_view(argv[1]) == "--describe-target-json") {
             // Synthetic capabilities for CPU loader tests; never a GPU planning probe.
-            std::cout
-                << json{{"device", {{"compute_capability", {8, 6}}, {"sm_count", 4},
-                                       {"cooperative_launch", true}}},
-                       {"executor",
-                           {{"abi", tileinfer::kAbi}, {"fingerprint", tileinfer::kFingerprint},
-                               {"threads_per_block", tileinfer::kThreads},
-                               {"active_blocks_per_sm", 1},
-                               {"opcodes",
-                                   {"rms_norm_f32", "gemv_f32", "rope_query_f32", "rope_cache_f32",
-                                       "attention_prefix_f32", "silu_product_f32", "embedding_f32",
-                                       "final_rms_norm_f32", "logits_f32", "rms_norm_bf16",
-                                       "gemv_bf16", "rope_query_bf16", "rope_cache_bf16",
-                                       "attention_prefix_bf16", "silu_product_bf16",
-                                       "embedding_bf16", "final_rms_norm_bf16", "logits_bf16"}}}}}
-                       .dump()
-                << '\n';
+            std::cout << json{{"device", {{"compute_capability", {8, 6}}, {"sm_count", 4},
+                                             {"cooperative_launch", true}}},
+                             {"executor", {{"abi", tileinfer::kAbi},
+                                              {"fingerprint", tileinfer::kFingerprint},
+                                              {"threads_per_block", tileinfer::kThreads},
+                                              {"active_blocks_per_sm", 1},
+                                              {"opcodes", tileinfer::supported_opcodes()}}}}
+                             .dump()
+                      << '\n';
             return 0;
         }
         if (argc != 2)

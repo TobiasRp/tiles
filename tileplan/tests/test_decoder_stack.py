@@ -79,14 +79,13 @@ class DecoderStackTest(unittest.TestCase):
                 FIXTURE / "model.json",
                 FIXTURE / "weights.npz",
                 root / "target.json",
-                7,
                 package,
             )
             plan, packed, _ = read_package(package)
             self.assertEqual(plan["target"]["threads_per_block"], 256)
             self.assertEqual(plan["model"]["layers"], 3)
             # Embedding, three repeated nine-wave layers, final norm, and logits.
-            self.assertEqual(len(plan["waves"]), 1 + 3 * 9 + 2)
+            self.assertEqual(len(plan["waves"]), 1 + 3 * 6 + 2)
             layers = [task["layer"] for task in plan["tasks"]]
             workers, d = plan["target"]["worker_count"], plan["model"]["hidden_size"]
             self.assertEqual(
@@ -101,7 +100,8 @@ class DecoderStackTest(unittest.TestCase):
                 {task["opcode"] for task in plan["tasks"] if task["layer"] is None},
                 {"embedding_f32", "final_rms_norm_f32", "logits_f32"},
             )
-            self.assertEqual(plan["storage"]["scratch_bytes"], 1664)
+            # q_rot, attention and r (32 each) plus the FFN product (64), float32.
+            self.assertEqual(plan["storage"]["scratch_bytes"], 640)
             self.assertEqual(plan["storage"]["kv_bytes"], 3 * 768)
             self.assertTrue(plan["storage"]["stack"]["lm_head_alias"])
             self.assertEqual(plan["storage"]["stack"]["lm_head_offset"], 0)
@@ -134,7 +134,6 @@ class DecoderStackTest(unittest.TestCase):
                 FIXTURE / "model.json",
                 FIXTURE / "weights.npz",
                 root / "target.json",
-                7,
                 bf16_package,
                 "bfloat16",
             )

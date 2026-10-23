@@ -2,16 +2,15 @@
 
 /**
  * @file
- * @brief Device arithmetic for a validated decoder task program.
+ * @brief Device arithmetic for the decoder's fused tile tasks.
  *
- * Scalar is float or __nv_bfloat16 for weights, activations and K/V; reductions
- * remain FP32. Block collectives require a one-dimensional kThreads-thread block
- * with block-uniform task/shape arguments and block-private SharedStorage.
- * Tensor IDs, dimensions, head indices and task ranges are host-validated.
- * Scalar and warp helpers state their participation separately.
- * No routine performs a grid barrier. Unless an exit barrier is documented,
- * the caller must synchronize before another thread consumes outputs or reuses
- * collective scratch; cross-block dependencies require a grid/stream boundary.
+ * Scalar is float or __nv_bfloat16 for weights, activations and K/V. Reductions
+ * stay FP32, and BF16 values round at the same operator boundaries as eager
+ * PyTorch: after each projection, before a residual, after SiLU, and so on.
+ * Every routine runs on one kThreads-thread block with block-uniform arguments
+ * and does not synchronize the grid: a consumer in another block needs the
+ * worker program's barrier. Routines end with their block-local stores; the
+ * caller synchronizes the block before another task reuses shared scratch.
  */
 
 #include "plan.hpp"
@@ -28,20 +27,6 @@
 
 namespace tileinfer::ops {
 
-/// Borrowed storage with a uniform Scalar dtype; optional traces widen diagnostics to FP32.
-template <typename Scalar>
-struct TensorViews
-{
-    Scalar* input;
-    Scalar* output;
-    Scalar* scratch;
-    Scalar* kv;
-    const Scalar* weights;
-    Scalar* attention_scores;
-    float* ffn_trace;   ///< Last Wdown projection before its residual, or nullptr.
-    float* block_trace; ///< This layer's output hidden vector, or nullptr.
-};
-
 inline constexpr int kWarpSize = 32;
 inline constexpr int kWarpsPerBlock = kThreads / kWarpSize;
 inline constexpr int kNormReductionThreads = 512;
@@ -54,7 +39,7 @@ struct FloatMax
     __device__ float operator()(float a, float b) const { return cuda::std::fmax(a, b); }
 };
 
-/// Block-private scratch; each warp owns one warp slot, and block collectives share block.
+/// Block-private scratch. Each warp owns one warp slot; block collectives share block.
 struct SharedStorage
 {
     WarpSum::TempStorage warp[kWarpsPerBlock];
@@ -63,104 +48,84 @@ struct SharedStorage
     float norm_partials[kNormReductionThreads];
     float softmax_max;
     float softmax_sum;
-    float previous_scale;
-    float key_weight;
+    float slices[kThreads]; // one partial sum per thread
+    // A task's input vector and one projected head, typed by the caller.
+    alignas(16) unsigned char vector[kMaxHidden * sizeof(float)];
+    alignas(16) unsigned char head[kMaxHeadDim * sizeof(float)];
 };
 
-/// Validated decoder dimensions, current cache position and FP32 numerical constants.
-struct BlockShape
+template <typename Scalar>
+__device__ inline Scalar* shared_vector(SharedStorage& shared)
+{
+    return reinterpret_cast<Scalar*>(shared.vector);
+}
+
+/// Model dimensions, the current position and FP32 constants for one launch.
+struct Shape
 {
     int hidden_size;
     int intermediate_size;
+    int query_heads;
     int kv_heads;
     int head_dim;
     int position;
     int max_context;
+    int attention_chunks;
     NumericConfig numeric;
     const float* rotary_frequencies;
 };
 
-/// One layer's tensor bindings and the calling block's collective scratch.
+/// One layer's buffers, already offset to that layer.
 template <typename Scalar>
-struct Context
+struct Layer
 {
-    const TensorRecord* tensors;
-    TensorViews<Scalar> views;
-    BlockShape shape;
-    SharedStorage* shared;
+    const Scalar* x; // layer input
+    Scalar* y;       // layer output
+    Scalar* q_rot;
+    Scalar* attention;
+    Scalar* r; // attention block output, the FFN's input and residual
+    Scalar* product;
+    Scalar* key_cache;   // [max_context, kv_heads, head_dim]
+    Scalar* value_cache; // [max_context, kv_heads, head_dim]
+    Scalar* scores;      // [query_heads, max_context]: scores, then probabilities
+    float* partials;     // [chunks, query_heads, head_dim]: partial P*V
+    float* stats;        // [chunks, query_heads, 2]: chunk maximum and sum of exp
+    const Scalar* attn_norm;
+    const Scalar* Wq;
+    const Scalar* Wk;
+    const Scalar* Wv;
+    const Scalar* Wo;
+    const Scalar* ffn_norm;
+    const Scalar* Wgate;
+    const Scalar* Wup;
+    const Scalar* Wdown;
+    float* ffn_trace;   // optional: Wdown projection before the residual
+    float* block_trace; // optional: this layer's output
 };
 
-/// Resolve a validated activation binding using element offsets, not byte offsets.
-/// @param context Borrowed buffers and the layer's tensor-record table.
-/// @param id In-range tensor ID; kNoTensor is not accepted.
-/// @return Its storage pointer plus offset, or nullptr for a weight record.
-template <typename Scalar>
-__device__ inline Scalar* activation_tensor(const Context<Scalar>& context, cuda::std::uint32_t id)
-{
-    const TensorRecord record = context.tensors[id];
-    Scalar* base = nullptr;
-    switch (record.storage) {
-    case StorageClass::input:
-        base = context.views.input;
-        break;
-    case StorageClass::output:
-        base = context.views.output;
-        break;
-    case StorageClass::scratch:
-        base = context.views.scratch;
-        break;
-    case StorageClass::kv:
-        base = context.views.kv;
-        break;
-    case StorageClass::weight:
-        return nullptr;
-    }
-    return base + record.offset;
-}
-
-/// Resolve a weight binding without device-side storage/bounds checks.
-/// @param context Immutable weight base and validated tensor records.
-/// @param id In-range ID already verified to belong to weight storage.
-/// @return Borrowed pointer to the tensor's first Scalar element.
-template <typename Scalar>
-__device__ inline const Scalar* weight_tensor(
-    const Context<Scalar>& context, cuda::std::uint32_t id)
-{
-    return context.views.weights + context.tensors[id].offset;
-}
-
 /// Rotate one split-half pair; BF16 coefficients and products round before the sum.
-/// @param source,destination Head storage; disjoint or exactly in-place, never partly overlapping.
-/// @param source_base,destination_base Element offsets of the corresponding head starts.
+/// @param source,destination Head vectors of shape.head_dim elements.
 /// @param pair Pair index in [0, shape.head_dim / 2), owned by this thread.
-/// @param shape Even head width, position and FP32 inverse-frequency table.
-/// @post Only destination[destination_base+pair] and its partner at +head_dim/2 change.
-/// This scalar helper has no collective or synchronization requirement.
 template <typename Scalar>
-__device__ inline void rotate_pair(const Scalar* source, Scalar* destination, int source_base,
-    int destination_base, int pair, const BlockShape& shape)
+__device__ inline void rotate_pair(
+    const Scalar* source, Scalar* destination, int pair, const Shape& shape)
 {
     const float angle = shape.position * shape.rotary_frequencies[pair];
     const float sine = static_cast<float>(static_cast<Scalar>(cuda::std::sin(angle)));
     const float cosine = static_cast<float>(static_cast<Scalar>(cuda::std::cos(angle)));
     const int half = shape.head_dim / 2;
-    const float first = source[source_base + pair];
-    const float second = source[source_base + pair + half];
-    destination[destination_base + pair] =
+    const float first = source[pair];
+    const float second = source[pair + half];
+    destination[pair] =
         static_cast<Scalar>(static_cast<float>(static_cast<Scalar>(first * cosine)) -
                             static_cast<float>(static_cast<Scalar>(second * sine)));
-    destination[destination_base + pair + half] =
+    destination[pair + half] =
         static_cast<Scalar>(static_cast<float>(static_cast<Scalar>(second * cosine)) +
                             static_cast<float>(static_cast<Scalar>(first * sine)));
 }
 
-/// Compute inverse RMS in FP32; only thread 0 writes the result.
-/// @param input,width Contiguous vector and positive element count, uniform across the block.
-/// @param epsilon Positive FP32 stabilizer, added after the mean of squares.
-/// @param[out] inverse_rms One block-shared float, disjoint from input and reduction_scratch.
-/// @param[out] reduction_scratch At least kNormReductionThreads block-shared floats; unused for FP32.
-/// @post An exit block barrier makes *inverse_rms readable by every participating thread.
-/// BF16 follows the pinned PyTorch mean reduction; FP32 retains the legacy serial order.
+/// Compute inverse RMS in FP32 into *inverse_rms, visible to the whole block on return.
+/// BF16 follows the pinned PyTorch mean reduction; FP32 keeps the serial order.
 template <typename Scalar>
 __device__ inline void rms_norm_factor(
     const Scalar* input, int width, float epsilon, float* inverse_rms, float* reduction_scratch)
@@ -224,12 +189,23 @@ __device__ inline void rms_norm_factor(
     __syncthreads();
 }
 
-/// Cooperatively reduce one row dot product using FP32 partial sums.
-/// @param row,input,width Read-only vectors and their positive common length, uniform within the warp.
-/// @param shared This block's scratch; only the calling warp's slot is accessed.
-/// @pre All 32 lanes of the physical warp participate with the same arguments.
-/// @return The dot product in lane 0 only; other lanes' return values are unspecified.
-/// The exit warp barrier permits that warp to reuse its scratch immediately.
+/// Write elements [begin,end) of RMSNorm(input) * scale; BF16 rounds before the scale.
+/// The statistic always covers all `width` inputs.
+template <typename Scalar>
+__device__ inline void normalize(const Scalar* input, const Scalar* scale, Scalar* output,
+    int begin, int end, int width, float epsilon, SharedStorage& shared)
+{
+    rms_norm_factor(input, width, epsilon, &shared.inverse_rms, shared.norm_partials);
+    for (int index = begin + threadIdx.x; index < end; index += blockDim.x)
+        output[index] = static_cast<Scalar>(
+            static_cast<float>(
+                static_cast<Scalar>(static_cast<float>(input[index]) * shared.inverse_rms)) *
+            static_cast<float>(scale[index]));
+}
+
+/// One row dot product reduced across a warp in FP32.
+/// @pre All 32 lanes participate with the same arguments.
+/// @return The dot product in lane 0 only.
 template <typename Scalar>
 __device__ inline float warp_dot(
     const Scalar* row, const Scalar* input, int width, SharedStorage& shared)
@@ -244,288 +220,250 @@ __device__ inline float warp_dot(
     return sum;
 }
 
-/// Normalize one hidden vector, rounding the normalized BF16 value before scale multiplication.
-/// @param task Bindings a=input, b=scale, c=output; the entire hidden vector is owned by this block.
-/// @param context Hidden width, epsilon, tensor bindings and block-private norm scratch.
-/// @pre Input/output may alias exactly; partial overlap and aliasing scale/scratch are unsupported.
-/// @post Every output element is written once; there is no exit block barrier.
+/// Project rows [begin,end) and add the residual; the projection rounds before the addition.
+/// One warp owns each row. Optional traces record the rounded projection and the output.
 template <typename Scalar>
-__device__ inline void rms_norm(const TaskRecord& task, const Context<Scalar>& context)
+__device__ inline void project_rows(int begin, int end, const Scalar* matrix, const Scalar* input,
+    int width, const Scalar* residual, Scalar* output, float* projection_trace, float* output_trace,
+    SharedStorage& shared)
 {
-    const Scalar* input = activation_tensor(context, task.a);
-    const Scalar* scale = weight_tensor(context, task.b);
-    Scalar* output = activation_tensor(context, task.c);
-    rms_norm_factor(input, context.shape.hidden_size, context.shape.numeric.rms_norm_eps,
-        &context.shared->inverse_rms, context.shared->norm_partials);
-    for (int index = threadIdx.x; index < context.shape.hidden_size; index += blockDim.x)
-        output[index] = static_cast<Scalar>(
-            static_cast<float>(static_cast<Scalar>(
-                static_cast<float>(input[index]) * context.shared->inverse_rms)) *
-            static_cast<float>(scale[index]));
+    for (int row = begin + threadIdx.x / kWarpSize; row < end; row += kWarpsPerBlock) {
+        const float value =
+            warp_dot(matrix + static_cast<cuda::std::size_t>(row) * width, input, width, shared);
+        if (threadIdx.x % kWarpSize != 0)
+            continue;
+        const Scalar projected = static_cast<Scalar>(value);
+        const Scalar sum =
+            static_cast<Scalar>(static_cast<float>(projected) + static_cast<float>(residual[row]));
+        output[row] = sum;
+        if (projection_trace)
+            projection_trace[row] = static_cast<float>(projected);
+        if (output_trace)
+            output_trace[row] = static_cast<float>(sum);
+    }
 }
 
-/// Commit one owned row, rounding the projection before any residual addition.
-/// @param task,context Identify Wdown and its optional FP32 diagnostic traces.
-/// @param output,residual Row vectors; residual is nullptr, disjoint from output, or aliases it exactly.
-/// @param row Output index exclusively owned by this thread.
-/// @param accumulation Complete FP32 dot product; no partial-K result is accepted.
-/// @post Writes output[row] and, for Wdown when requested, the rounded projection and
-/// the layer output. This scalar epilogue has no collective or synchronization requirement.
+/// One head of the concatenated [Q; K; V] projection: normalize the layer input,
+/// project the head's rows, then write rotated Q, rotated K, or V into its cache row.
+/// @param begin,end Rows of [Q; K; V] covering exactly one head.
 template <typename Scalar>
-__device__ inline void store_projection(const TaskRecord& task, const Context<Scalar>& context,
-    Scalar* output, const Scalar* residual, int row, float accumulation)
+__device__ inline void qkv(
+    int begin, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
 {
-    const Scalar projected = static_cast<Scalar>(accumulation);
-    const Scalar stored =
-        residual
-            ? static_cast<Scalar>(static_cast<float>(projected) + static_cast<float>(residual[row]))
-            : projected;
-    output[row] = stored;
-    if (task.b != static_cast<cuda::std::uint32_t>(TensorId::Wdown))
-        return;
-    if (context.views.ffn_trace)
-        context.views.ffn_trace[row] = static_cast<float>(projected);
-    if (context.views.block_trace)
-        context.views.block_trace[row] = static_cast<float>(stored);
-}
+    const int d = shape.hidden_size;
+    const int dh = shape.head_dim;
+    const int kv_width = shape.kv_heads * dh;
+    Scalar* input = shared_vector<Scalar>(shared);
+    normalize(layer.x, layer.attn_norm, input, 0, d, d, shape.numeric.rms_norm_eps, shared);
+    __syncthreads();
 
-/// Compute complete dot products for the task's exclusive [begin,end) output rows.
-/// @param task Bindings a=input, b=matrix, c=output, d=optional residual (kNoTensor disables it).
-/// @param context Wdown uses intermediate_size columns; other projections use hidden_size.
-/// @pre Output is disjoint from input/matrix; a residual may exactly alias output.
-/// @post Warp leaders own the stores, one warp per row. No exit barrier.
-template <typename Scalar>
-__device__ inline void gemv(const TaskRecord& task, const Context<Scalar>& context)
-{
-    const Scalar* input = activation_tensor(context, task.a);
-    const Scalar* matrix = weight_tensor(context, task.b);
-    Scalar* output = activation_tensor(context, task.c);
-    const Scalar* residual = task.d == kNoTensor ? nullptr : activation_tensor(context, task.d);
-    const int width = task.b == static_cast<cuda::std::uint32_t>(TensorId::Wdown)
-                          ? context.shape.intermediate_size
-                          : context.shape.hidden_size;
-    const int warp = threadIdx.x / kWarpSize;
-    for (cuda::std::uint32_t row = task.begin + warp; row < task.end; row += kWarpsPerBlock) {
-        const float value = warp_dot(
-            matrix + static_cast<cuda::std::size_t>(row) * width, input, width, *context.shared);
+    const Scalar* matrix = layer.Wq;
+    int row = begin;
+    if (begin >= d + kv_width) {
+        matrix = layer.Wv;
+        row = begin - d - kv_width;
+    } else if (begin >= d) {
+        matrix = layer.Wk;
+        row = begin - d;
+    }
+    Scalar* head = reinterpret_cast<Scalar*>(shared.head);
+    for (int i = threadIdx.x / kWarpSize; i < dh; i += kWarpsPerBlock) {
+        const float value =
+            warp_dot(matrix + static_cast<cuda::std::size_t>(row + i) * d, input, d, shared);
         if (threadIdx.x % kWarpSize == 0)
-            store_projection(task, context, output, residual, row, value);
-    }
-}
-
-/// Rotate only the selected query head, using the precision boundaries of rotate_pair().
-/// @param task Bindings a=Q, b=rotated Q, and the owned query-head index.
-/// @param context Valid even head width, position and FP32 inverse frequencies.
-/// @pre Source/destination are disjoint or exactly in-place; this block owns the head.
-/// @post Other heads are untouched; there is no exit block barrier.
-template <typename Scalar>
-__device__ inline void rope_query(const TaskRecord& task, const Context<Scalar>& context)
-{
-    const Scalar* input = activation_tensor(context, task.a);
-    Scalar* output = activation_tensor(context, task.b);
-    for (int pair = threadIdx.x; pair < context.shape.head_dim / 2; pair += blockDim.x) {
-        const int base = task.head * context.shape.head_dim;
-        rotate_pair(input, output, base, base, pair, context.shape);
-    }
-}
-
-/// Append rotated K and unchanged V at one cache position for one KV head.
-/// @param task Bindings a=K, b=V, c=K cache, d=V cache, and the owned KV-head index.
-/// @param context Caches use [max_context,kv_heads,head_dim]; position is in range.
-/// @pre Source vectors and cache buffers are disjoint; this block exclusively owns the appended head.
-/// @post Earlier positions and other heads are untouched. Consumers need the caller's barrier.
-template <typename Scalar>
-__device__ inline void rope_append_kv(const TaskRecord& task, const Context<Scalar>& context)
-{
-    const Scalar* key = activation_tensor(context, task.a);
-    const Scalar* value = activation_tensor(context, task.b);
-    Scalar* key_cache = activation_tensor(context, task.c);
-    Scalar* value_cache = activation_tensor(context, task.d);
-    const int source = task.kv_head * context.shape.head_dim;
-    const int destination =
-        context.shape.position * context.shape.kv_heads * context.shape.head_dim + source;
-    for (int pair = threadIdx.x; pair < context.shape.head_dim / 2; pair += blockDim.x)
-        rotate_pair(key, key_cache, source, destination, pair, context.shape);
-    for (int index = threadIdx.x; index < context.shape.head_dim; index += blockDim.x)
-        value_cache[destination + index] = value[source + index];
-}
-
-/// Compute one FP32 query head using constant-workspace online softmax.
-/// @param task Bindings a=Q, b=K cache, c=V cache, d=output, plus query/KV-head indices.
-/// @param context Valid prefix [0,position] inclusive and block-private reduction/softmax scratch.
-/// @pre That prefix is populated; caches are [max_context,kv_heads,head_dim]. Output is disjoint from Q/K/V.
-/// @post Only this head's output changes; unused cache capacity is never read. No exit barrier.
-/// Thread 0 publishes the running maximum and rescaling factors; threads own output coordinates.
-/// Rescaling both numerator and denominator avoids storing a score matrix.
-__device__ inline void attention_prefix_f32(const TaskRecord& task, const Context<float>& context)
-{
-    const float* query = activation_tensor(context, task.a) + task.head * context.shape.head_dim;
-    const float* keys = activation_tensor(context, task.b);
-    const float* values = activation_tensor(context, task.c);
-    float* output = activation_tensor(context, task.d) + task.head * context.shape.head_dim;
-    const BlockShape& shape = context.shape;
-    SharedStorage& shared = *context.shared;
-    for (int coordinate = threadIdx.x; coordinate < shape.head_dim; coordinate += blockDim.x)
-        output[coordinate] = 0.0f;
-    if (threadIdx.x == 0) {
-        shared.softmax_max = -cuda::std::numeric_limits<float>::infinity();
-        shared.softmax_sum = 0.0f;
+            head[i] = static_cast<Scalar>(value);
     }
     __syncthreads();
-    const float scale = 1.0f / cuda::std::sqrt(static_cast<float>(shape.head_dim));
-    for (int time = 0; time <= shape.position; ++time) {
-        const int base = (time * shape.kv_heads + task.kv_head) * shape.head_dim;
-        float dot = 0.0f;
-        for (int coordinate = threadIdx.x; coordinate < shape.head_dim; coordinate += blockDim.x)
-            dot += query[coordinate] * keys[base + coordinate];
-        const float score = BlockSum(shared.block).Sum(dot) * scale;
-        if (threadIdx.x == 0) {
-            // Shift the previous numerator/denominator onto the new maximum before merging this key.
-            const float maximum = cuda::std::fmax(shared.softmax_max, score);
-            shared.previous_scale = cuda::std::exp(shared.softmax_max - maximum);
-            shared.key_weight = cuda::std::exp(score - maximum);
-            shared.softmax_sum = shared.softmax_sum * shared.previous_scale + shared.key_weight;
-            shared.softmax_max = maximum;
-        }
-        __syncthreads();
-        for (int coordinate = threadIdx.x; coordinate < shape.head_dim; coordinate += blockDim.x)
-            output[coordinate] = output[coordinate] * shared.previous_scale +
-                                 values[base + coordinate] * shared.key_weight;
-        // Every coordinate must consume these factors before thread 0 advances to the next key.
-        __syncthreads();
+
+    const int cache_row = shape.position * kv_width + row;
+    if (matrix == layer.Wv) {
+        for (int i = threadIdx.x; i < dh; i += blockDim.x)
+            layer.value_cache[cache_row + i] = head[i];
+        return;
     }
-    for (int coordinate = threadIdx.x; coordinate < shape.head_dim; coordinate += blockDim.x)
-        output[coordinate] /= shared.softmax_sum;
+    Scalar* rotated = matrix == layer.Wq ? layer.q_rot + row : layer.key_cache + cache_row;
+    for (int pair = threadIdx.x; pair < dh / 2; pair += blockDim.x)
+        rotate_pair(head, rotated, pair, shape);
 }
 
-/// Compute one BF16 query head with eager score/probability rounding and FP32 reductions.
-/// @param task Bindings a=Q, b=K cache, c=V cache, d=output, plus query/KV-head indices.
-/// @param context Populated prefix [0,position], cache layout [max_context,kv_heads,head_dim], and scratch.
-/// @pre This block owns its head's [max_context] attention_scores slice, disjoint from Q/K/V/output.
-/// @pre Output is disjoint from Q/K/V; all inputs remain immutable during the call.
-/// @post The valid workspace prefix contains BF16 probabilities; its tail and other heads are untouched.
-/// Only the owned output head is written, after the complete FP32 PV sum. No exit barrier.
-__device__ inline void attention_prefix_bf16(
-    const TaskRecord& task, const Context<__nv_bfloat16>& context)
+/// The time steps of the visible prefix [0, position] that a context chunk covers.
+__device__ inline void chunk_range(int chunk, const Shape& shape, int& begin, int& end)
 {
-    const auto& shape = context.shape;
-    auto& shared = *context.shared;
-    const auto* query = activation_tensor(context, task.a) + task.head * shape.head_dim;
-    const auto* keys = activation_tensor(context, task.b);
-    const auto* values = activation_tensor(context, task.c);
-    auto* output = activation_tensor(context, task.d) + task.head * shape.head_dim;
-    auto* scores = context.views.attention_scores + task.head * shape.max_context;
     const int length = shape.position + 1;
+    begin = static_cast<int>(static_cast<long long>(length) * chunk / shape.attention_chunks);
+    end = static_cast<int>(static_cast<long long>(length) * (chunk + 1) / shape.attention_chunks);
+}
+
+/// Scores of every query head of one K/V head over one context chunk, plus each
+/// head's chunk maximum and sum of exp(score - maximum). Each warp owns whole
+/// time steps and reads K[t] once for all heads of the group. QK and the scaling
+/// are separate BF16 rounding boundaries, as in eager attention.
+template <typename Scalar>
+__device__ inline void attention_scores(
+    int kv_head, int chunk, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
+{
+    const int dh = shape.head_dim;
+    const int group = shape.query_heads / shape.kv_heads;
+    const int first_head = kv_head * group;
     const int lane = threadIdx.x % kWarpSize;
     const int warp = threadIdx.x / kWarpSize;
-    const float scale = 1.0f / cuda::std::sqrt(static_cast<float>(shape.head_dim));
-    // QK and scaling are separate BF16 rounding boundaries; each warp owns whole scores.
-    for (int time = warp; time < length; time += kWarpsPerBlock) {
-        const int base = (time * shape.kv_heads + task.kv_head) * shape.head_dim;
-        float dot = 0.0f;
-        for (int coordinate = lane; coordinate < shape.head_dim; coordinate += kWarpSize)
-            dot +=
-                static_cast<float>(query[coordinate]) * static_cast<float>(keys[base + coordinate]);
-        const float sum = WarpSum(shared.warp[warp]).Sum(dot);
-        if (lane == 0)
-            scores[time] =
-                __float2bfloat16_rn(static_cast<float>(__float2bfloat16_rn(sum)) * scale);
-        __syncwarp();
-    }
-    __syncthreads();
-    // Only thread 0 publishes the FP32 maximum/denominator; barriers protect CUB scratch reuse.
-    float maximum = -cuda::std::numeric_limits<float>::infinity();
-    for (int time = threadIdx.x; time < length; time += blockDim.x)
-        maximum = cuda::std::fmax(maximum, static_cast<float>(scores[time]));
-    maximum = BlockSum(shared.block).Reduce(maximum, FloatMax());
-    if (threadIdx.x == 0)
-        shared.softmax_max = maximum;
-    __syncthreads();
-    float denominator = 0.0f;
-    for (int time = threadIdx.x; time < length; time += blockDim.x)
-        denominator += cuda::std::exp(static_cast<float>(scores[time]) - shared.softmax_max);
-    denominator = BlockSum(shared.block).Sum(denominator);
-    if (threadIdx.x == 0)
-        shared.softmax_sum = denominator;
-    __syncthreads();
-    // Overwrite scores only after the denominator is known; rounded probabilities need not sum to one.
-    for (int time = threadIdx.x; time < length; time += blockDim.x)
-        scores[time] = __float2bfloat16_rn(
-            cuda::std::exp(static_cast<float>(scores[time]) - shared.softmax_max) /
-            shared.softmax_sum);
-    __syncthreads();
-    // Publish all probabilities before PV; each coordinate keeps its full prefix sum in FP32.
-    for (int coordinate = threadIdx.x; coordinate < shape.head_dim; coordinate += blockDim.x) {
-        float sum = 0.0f;
-        for (int time = 0; time < length; ++time) {
-            const int base = (time * shape.kv_heads + task.kv_head) * shape.head_dim;
-            sum += static_cast<float>(scores[time]) * static_cast<float>(values[base + coordinate]);
+    const float scale = 1.0f / cuda::std::sqrt(static_cast<float>(dh));
+    int begin = 0, end = 0;
+    chunk_range(chunk, shape, begin, end);
+
+    for (int time = begin + warp; time < end; time += kWarpsPerBlock) {
+        const Scalar* key = layer.key_cache + (time * shape.kv_heads + kv_head) * dh;
+        float dots[kMaxGroup] = {};
+        for (int i = lane; i < dh; i += kWarpSize) {
+            const float k = static_cast<float>(key[i]);
+#pragma unroll
+            for (int g = 0; g < kMaxGroup; ++g)
+                if (g < group)
+                    dots[g] += static_cast<float>(layer.q_rot[(first_head + g) * dh + i]) * k;
         }
-        output[coordinate] = __float2bfloat16_rn(sum);
+        for (int g = 0; g < group; ++g) {
+            const float dot = WarpSum(shared.warp[warp]).Sum(dots[g]);
+            __syncwarp();
+            if (lane == 0)
+                layer.scores[(first_head + g) * shape.max_context + time] =
+                    static_cast<Scalar>(static_cast<float>(static_cast<Scalar>(dot)) * scale);
+        }
+    }
+    __syncthreads();
+
+    for (int g = 0; g < group; ++g) {
+        const Scalar* scores = layer.scores + (first_head + g) * shape.max_context;
+        float maximum = -cuda::std::numeric_limits<float>::infinity();
+        for (int time = begin + threadIdx.x; time < end; time += blockDim.x)
+            maximum = cuda::std::fmax(maximum, static_cast<float>(scores[time]));
+        maximum = BlockSum(shared.block).Reduce(maximum, FloatMax());
+        if (threadIdx.x == 0)
+            shared.softmax_max = maximum;
+        __syncthreads();
+        float sum = 0.0f;
+        for (int time = begin + threadIdx.x; time < end; time += blockDim.x)
+            sum += cuda::std::exp(static_cast<float>(scores[time]) - shared.softmax_max);
+        sum = BlockSum(shared.block).Sum(sum);
+        if (threadIdx.x == 0) {
+            float* stats = layer.stats + (chunk * shape.query_heads + first_head + g) * 2;
+            stats[0] = shared.softmax_max;
+            stats[1] = sum;
+        }
+        __syncthreads();
     }
 }
 
-/// Apply SiLU(gate)*up, preserving the intermediate BF16 SiLU rounding.
-/// @param task Bindings a=gate, b=up, c=output and the block-owned [begin,end) element range.
-/// @param context Tensor bindings with the uniform storage dtype.
-/// @pre Output may exactly alias either input; partial overlap is unsupported.
-/// @post Each owned element is written once; no other range is touched and no exit barrier is issued.
+/// Probabilities and partial P*V of one K/V head's query heads over one chunk.
+/// The softmax maximum and denominator combine every chunk's statistics in
+/// chunk order. Probabilities round once to Scalar before P*V, as eager
+/// attention does; the FP32 partial sums are combined by output_projection.
 template <typename Scalar>
-__device__ inline void silu_product(const TaskRecord& task, const Context<Scalar>& context)
+__device__ inline void attention_values(
+    int kv_head, int chunk, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
 {
-    const Scalar* gate = activation_tensor(context, task.a);
-    const Scalar* up = activation_tensor(context, task.b);
-    Scalar* output = activation_tensor(context, task.c);
-    for (cuda::std::uint32_t index = task.begin + threadIdx.x; index < task.end;
-        index += blockDim.x)
-        output[index] = static_cast<Scalar>(
-            static_cast<float>(
-                static_cast<Scalar>(static_cast<float>(gate[index]) /
-                                    (1.0f + cuda::std::exp(-static_cast<float>(gate[index]))))) *
-            static_cast<float>(up[index]));
-}
+    const int dh = shape.head_dim;
+    const int group = shape.query_heads / shape.kv_heads;
+    int begin = 0, end = 0;
+    chunk_range(chunk, shape, begin, end);
+    // Threads split the chunk's time steps into slices for each output coordinate.
+    const int slices = kThreads / dh;
+    const int coordinate = threadIdx.x % dh;
+    const int slice = threadIdx.x / dh;
 
-/// Dispatch one loader-validated layer task uniformly across the calling block.
-/// @param task Opcode, bindings and owned output range; Scalar selects the precision.
-/// @param context Layer bindings, current prefix shape and block-private collective scratch.
-/// @post Output ownership follows the selected operation; the caller must finish the task's barriers.
-/// Barriers and stack-stage instructions are handled by the worker loop, not here.
-template <typename Scalar>
-__device__ inline void execute(const TaskRecord& task, const Context<Scalar>& context)
-{
-    switch (task.opcode) {
-    case Opcode::rms_norm:
-        rms_norm(task, context);
-        break;
-    case Opcode::gemv:
-        gemv(task, context);
-        break;
-    case Opcode::rope_query:
-        rope_query(task, context);
-        break;
-    case Opcode::rope_cache:
-        rope_append_kv(task, context);
-        break;
-    case Opcode::attention_prefix:
-        if constexpr (cuda::std::is_same_v<Scalar, float>)
-            attention_prefix_f32(task, context);
-        else
-            attention_prefix_bf16(task, context);
-        break;
-    case Opcode::silu_product:
-        silu_product(task, context);
-        break;
-    default:
-        break;
+    for (int g = 0; g < group; ++g) {
+        const int head = kv_head * group + g;
+        if (threadIdx.x == 0) {
+            float maximum = -cuda::std::numeric_limits<float>::infinity();
+            for (int c = 0; c < shape.attention_chunks; ++c)
+                maximum = cuda::std::fmax(maximum, layer.stats[(c * shape.query_heads + head) * 2]);
+            float sum = 0.0f;
+            for (int c = 0; c < shape.attention_chunks; ++c) {
+                const float* stats = layer.stats + (c * shape.query_heads + head) * 2;
+                sum += stats[1] * cuda::std::exp(stats[0] - maximum);
+            }
+            shared.softmax_max = maximum;
+            shared.softmax_sum = sum;
+        }
+        __syncthreads();
+        Scalar* probabilities = layer.scores + head * shape.max_context;
+        for (int time = begin + threadIdx.x; time < end; time += blockDim.x)
+            probabilities[time] = static_cast<Scalar>(
+                cuda::std::exp(static_cast<float>(probabilities[time]) - shared.softmax_max) /
+                shared.softmax_sum);
+        __syncthreads();
+
+        float sum = 0.0f;
+        if (slice < slices)
+            for (int time = begin + slice; time < end; time += slices)
+                sum += static_cast<float>(probabilities[time]) *
+                       static_cast<float>(
+                           layer.value_cache[(time * shape.kv_heads + kv_head) * dh + coordinate]);
+        shared.slices[threadIdx.x] = sum;
+        __syncthreads();
+        if (threadIdx.x < dh) {
+            float total = 0.0f;
+            for (int s = 0; s < slices; ++s)
+                total += shared.slices[s * dh + threadIdx.x];
+            layer.partials[(chunk * shape.query_heads + head) * dh + threadIdx.x] = total;
+        }
+        __syncthreads();
     }
 }
 
-/// Copy elements [begin,end) of a token embedding into the hidden vector.
-/// @param token_id Validated vocabulary index; bounds are not checked here.
-/// @param begin,end Element range owned by the calling block, within [0, hidden_size].
-/// @param hidden_size Positive embedding row width.
-/// @param embedding,hidden Row-major embedding table and a disjoint hidden-vector destination.
-/// @post The range is copied without arithmetic conversion; readers need a grid/stream boundary.
+/// Output projection rows: sum each head's chunk partials into the attention
+/// vector (rounded once), project rows [begin,end), and add the layer input.
+/// The task owning row 0 also stores the attention vector for diagnostics.
+template <typename Scalar>
+__device__ inline void output_projection(
+    int begin, int end, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
+{
+    const int d = shape.hidden_size;
+    Scalar* input = shared_vector<Scalar>(shared);
+    for (int i = threadIdx.x; i < d; i += blockDim.x) {
+        float total = 0.0f;
+        for (int c = 0; c < shape.attention_chunks; ++c)
+            total += layer.partials[c * d + i];
+        input[i] = static_cast<Scalar>(total);
+        if (begin == 0)
+            layer.attention[i] = input[i];
+    }
+    __syncthreads();
+    project_rows(begin, end, layer.Wo, input, d, layer.x, layer.r, nullptr, nullptr, shared);
+}
+
+/// Gate and up rows [begin,end) of the normalized attention output, combined as
+/// SiLU(gate) * up. Gate, up and SiLU each round to Scalar, as in eager PyTorch.
+template <typename Scalar>
+__device__ inline void gate_up(
+    int begin, int end, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
+{
+    const int d = shape.hidden_size;
+    Scalar* input = shared_vector<Scalar>(shared);
+    normalize(layer.r, layer.ffn_norm, input, 0, d, d, shape.numeric.rms_norm_eps, shared);
+    __syncthreads();
+    for (int row = begin + threadIdx.x / kWarpSize; row < end; row += kWarpsPerBlock) {
+        const auto offset = static_cast<cuda::std::size_t>(row) * d;
+        const float gate = static_cast<float>(
+            static_cast<Scalar>(warp_dot(layer.Wgate + offset, input, d, shared)));
+        const float up =
+            static_cast<float>(static_cast<Scalar>(warp_dot(layer.Wup + offset, input, d, shared)));
+        if (threadIdx.x % kWarpSize == 0)
+            layer.product[row] = static_cast<Scalar>(
+                static_cast<float>(static_cast<Scalar>(gate / (1.0f + cuda::std::exp(-gate)))) *
+                up);
+    }
+}
+
+/// Down projection rows [begin,end) plus the attention block output as residual.
+template <typename Scalar>
+__device__ inline void down(
+    int begin, int end, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
+{
+    project_rows(begin, end, layer.Wdown, layer.product, shape.intermediate_size, layer.r, layer.y,
+        layer.ffn_trace, layer.block_trace, shared);
+}
+
+/// Copy elements [begin,end) of a token's embedding row; the token is host-validated.
 template <typename Scalar>
 __device__ inline void embedding_lookup(
     TokenId token_id, int begin, int end, int hidden_size, const Scalar* embedding, Scalar* hidden)
@@ -534,42 +472,12 @@ __device__ inline void embedding_lookup(
         hidden[index] = embedding[token_id * hidden_size + index];
 }
 
-/// Normalize elements [begin,end) of the final hidden vector.
-/// @param hidden,scale,normalized Hidden input, RMS scale and disjoint output vectors of hidden_size elements.
-/// @param begin,end Output range owned by the calling block, within [0, hidden_size].
-/// @param hidden_size,epsilon Positive vector width and FP32 stabilizer.
-/// @param shared_inverse_rms,reduction_scratch Block-private shared float and kNormReductionThreads floats.
-/// @pre Every thread of the block participates; the whole input vector is already visible.
-/// @pre Normalized output must not alias hidden or scale; block scratch is disjoint from the vectors.
-/// Each block computes its own inverse RMS to avoid inter-block synchronization; BF16 rounds before scaling.
-/// @post The caller must publish the completed output with a grid barrier before computing logits.
-template <typename Scalar>
-__device__ inline void final_rms_norm(const Scalar* hidden, const Scalar* scale, Scalar* normalized,
-    int begin, int end, int hidden_size, float epsilon, float* shared_inverse_rms,
-    float* reduction_scratch)
-{
-    rms_norm_factor(hidden, hidden_size, epsilon, shared_inverse_rms, reduction_scratch);
-    for (int index = begin + threadIdx.x; index < end; index += blockDim.x)
-        normalized[index] = static_cast<Scalar>(
-            static_cast<float>(
-                static_cast<Scalar>(static_cast<float>(hidden[index]) * *shared_inverse_rms)) *
-            static_cast<float>(scale[index]));
-}
-
-/// Compute vocabulary logits [begin,end) with one warp per row.
-/// @param hidden,lm_head Globally visible normalized input and row-major [vocab_size,hidden_size] weights.
-/// @param[out] output Disjoint float32 API buffer; BF16 mathematical logits round before widening.
-/// @param begin,end Vocabulary rows owned by the calling block.
-/// @param hidden_size Positive matrix width, uniform across the block.
-/// @param shared Block-private reduction scratch; warps use separate slots.
-/// @pre Every thread of the block participates.
-/// @post Every logit has one writer, lane 0 of its warp; consumers require a grid/stream boundary.
+/// Vocabulary logits [begin,end), one warp per row; BF16 logits round before widening.
 template <typename Scalar>
 __device__ inline void logits(const Scalar* hidden, const Scalar* lm_head, float* output, int begin,
     int end, int hidden_size, SharedStorage& shared)
 {
-    const int warp = threadIdx.x / kWarpSize;
-    for (int row = begin + warp; row < end; row += kWarpsPerBlock) {
+    for (int row = begin + threadIdx.x / kWarpSize; row < end; row += kWarpsPerBlock) {
         const float value = warp_dot(lm_head + static_cast<cuda::std::size_t>(row) * hidden_size,
             hidden, hidden_size, shared);
         if (threadIdx.x % kWarpSize == 0)

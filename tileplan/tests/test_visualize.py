@@ -15,7 +15,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class VisualizationTest(unittest.TestCase):
-    def test_stack_graph_shows_shapes_and_one_repeated_block(self) -> None:
+    def test_schedule_shows_one_layer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             target = normalize(
@@ -43,68 +43,22 @@ class VisualizationTest(unittest.TestCase):
                 stack_fixture / "model.json",
                 stack_fixture / "weights.npz",
                 target_path,
-                4,
                 package,
             )
             schedule = root / "schedule.svg"
-            graph = root / "tensor-graph.svg"
-            flow = root / "tile-flow.svg"
             self.assertEqual(
-                main(
-                    [
-                        "visualize",
-                        str(package),
-                        "--out",
-                        str(schedule),
-                        "--tensor-graph-out",
-                        str(graph),
-                        "--tile-flow-out",
-                        str(flow),
-                    ]
-                ),
-                0,
+                main(["visualize", str(package), "--out", str(schedule)]), 0
             )
-            self.assertTrue(schedule.is_file())
-            self.assertEqual(
-                ElementTree.parse(graph).getroot().tag,
-                "{http://www.w3.org/2000/svg}svg",
-            )
-            svg = graph.read_text()
-            self.assertEqual(svg.count("Decoder block × 3"), 1)
-            for label in (
-                "Embedding lookup",
-                "current layer hidden",
-                "y feeds the next layer’s x",
-                "Wgate: [64, 32]",
-                "K, V [3, 6, 2, 8]",
-                "logits [48]",
-                "lm_head: [48, 32] (tied)",
-            ):
-                self.assertIn(label, svg)
-
-            flow_root = ElementTree.parse(flow).getroot()
-            flow_svg = flow.read_text()
+            svg = schedule.read_text()
+            root_element = ElementTree.fromstring(svg)
+            self.assertEqual(root_element.tag, "{http://www.w3.org/2000/svg}svg")
+            # One layer of the stack: its six waves, each task card labeled.
             plan = layer_view(read_package(package)[0])
             for wave in range(len(plan["waves"])):
-                self.assertIn(f"Wave {wave}", flow_svg)
-            self.assertIn("full grid barrier", flow_svg)
-            self.assertIn("collapsed prerequisites", flow_svg)
-            self.assertIn("SiLU(gate[rows]) × up[rows]", flow_svg)
-            self.assertLess(len(flow_svg), 100_000)
-            cards = [
-                element.attrib["data-card"]
-                for element in flow_root.iter()
-                if "data-card" in element.attrib
-            ]
-            self.assertTrue(any(card.startswith("a") for card in cards))
-            for element in flow_root.iter():
-                source = element.attrib.get("data-from", "")
-                target = element.attrib.get("data-to", "")
-                if source.startswith("t") and target.startswith("t"):
-                    self.assertIn(
-                        int(source[1:]),
-                        plan["tasks"][int(target[1:])]["predecessors"],
-                    )
+                self.assertIn(f"Wave {wave}", svg)
+            self.assertIn("Full decoder: 3 layers", svg)
+            for opcode in ("qkv_f32", "attention_scores_f32", "gate_up_f32"):
+                self.assertIn(opcode, svg)
 
             block_fixture = FIXTURES / "decoder_m1"
             block = root / "block"
@@ -112,26 +66,13 @@ class VisualizationTest(unittest.TestCase):
                 block_fixture / "model.json",
                 block_fixture / "weights.npz",
                 target_path,
-                4,
                 block,
             )
+            block_schedule = root / "block-schedule.svg"
             self.assertEqual(
-                main(
-                    [
-                        "visualize",
-                        str(block),
-                        "--out",
-                        str(root / "block-schedule.svg"),
-                        "--tensor-graph-out",
-                        str(root / "block-graph.svg"),
-                    ]
-                ),
-                0,
+                main(["visualize", str(block), "--out", str(block_schedule)]), 0
             )
-            block_svg = (root / "block-graph.svg").read_text()
-            self.assertIn("Decoder block × 1", block_svg)
-            self.assertNotIn("Embedding lookup", block_svg)
-            self.assertNotIn("y feeds the next layer’s x", block_svg)
+            self.assertIn("One-token decoder block", block_schedule.read_text())
 
 
 if __name__ == "__main__":

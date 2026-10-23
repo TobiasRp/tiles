@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 348" width="760" height="348" role="img" aria-label="Where a token&#x27;s time goes, by phase (context 64)">
+<title>Where a token&#x27;s time goes, by phase (context 64)</title>
+<rect width="100%" height="100%" fill="#fcfcfb"/>
+<text x="24.0" y="32.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="17" fill="#0b0b0b" text-anchor="start" font-weight="600">Where a token&#x27;s time goes, by phase (context 64)</text>
+<text x="24.0" y="54.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#52514e" text-anchor="start" font-weight="400">Per-token time summed over all layers; ideal = unique bytes at 212.9 GB/s</text>
+<rect x="124.0" y="69.0" width="10" height="10" rx="2" fill="#2a78d6"/>
+<text x="139.0" y="78.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">ideal streaming</text>
+<rect x="248.0" y="69.0" width="10" height="10" rx="2" fill="#eb6834"/>
+<text x="263.0" y="78.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">above ideal</text>
+<line x1="124.0" x2="124.0" y1="90" y2="312" stroke="#e6e5e1" stroke-width="1"/>
+<text x="124.0" y="328.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">0 ms</text>
+<line x1="212.4" x2="212.4" y1="90" y2="312" stroke="#e6e5e1" stroke-width="1"/>
+<text x="212.4" y="328.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">1 ms</text>
+<line x1="300.7" x2="300.7" y1="90" y2="312" stroke="#e6e5e1" stroke-width="1"/>
+<text x="300.7" y="328.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">2 ms</text>
+<line x1="389.1" x2="389.1" y1="90" y2="312" stroke="#e6e5e1" stroke-width="1"/>
+<text x="389.1" y="328.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">3 ms</text>
+<line x1="477.5" x2="477.5" y1="90" y2="312" stroke="#e6e5e1" stroke-width="1"/>
+<text x="477.5" y="328.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">4 ms</text>
+<line x1="565.8" x2="565.8" y1="90" y2="312" stroke="#e6e5e1" stroke-width="1"/>
+<text x="565.8" y="328.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">5 ms</text>
+<text x="114.0" y="109.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">gate/up</text>
+<rect x="124.0" y="96.0" width="443.6" height="18" fill="#2a78d6"><title>gate/up: ideal 5043 µs</title></rect>
+<path d="M569.6,96.0 h9.4 a4,4 0 0 1 4,4 v10.0 a4,4 0 0 1 -4,4 h-9.4 z" fill="#eb6834"><title>gate/up: above ideal 151 µs</title></path>
+<text x="591.0" y="109.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">5,194 µs</text>
+<text x="114.0" y="137.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">down</text>
+<rect x="124.0" y="124.0" width="220.8" height="18" fill="#2a78d6"><title>down: ideal 2521 µs</title></rect>
+<path d="M346.8,124.0 h20.2 a4,4 0 0 1 4,4 v10.0 a4,4 0 0 1 -4,4 h-20.2 z" fill="#eb6834"><title>down: above ideal 274 µs</title></path>
+<text x="379.0" y="137.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">2,795 µs</text>
+<text x="114.0" y="165.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">lm_head</text>
+<rect x="124.0" y="152.0" width="216.0" height="18" fill="#2a78d6"><title>lm_head: ideal 2467 µs</title></rect>
+<rect x="342.0" y="152.0" width="3.6" height="18" fill="#eb6834"><title>lm_head: above ideal 40 µs</title></rect>
+<text x="353.6" y="165.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">2,508 µs</text>
+<text x="114.0" y="193.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">QKV</text>
+<rect x="124.0" y="180.0" width="81.5" height="18" fill="#2a78d6"><title>QKV: ideal 946 µs</title></rect>
+<path d="M207.5,180.0 h16.5 a4,4 0 0 1 4,4 v10.0 a4,4 0 0 1 -4,4 h-16.5 z" fill="#eb6834"><title>QKV: above ideal 232 µs</title></path>
+<text x="236.0" y="193.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">1,177 µs</text>
+<text x="114.0" y="221.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">Wo</text>
+<rect x="124.0" y="208.0" width="53.7" height="18" fill="#2a78d6"><title>Wo: ideal 630 µs</title></rect>
+<path d="M179.7,208.0 h10.2 a4,4 0 0 1 4,4 v10.0 a4,4 0 0 1 -4,4 h-10.2 z" fill="#eb6834"><title>Wo: above ideal 161 µs</title></path>
+<text x="201.9" y="221.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">791 µs</text>
+<text x="114.0" y="249.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">attention</text>
+<path d="M124.9,236.0 h35.6 a4,4 0 0 1 4,4 v10.0 a4,4 0 0 1 -4,4 h-35.6 z" fill="#eb6834"><title>attention: above ideal 448 µs</title></path>
+<text x="172.5" y="249.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">458 µs</text>
+<text x="114.0" y="277.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">final norm</text>
+<rect x="124.0" y="264.0" width="0.3" height="18" fill="#eb6834"><title>final norm: above ideal 4 µs</title></rect>
+<text x="132.3" y="277.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">4 µs</text>
+<text x="114.0" y="305.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="end" font-weight="400">embedding</text>
+<rect x="124.0" y="292.0" width="0.2" height="18" fill="#eb6834"><title>embedding: above ideal 2 µs</title></rect>
+<text x="132.2" y="305.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">2 µs</text>
+</svg>

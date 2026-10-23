@@ -38,20 +38,13 @@ json target_json(const tileinfer::Target& t)
                     {"global_memory_bytes", t.global_memory_bytes},
                     {"max_threads_per_sm", t.max_threads_per_sm},
                     {"driver_version", t.driver_version}, {"runtime_version", t.runtime_version}}},
-        {"executor",
-            {{"abi", tileinfer::kAbi},
-                {"opcodes", {"rms_norm_f32", "gemv_f32", "rope_query_f32", "rope_cache_f32",
-                                "attention_prefix_f32", "silu_product_f32", "embedding_f32",
-                                "final_rms_norm_f32", "logits_f32", "rms_norm_bf16", "gemv_bf16",
-                                "rope_query_bf16", "rope_cache_bf16", "attention_prefix_bf16",
-                                "silu_product_bf16", "embedding_bf16", "final_rms_norm_bf16",
-                                "logits_bf16"}},
-                {"worker_variants", variants}, {"execution_ready", true},
-                {"threads_per_block", tileinfer::kThreads},
-                {"active_blocks_per_sm", t.active_blocks_per_sm},
-                {"registers_per_thread", t.registers_per_thread},
-                {"static_shared_bytes", t.static_shared_bytes},
-                {"fingerprint", tileinfer::kFingerprint}}}};
+        {"executor", {{"abi", tileinfer::kAbi}, {"opcodes", tileinfer::supported_opcodes()},
+                         {"worker_variants", variants}, {"execution_ready", true},
+                         {"threads_per_block", tileinfer::kThreads},
+                         {"active_blocks_per_sm", t.active_blocks_per_sm},
+                         {"registers_per_thread", t.registers_per_thread},
+                         {"static_shared_bytes", t.static_shared_bytes},
+                         {"fingerprint", tileinfer::kFingerprint}}}};
 }
 
 json precision(const tileinfer::LoadedPlan& plan)
@@ -72,7 +65,6 @@ json inspect(const tileinfer::LoadedPlan& plan)
         static_cast<std::uint64_t>(plan.stack.vocab_size) * sizeof(float);
     const std::uint64_t program_bytes = plan.instructions.size() * sizeof(tileinfer::TaskRecord) +
                                         plan.streams.size() * sizeof(tileinfer::WorkerTaskRange) +
-                                        plan.tensors.size() * sizeof(tileinfer::TensorRecord) +
                                         plan.rotary_frequencies.size() * sizeof(float);
     const std::uint64_t token_bytes =
         plan.stack.full_stack
@@ -83,7 +75,7 @@ json inspect(const tileinfer::LoadedPlan& plan)
         {"token_status_bytes", token_bytes},
         {"context_device_payload_bytes", hidden_buffers + logits_bytes + token_bytes +
                                              plan.scratch_bytes + plan.kv_bytes +
-                                             plan.attention_bytes},
+                                             plan.attention_bytes + plan.attention_partial_bytes},
         {"model_device_payload_bytes", plan.weights.size() + program_bytes},
         {"allocator_runtime_overhead_bytes", nullptr},
         {"scope",
@@ -94,11 +86,13 @@ json inspect(const tileinfer::LoadedPlan& plan)
         {"model",
             {{"hidden_size", plan.hidden_size}, {"intermediate_size", plan.intermediate_size},
                 {"num_attention_heads", plan.query_heads}, {"num_key_value_heads", plan.kv_heads},
-                {"head_dim", plan.head_dim}, {"max_context", plan.max_context}}},
+                {"head_dim", plan.head_dim}, {"max_context", plan.max_context},
+                {"attention_chunks", plan.attention_chunks}}},
         {"workers", plan.workers}, {"wave_count", plan.wave_count}, {"task_count", plan.task_count},
         {"instruction_count", plan.instructions.size()}, {"worker_loads", plan.worker_loads},
         {"scratch_bytes", plan.scratch_bytes}, {"attention_bytes", plan.attention_bytes},
-        {"kv_bytes", plan.kv_bytes}, {"weight_bytes", plan.weights.size()},
+        {"attention_partial_bytes", plan.attention_partial_bytes}, {"kv_bytes", plan.kv_bytes},
+        {"weight_bytes", plan.weights.size()},
         {"weight_dtype",
             plan.weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
         {"model_kind", plan.stack.full_stack ? "llama_decoder_stack" : "llama_decoder_block"},
@@ -142,22 +136,23 @@ json run_block(const tileinfer::LoadedPlan& plan, const std::string& input_path)
         const auto output = context.run_hidden(hidden);
         const auto scratch = context.scratch_snapshot();
         const auto kv = context.kv_snapshot();
-        auto segment = [&](int tensor, int count) {
-            const auto offset = plan.tensors.at(tensor).offset;
+        auto segment = [&](tileinfer::TensorId tensor, int count) {
+            const auto offset = plan.tensors.at(tileinfer::tensor_index(tensor)).offset;
             return std::vector<float>(scratch.begin() + offset, scratch.begin() + offset + count);
         };
+        using tileinfer::TensorId;
         const int kv_width = plan.kv_heads * plan.head_dim;
         const int p = context.position() - 1;
-        const auto key_offset = plan.tensors.at(10).offset + p * kv_width;
-        const auto value_offset = plan.tensors.at(11).offset + p * kv_width;
+        const auto key_offset = plan.layout.key + p * kv_width;
+        const auto value_offset = plan.layout.value + p * kv_width;
         const std::vector<float> key(kv.begin() + key_offset, kv.begin() + key_offset + kv_width);
         const std::vector<float> value(
             kv.begin() + value_offset, kv.begin() + value_offset + kv_width);
-        auto residual = segment(14, plan.hidden_size);
+        auto residual = segment(TensorId::r, plan.hidden_size);
         const auto ffn = context.ffn_snapshot();
-        steps.push_back({{"position", p}, {"q", segment(9, plan.hidden_size)}, {"k", key},
-            {"v", value}, {"attention", segment(12, plan.hidden_size)}, {"attn_residual", residual},
-            {"ffn", ffn}, {"y", output}});
+        steps.push_back({{"position", p}, {"q", segment(TensorId::q_rot, plan.hidden_size)},
+            {"k", key}, {"v", value}, {"attention", segment(TensorId::attention, plan.hidden_size)},
+            {"attn_residual", residual}, {"ffn", ffn}, {"y", output}});
     }
     return {{"steps", steps}, {"position", context.position()}, {"valid", context.valid()}};
 }
@@ -195,8 +190,8 @@ json run_stack(
         json values = json::array();
         for (int layer = 0; layer < plan.stack.layers; ++layer) {
             const int base = layer * plan.stack.layer_kv_stride + position * width;
-            const int key_offset = base + plan.tensors.at(10).offset;
-            const int value_offset = base + plan.tensors.at(11).offset;
+            const int key_offset = base + plan.layout.key;
+            const int value_offset = base + plan.layout.value;
             keys.push_back(
                 std::vector<float>(kv.begin() + key_offset, kv.begin() + key_offset + width));
             values.push_back(

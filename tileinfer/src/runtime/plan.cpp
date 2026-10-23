@@ -82,14 +82,12 @@ float positive_float(const json& value, const char* name)
 
 using Spec = detail::PlanShape;
 
-constexpr std::array<const char*, kTensorCount> names{"x", "attn_norm", "u", "Wq", "q", "Wk", "k",
-    "Wv", "v", "q_rot", "K", "V", "attention", "Wo", "r", "ffn_norm", "z", "Wgate", "gate", "Wup",
-    "up", "product", "Wdown", "y"};
+constexpr std::array<const char*, kTensorCount> names{"x", "attn_norm", "Wq", "Wk", "Wv", "q_rot",
+    "K", "V", "attention", "Wo", "r", "ffn_norm", "Wgate", "Wup", "product", "Wdown", "y"};
 using Id = TensorId;
 constexpr std::array weight_ids{
     Id::attn_norm, Id::Wq, Id::Wk, Id::Wv, Id::Wo, Id::ffn_norm, Id::Wgate, Id::Wup, Id::Wdown};
-constexpr std::array scratch_ids{Id::u, Id::q, Id::k, Id::v, Id::q_rot, Id::attention, Id::r, Id::z,
-    Id::gate, Id::up, Id::product};
+constexpr std::array scratch_ids{Id::q_rot, Id::attention, Id::r, Id::product};
 constexpr std::array kv_ids{Id::K, Id::V};
 
 std::vector<int> shape(const Spec& s, Id id)
@@ -110,11 +108,6 @@ std::vector<int> shape(const Spec& s, Id id)
         return {s.f, s.d};
     case Id::Wdown:
         return {s.d, s.f};
-    case Id::k:
-    case Id::v:
-        return {kv_width};
-    case Id::gate:
-    case Id::up:
     case Id::product:
         return {s.f};
     case Id::K:
@@ -186,7 +179,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
     const auto model_kind = header.at("model_kind").get<std::string>();
     const bool full_stack = model_kind == "llama_decoder_stack";
     const int version = positive(header.at("format_version"), "format_version");
-    require(version == 5 && header.at("executor_abi") == kAbi &&
+    require(version == 6 && header.at("executor_abi") == kAbi &&
                 model_kind == (full_stack ? "llama_decoder_stack" : "llama_decoder_block"),
         "unsupported decoder plan header; regenerate the package with the current planner");
     const auto& model = document.at("model");
@@ -208,13 +201,17 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
         positive(model.at("num_key_value_heads"), "num_key_value_heads"),
         positive(model.at("head_dim"), "head_dim"),
         positive(model.at("max_context"), "max_context"),
-        positive(model.at("tile_rows"), "tile_rows")};
+        positive(model.at("attention_chunks"), "attention_chunks")};
     const int layers = positive(model.at("layers"), "layers");
     const int vocab = full_stack ? positive(model.at("vocab_size"), "vocab_size") : 0;
     const bool tied = full_stack ? model.at("tie_word_embeddings").get<bool>() : false;
     require(s.d == static_cast<std::int64_t>(s.nq) * s.dh && s.nq % s.nkv == 0 && s.dh % 2 == 0 &&
                 (full_stack || layers == 1),
         "unsupported decoder dimensions");
+    require(s.d <= kMaxHidden && s.dh <= kMaxHeadDim && s.nq / s.nkv <= kMaxGroup,
+        "decoder dimensions exceed the compiled worker's shared-memory limits");
+    // Chunks beyond a short prefix are empty and contribute nothing.
+    require(s.chunks <= 1024, "too many attention chunks");
     for (std::size_t id = 0; id < kTensorCount; ++id) {
         std::uint64_t elements = 1;
         for (int dimension : shape(s, static_cast<Id>(id)))
@@ -317,11 +314,17 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
         "decoder weight checksum mismatch");
 
     LoadedPlan result{};
-    const auto attention_bytes = bf16 ? multiply(multiply(s.nq, s.context), 2) : 0;
-    require(storage.at("attention_bytes") == attention_bytes, "invalid attention workspace");
-    require(attention_bytes / 2 <= static_cast<std::uint64_t>(std::numeric_limits<int>::max()),
+    const auto attention_bytes = multiply(multiply(s.nq, s.context), weight_element_bytes);
+    const auto partial_bytes = multiply(multiply(multiply(s.chunks, s.nq), s.dh + 2), 4);
+    require(storage.at("attention_bytes") == attention_bytes &&
+                storage.at("attention_partial_bytes") == partial_bytes,
+        "invalid attention workspace");
+    require(attention_bytes / weight_element_bytes <=
+                static_cast<std::uint64_t>(std::numeric_limits<int>::max()),
         "attention workspace exceeds address range");
     result.attention_bytes = attention_bytes;
+    result.attention_partial_bytes = partial_bytes;
+    result.attention_chunks = s.chunks;
     result.weight_dtype = weight_dtype == "bfloat16" ? WeightDtype::bfloat16 : WeightDtype::float32;
     result.hidden_size = s.d;
     result.intermediate_size = s.f;
@@ -349,6 +352,11 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
                 storage_id, static_cast<std::uint32_t>(
                                 entry.at("offset").get<std::uint64_t>() / weight_element_bytes)};
     }
+    const auto offset = [&](Id id) { return result.tensors[tensor_index(id)].offset; };
+    result.layout = {offset(Id::q_rot), offset(Id::attention), offset(Id::r), offset(Id::product),
+        offset(Id::K), offset(Id::V), offset(Id::attn_norm), offset(Id::Wq), offset(Id::Wk),
+        offset(Id::Wv), offset(Id::Wo), offset(Id::ffn_norm), offset(Id::Wgate), offset(Id::Wup),
+        offset(Id::Wdown)};
     for (int pair = 0; pair < s.dh / 2; ++pair) {
         const float inverse = 1.0f / std::pow(numeric.rope_theta, 2.0f * pair / s.dh);
         const float wavelength = 2.0f * std::numbers::pi_v<float> / inverse;

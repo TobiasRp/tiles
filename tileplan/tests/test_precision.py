@@ -32,8 +32,12 @@ class PrecisionTest(unittest.TestCase):
             self.weights = {name: stored[name].copy() for name in stored.files}
 
     def test_two_storage_policies_and_independent_validation(self):
-        fp32, _ = make_plan(self.spec, self.weights, target(), 7)
-        bf16, packed = make_plan(self.spec, self.weights, target(), 7, "bfloat16")
+        fp32, _ = make_plan(
+            self.spec,
+            self.weights,
+            target(),
+        )
+        bf16, packed = make_plan(self.spec, self.weights, target(), "bfloat16")
         self.assertTrue(all(t["dtype"] == "bfloat16" for t in bf16["model"]["tensors"]))
         self.assertEqual(bf16["storage"]["kv_bytes"] * 2, fp32["storage"]["kv_bytes"])
         self.assertEqual(
@@ -65,7 +69,7 @@ class PrecisionTest(unittest.TestCase):
 
     def test_retired_package_formats_are_rejected(self):
         for dtype in ("float32", "bfloat16"):
-            plan, packed = make_plan(self.spec, self.weights, target(), 7, dtype)
+            plan, packed = make_plan(self.spec, self.weights, target(), dtype)
             for version in (2, 3):
                 legacy = copy.deepcopy(plan)
                 legacy["header"].update(
@@ -81,7 +85,11 @@ class PrecisionTest(unittest.TestCase):
         weights = {
             name: value.numpy() for name, value in fixed_stack_weights(spec).items()
         }
-        stack, packed = make_stack_plan(spec, weights, target(), 7)
+        stack, packed = make_stack_plan(
+            spec,
+            weights,
+            target(),
+        )
         stack["header"].update(
             format_version=3,
             executor_abi="tileinfer-decoder-v3",

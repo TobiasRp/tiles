@@ -1,6 +1,13 @@
-"""Render the blog's baseline figures from an S0 run directory.
+"""Render the blog's figures from a measurement run directory.
 
-usage: python docs/blog/make_figures.py RUN_DIR OUT_DIR
+usage: python docs/blog/make_figures.py RUN_DIR OUT_DIR [--baseline BASE_DIR]
+
+Without --baseline this draws one run's figures. With it, the figures get an
+"s2-" prefix and two of them compare RUN_DIR with the baseline run
+(RUN_DIR/ab-timing.json holds same-session timings of both builds); only the
+baseline's timeline report is read. The S0 figures themselves were drawn by
+this script at commit 13f71c4; later versions read only the current package
+format's opcodes.
 
 RUN_DIR holds the S0 artifacts: stream.json and rowdot.json from
 ``bandwidth_probe``, context-sweep.json from ``benchmark_decode.py``,
@@ -197,7 +204,7 @@ def context_sweep(run: Path, out: Path) -> None:
     svg.write(out / "context-sweep.svg")
 
 
-def loss_budget(run: Path, out: Path) -> None:
+def loss_budget(run: Path, out: Path, prefix: str = "") -> None:
     report = json.loads((run / "timeline/timeline-report.json").read_text())
     parts = [
         ("streaming_excess", "GEMVs below roofline", SERIES[0]),
@@ -266,7 +273,7 @@ def loss_budget(run: Path, out: Path) -> None:
                 size=11.5,
             )
         )
-    svg.write(out / "loss-budget.svg")
+    svg.write(out / f"{prefix}loss-budget.svg")
 
 
 def worker_bandwidth(run: Path, out: Path) -> None:
@@ -370,7 +377,7 @@ def worker_bandwidth(run: Path, out: Path) -> None:
     svg.write(out / "worker-bandwidth.svg")
 
 
-def phase_breakdown(run: Path, out: Path) -> None:
+def phase_breakdown(run: Path, out: Path, prefix: str = "") -> None:
     report = json.loads((run / "timeline/timeline-report.json").read_text())
     phases = next(p for p in report["positions"] if p["position"] == 63)["phases"]
     names = sorted(phases, key=lambda n: -phases[n]["duration_us"])
@@ -438,7 +445,7 @@ def phase_breakdown(run: Path, out: Path) -> None:
                 size=11.5,
             )
         )
-    svg.write(out / "phase-breakdown.svg")
+    svg.write(out / f"{prefix}phase-breakdown.svg")
 
 
 def group(task: dict) -> str:
@@ -456,7 +463,7 @@ GROUPS = {
 }
 
 
-def timeline(run: Path, out: Path, position: int, layer: int) -> None:
+def timeline(run: Path, out: Path, position: int, layer: int, prefix: str = "") -> None:
     plan = json.loads((run / "package-4k/plan.json").read_text())
     trace = json.loads((run / f"traces/trace-p{position}.json").read_text())
     times = [s["kernel_us"] for s in trace["samples"]]
@@ -507,12 +514,200 @@ def timeline(run: Path, out: Path, position: int, layer: int) -> None:
             svg.text(gx, axis, f"{tick:g} µs", size=10.5, color=MUTED, anchor="middle")
         )
         tick += step
-    svg.write(out / f"timeline-layer-ctx{position + 1}.svg")
+    svg.write(out / f"{prefix}timeline-layer-ctx{position + 1}.svg")
+
+
+def mean(values: list[float]) -> float:
+    return sum(values) / len(values)
+
+
+def context_comparison(baseline: Path, run: Path, out: Path) -> None:
+    """Fixed-position latency of both TileInfer builds, PyTorch, and the floor."""
+    sweep = json.loads((run / "context-sweep.json").read_text())
+    timing = json.loads((run / "ab-timing.json").read_text())["fixed"]
+    floor = {
+        p["position"] + 1: p["ideal_stream_us"] / 1e3
+        for p in json.loads((run / "timeline/timeline-report.json").read_text())[
+            "positions"
+        ]
+    }
+    rows = sweep["baseline"]["rows"]
+    contexts = [row["context_length"] for row in rows]
+    series = [
+        (
+            "TileInfer S2",
+            SERIES[0],
+            [mean(timing[str(c)]["s2"]) / 1e3 for c in contexts],
+        ),
+        ("PyTorch CUDA Graph", SERIES[1], [r["graph_mean_us"] / 1e3 for r in rows]),
+        ("PyTorch eager", SERIES[2], [r["eager_mean_us"] / 1e3 for r in rows]),
+        (
+            "TileInfer baseline",
+            SERIES[3],
+            [mean(timing[str(c)]["s0"]) / 1e3 for c in contexts],
+        ),
+    ]
+    svg = Svg(
+        410,
+        "One-token decode latency vs. context length, before and after S2",
+        "Llama 3.2 1B, BF16, RTX 3050; fixed position, GPU-resident; same session; lower is better",
+    )
+    left, right, top, bottom = 64, 178, 102, 362
+    lo, hi = 10.0, 24.0
+
+    def x(context: int) -> float:
+        return left + math.log2(context) / 12 * (WIDTH - left - right)
+
+    def y(ms: float) -> float:
+        return bottom - (ms - lo) / (hi - lo) * (bottom - top)
+
+    svg.legend(left, 80, [(c, n) for n, c, _ in series])
+    for tick in range(int(lo), int(hi) + 1, 2):
+        svg.add(
+            f'<line x1="{left}" x2="{WIDTH - right}" y1="{y(tick):.1f}" y2="{y(tick):.1f}" stroke="{GRID}" stroke-width="1"/>'
+        )
+        svg.add(
+            svg.text(
+                left - 8, y(tick) + 4, f"{tick} ms", size=11, color=MUTED, anchor="end"
+            )
+        )
+    for context in contexts:
+        svg.add(
+            svg.text(
+                x(context),
+                bottom + 18,
+                f"{context:,}",
+                size=11,
+                color=MUTED,
+                anchor="middle",
+            )
+        )
+    svg.add(
+        svg.text(
+            (left + WIDTH - right) / 2,
+            bottom + 38,
+            "context length (tokens, log scale)",
+            size=11,
+            color=MUTED,
+            anchor="middle",
+        )
+    )
+    points = " ".join(f"{x(c):.1f},{y(floor[c]):.1f}" for c in contexts if c in floor)
+    svg.add(
+        f'<polyline points="{points}" fill="none" stroke="{NEUTRAL}" stroke-width="2"/>'
+    )
+    ends = [(y(floor[contexts[-1]]), "bandwidth floor")]
+    for name, color, values in series:
+        line = " ".join(
+            f"{x(c):.1f},{y(v):.1f}" for c, v in zip(contexts, values, strict=True)
+        )
+        svg.add(
+            f'<polyline points="{line}" fill="none" stroke="{color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
+        )
+        for c, v in zip(contexts, values, strict=True):
+            svg.add(
+                f'<circle cx="{x(c):.1f}" cy="{y(v):.1f}" r="4" fill="{color}" stroke="{SURFACE}" stroke-width="2"><title>{escape(name)}, context {c:,}: {v:.2f} ms</title></circle>'
+            )
+        ends.append((y(values[-1]), f"{name} {values[-1]:.1f} ms"))
+    ends.sort()
+    placed: list[float] = []
+    for label_y, label in ends:
+        label_y = max(label_y, placed[-1] + 15) if placed else label_y
+        placed.append(label_y)
+        svg.add(svg.text(WIDTH - right + 10, label_y + 4, label, size=11.5))
+    svg.write(out / "s2-context-sweep.svg")
+
+
+def budget_comparison(baseline: Path, run: Path, out: Path) -> None:
+    """Time above the bandwidth floor per context, baseline bar above S2 bar."""
+    before = json.loads((baseline / "timeline/timeline-report.json").read_text())[
+        "positions"
+    ]
+    after = {
+        p["position"]: p
+        for p in json.loads((run / "timeline/timeline-report.json").read_text())[
+            "positions"
+        ]
+    }
+    parts = [
+        ("streaming_excess", "GEMVs below roofline", SERIES[0]),
+        ("small_phases", "small phases", SERIES[1]),
+        ("attention_excess", "attention", SERIES[2]),
+        ("barrier_sync", "barrier latency", SERIES[3]),
+    ]
+    rows = [(p, after[p["position"]]) for p in before if p["position"] in after]
+    svg = Svg(
+        120 + 62 * len(rows),
+        "Time per token above the bandwidth floor, baseline vs. S2",
+        "Traced worker kernel minus ideal streaming at 212.9 GB/s; upper bar baseline, lower bar S2",
+    )
+    left, top, pitch, thick = 140, 100, 62, 20
+    scale = (WIDTH - left - 190) / 10.5
+    svg.legend(left, 80, [(c, label) for _, label, c in parts])
+    for tick in range(0, 11, 2):
+        gx = left + tick * scale
+        svg.add(
+            f'<line x1="{gx:.1f}" x2="{gx:.1f}" y1="{top - 6}" y2="{top + pitch * len(rows) - 14}" stroke="{GRID}" stroke-width="1"/>'
+        )
+        svg.add(
+            svg.text(
+                gx,
+                top + pitch * len(rows) + 2,
+                f"{tick} ms",
+                size=11,
+                color=MUTED,
+                anchor="middle",
+            )
+        )
+    for i, (old, new) in enumerate(rows):
+        context = old["position"] + 1
+        for j, (name, report) in enumerate((("baseline", old), ("S2", new))):
+            y0 = top + i * pitch + j * (thick + 4)
+            svg.add(
+                svg.text(
+                    left - 10,
+                    y0 + 14,
+                    f"context {context:,}, {name}",
+                    size=11.5,
+                    color=MUTED,
+                    anchor="end",
+                )
+            )
+            x0 = left
+            for k, (key, label, color) in enumerate(parts):
+                ms = report["components_us"][key] / 1e3
+                last = k == len(parts) - 1
+                svg.add(
+                    bar(
+                        x0,
+                        y0,
+                        ms * scale - (0 if last else 2),
+                        thick,
+                        color,
+                        f"context {context:,} {name}: {label} {ms:.2f} ms",
+                        end=last,
+                    )
+                )
+                x0 += ms * scale
+            svg.add(
+                svg.text(
+                    x0 + 8, y0 + 14, f"+{report['bubble_us'] / 1e3:.2f} ms", size=11.5
+                )
+            )
+    svg.write(out / "s2-loss-budget.svg")
 
 
 def main() -> None:
     run, out = Path(sys.argv[1]), Path(sys.argv[2])
     out.mkdir(parents=True, exist_ok=True)
+    if len(sys.argv) == 5 and sys.argv[3] == "--baseline":
+        baseline = Path(sys.argv[4])
+        context_comparison(baseline, run, out)
+        budget_comparison(baseline, run, out)
+        phase_breakdown(run, out, "s2-")
+        timeline(run, out, 63, 8, "s2-")
+        timeline(run, out, 4095, 8, "s2-")
+        return
     context_sweep(run, out)
     loss_budget(run, out)
     worker_bandwidth(run, out)

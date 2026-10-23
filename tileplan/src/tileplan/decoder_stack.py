@@ -19,6 +19,7 @@ from .decoder_plan import (
     SCRATCH,
     WEIGHTS,
     _attention_bytes,
+    _attention_partial_bytes,
     _descriptors,
     _json_bytes,
     _model_fields,
@@ -31,7 +32,7 @@ from .decoder_plan import (
     _shape,
     _validate_policy,
     _weight_size,
-    choose_tile_rows,
+    attention_chunks,
     numeric_policy,
 )
 from .decoder_reference import (
@@ -233,10 +234,8 @@ def make_stack_plan(
     spec: StackSpec,
     weights: dict[str, np.ndarray],
     target: dict,
-    tile_rows: int,
     weight_dtype: str = "float32",
 ) -> tuple[dict, bytes]:
-    _require(type(tile_rows) is int and tile_rows > 0, "tile rows must be positive")
     _validate_weights(spec, weights)
     block = spec.block
     weight_bytes = _weight_size(weight_dtype)
@@ -270,7 +269,7 @@ def make_stack_plan(
             weights["lm_head"], weight_dtype
         )
     plan = make_stack_plan_metadata(
-        spec, target, tile_rows, weight_dtype, sha256(packed).hexdigest()
+        spec, target, weight_dtype, sha256(packed).hexdigest()
     )
     _require(len(packed) == plan["storage"]["weight_bytes"], "invalid packed size")
     validate_stack(plan, bytes(packed))
@@ -280,12 +279,10 @@ def make_stack_plan(
 def make_stack_plan_metadata(
     spec: StackSpec,
     target: dict,
-    tile_rows: int,
     weight_dtype: str,
     weights_sha256: str,
 ) -> dict:
     """Build the stack graph and layout without holding checkpoint weights."""
-    _require(type(tile_rows) is int and tile_rows > 0, "tile rows must be positive")
     _require(len(weights_sha256) == 64, "invalid weight hash")
     block = spec.block
     weight_bytes = _weight_size(weight_dtype)
@@ -302,9 +299,8 @@ def make_stack_plan_metadata(
     scratch_regions, scratch_bytes = _regions(block, SCRATCH, 16, weight_bytes)
     kv_regions, layer_kv_bytes = _regions(block, ("K", "V"), 16, weight_bytes)
     workers = target["launch"]["worker_count"]
-    tasks = _program(
-        block, tile_rows, weight_dtype, workers, spec.layers, spec.vocab_size
-    )
+    chunks = attention_chunks(block, workers)
+    tasks = _program(block, weight_dtype, workers, spec.layers, spec.vocab_size)
     waves = _schedule(tasks, workers)
     stack = {
         "embedding_offset": 0,
@@ -335,7 +331,7 @@ def make_stack_plan_metadata(
         },
         "model": {
             **_model_fields(spec.as_dict(), weight_dtype),
-            "tile_rows": tile_rows,
+            "attention_chunks": chunks,
             "tensors": _descriptors(block, weight_dtype),
         },
         "storage": {
@@ -343,6 +339,7 @@ def make_stack_plan_metadata(
             "output_bytes": spec.vocab_size * 4,
             "scratch_bytes": scratch_bytes,
             "attention_bytes": _attention_bytes(block, weight_dtype),
+            "attention_partial_bytes": _attention_partial_bytes(block, chunks),
             "scratch": scratch_regions,
             "kv_bytes": layer_kv_bytes * spec.layers,
             "kv": kv_regions,
@@ -381,8 +378,6 @@ def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
         and model["tensors"] == _descriptors(block, weight_dtype),
         "invalid stack model",
     )
-    tile_rows = model["tile_rows"]
-    _require(type(tile_rows) is int and tile_rows > 0, "invalid tile rows")
     workers = plan["target"]["worker_count"]
     _require(
         type(workers) is int
@@ -393,6 +388,8 @@ def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
         and plan["target"]["threads_per_block"] > 0,
         "invalid stack target",
     )
+    chunks = attention_chunks(block, workers)
+    _require(model["attention_chunks"] == chunks, "invalid attention chunks")
     base_regions, layer_weights_bytes = _regions(block, WEIGHTS, 64, weight_bytes)
     scratch_regions, scratch_bytes = _regions(block, SCRATCH, 16, weight_bytes)
     kv_regions, layer_kv_bytes = _regions(block, ("K", "V"), 16, weight_bytes)
@@ -429,6 +426,7 @@ def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
             "output_bytes": spec.vocab_size * 4,
             "scratch_bytes": scratch_bytes,
             "attention_bytes": _attention_bytes(block, weight_dtype),
+            "attention_partial_bytes": _attention_partial_bytes(block, chunks),
             "scratch": scratch_regions,
             "kv_bytes": layer_kv_bytes * spec.layers,
             "kv": kv_regions,
@@ -444,9 +442,7 @@ def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
         and len(packed) == total,
         "stack weight checksum or size mismatch",
     )
-    tasks = _program(
-        block, tile_rows, weight_dtype, workers, spec.layers, spec.vocab_size
-    )
+    tasks = _program(block, weight_dtype, workers, spec.layers, spec.vocab_size)
     waves = _schedule(tasks, workers)
     _require(
         plan["tasks"] == tasks and plan["waves"] == waves,
@@ -458,21 +454,13 @@ def build_stack(
     model_path: Path,
     weights_path: Path,
     target_path: Path,
-    tile_rows: int | str,
     out: Path,
     weight_dtype: str = "float32",
 ) -> dict:
     spec = read_stack_model(model_path)
     weights = read_stack_weights(weights_path, spec)
     target = read_target(target_path)
-    candidates = None
-    if tile_rows == "auto":
-        tile_rows, candidates = choose_tile_rows(
-            spec.block, target["launch"]["worker_count"]
-        )
-    elif isinstance(tile_rows, str):
-        tile_rows = int(tile_rows)
-    plan, packed = make_stack_plan(spec, weights, target, tile_rows, weight_dtype)
+    plan, packed = make_stack_plan(spec, weights, target, weight_dtype)
     if out.exists():
         raise FileExistsError(out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -488,7 +476,7 @@ def build_stack(
             "weights_sha256": plan["integrity"]["weights_sha256"],
             "layers": spec.layers,
             "vocab_size": spec.vocab_size,
-            "tile_rows": tile_rows,
+            "attention_chunks": plan["model"]["attention_chunks"],
             "task_count": len(plan["tasks"]),
             "wave_count": len(plan["waves"]),
             "scratch_bytes": plan["storage"]["scratch_bytes"],
@@ -496,8 +484,6 @@ def build_stack(
             "weight_bytes": len(packed),
             "worker_loads": [wave["estimated_work"] for wave in plan["waves"]],
         }
-        if candidates is not None:
-            report["tile_search"] = candidates
         (temporary / "planning_report.json").write_bytes(_json_bytes(report))
         os.rename(temporary, out)
     except BaseException:

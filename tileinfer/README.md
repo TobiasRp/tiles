@@ -9,7 +9,7 @@ GPU greedy selection feeds back the next token. The current RTX 3050 worker
 uses 1024 threads per block and one logical worker per SM; worker IDs have no
 physical SM affinity.
 
-Version-5 packages use either float32 or BF16 weights, activations, and K/V.
+Version-6 packages use either float32 or BF16 weights, activations, and K/V.
 BF16 matrix operands accumulate in float32; RMSNorm statistics, softmax, RoPE
 frequency/trigonometric work, and SiLU internals retain float32 math. BF16
 rounding follows the pinned PyTorch eager operator boundaries. Public logits
@@ -154,6 +154,5 @@ initcheck disables API-copy inspection only for the deliberately gated
 ring tests. Kernel memory reads remain checked.
 [llama32_checkpoint.py](tests/llama32_checkpoint.py) compares layer outputs,
 K/V, logits, and greedy choices with matching-precision Transformers.
-[sweep_tiles.py](tests/sweep_tiles.py) separates synthetic tile-selection pilots
-from independent final rounds. See the [decoder design](../docs/tile_graph_decoder.md)
+See the [decoder design](../docs/tile_graph_decoder.md)
 for the full numerical and execution contract.
