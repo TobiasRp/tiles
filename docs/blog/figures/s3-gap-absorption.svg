@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 410" width="760" height="410" role="img" aria-label="Only prefetch issued after the barrier hides post-barrier work">
+<title>Only prefetch issued after the barrier hides post-barrier work</title>
+<rect width="100%" height="100%" fill="#fcfcfb"/>
+<text x="24.0" y="32.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="17" fill="#0b0b0b" text-anchor="start" font-weight="600">Only prefetch issued after the barrier hides post-barrier work</text>
+<text x="24.0" y="54.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#52514e" text-anchor="start" font-weight="400">One Llama layer&#x27;s four GEMV waves on 20 workers; rings are 4 × 16 KB; lower is better</text>
+<rect x="24.0" y="71.0" width="10" height="10" rx="2" fill="#2a78d6"/>
+<text x="39.0" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">direct loads (S2)</text>
+<rect x="161.6" y="71.0" width="10" height="10" rx="2" fill="#eb6834"/>
+<text x="176.6" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">ring filled before barrier</text>
+<rect x="360.4" y="71.0" width="10" height="10" rx="2" fill="#1baf7a"/>
+<text x="375.4" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">ring filled after barrier</text>
+<rect x="552.4" y="71.0" width="10" height="10" rx="2" fill="#eda100"/>
+<text x="567.4" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">L2 prefetch, 32 KB</text>
+<line x1="64" x2="560" y1="362.0" y2="362.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="56.0" y="366.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">0 µs</text>
+<line x1="64" x2="560" y1="297.0" y2="297.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="56.0" y="301.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">20 µs</text>
+<line x1="64" x2="560" y1="232.0" y2="232.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="56.0" y="236.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">40 µs</text>
+<line x1="64" x2="560" y1="167.0" y2="167.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="56.0" y="171.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">60 µs</text>
+<line x1="64" x2="560" y1="102.0" y2="102.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="56.0" y="106.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">80 µs</text>
+<text x="64.0" y="380.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">0</text>
+<text x="163.2" y="380.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">2</text>
+<text x="312.0" y="380.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">5</text>
+<text x="560.0" y="380.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">10</text>
+<text x="312.0" y="400.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">busy work after each barrier (µs); y: time above the bandwidth floor per layer</text>
+<polyline points="64.0,285.7 163.2,285.7 312.0,285.7 560.0,285.7" fill="none" stroke="#c9c8c2" stroke-width="2" stroke-dasharray="5 4"/>
+<polyline points="64.0,285.7 163.2,259.7 312.0,220.7 560.0,155.7" fill="none" stroke="#c9c8c2" stroke-width="2" stroke-dasharray="5 4"/>
+<polyline points="64.0,285.7 163.2,266.3 312.0,229.8 560.0,170.0" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="64.0" cy="285.7" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>direct loads (S2), 0 µs gap: 23.5 µs above the floor</title></circle>
+<circle cx="163.2" cy="266.3" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>direct loads (S2), 2 µs gap: 29.4 µs above the floor</title></circle>
+<circle cx="312.0" cy="229.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>direct loads (S2), 5 µs gap: 40.7 µs above the floor</title></circle>
+<circle cx="560.0" cy="170.0" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>direct loads (S2), 10 µs gap: 59.1 µs above the floor</title></circle>
+<polyline points="64.0,291.1 163.2,267.7 312.0,230.3 560.0,171.1" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="64.0" cy="291.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>ring filled before barrier, 0 µs gap: 21.8 µs above the floor</title></circle>
+<circle cx="163.2" cy="267.7" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>ring filled before barrier, 2 µs gap: 29.0 µs above the floor</title></circle>
+<circle cx="312.0" cy="230.3" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>ring filled before barrier, 5 µs gap: 40.5 µs above the floor</title></circle>
+<circle cx="560.0" cy="171.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>ring filled before barrier, 10 µs gap: 58.7 µs above the floor</title></circle>
+<polyline points="64.0,280.8 163.2,278.2 312.0,261.1 560.0,200.2" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="64.0" cy="280.8" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>ring filled after barrier, 0 µs gap: 25.0 µs above the floor</title></circle>
+<circle cx="163.2" cy="278.2" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>ring filled after barrier, 2 µs gap: 25.8 µs above the floor</title></circle>
+<circle cx="312.0" cy="261.1" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>ring filled after barrier, 5 µs gap: 31.0 µs above the floor</title></circle>
+<circle cx="560.0" cy="200.2" r="4" fill="#1baf7a" stroke="#fcfcfb" stroke-width="2"><title>ring filled after barrier, 10 µs gap: 49.8 µs above the floor</title></circle>
+<polyline points="64.0,273.6 163.2,252.5 312.0,215.9 560.0,156.4" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="64.0" cy="273.6" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"><title>L2 prefetch, 32 KB, 0 µs gap: 27.2 µs above the floor</title></circle>
+<circle cx="163.2" cy="252.5" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"><title>L2 prefetch, 32 KB, 2 µs gap: 33.7 µs above the floor</title></circle>
+<circle cx="312.0" cy="215.9" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"><title>L2 prefetch, 32 KB, 5 µs gap: 45.0 µs above the floor</title></circle>
+<circle cx="560.0" cy="156.4" r="4" fill="#eda100" stroke="#fcfcfb" stroke-width="2"><title>L2 prefetch, 32 KB, 10 µs gap: 63.3 µs above the floor</title></circle>
+<text x="570.0" y="159.7" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">gap fully exposed</text>
+<text x="570.0" y="174.7" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">L2 prefetch 63</text>
+<text x="570.0" y="189.7" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">direct loads (S2) 59</text>
+<text x="570.0" y="204.7" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">ring filled before barrier 59</text>
+<text x="570.0" y="219.7" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">ring filled after barrier 50</text>
+<text x="570.0" y="289.7" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">gap fully hidden</text>
+</svg>

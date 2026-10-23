@@ -16,7 +16,17 @@ They are not measurements.
 replace several estimates in Sections 1 and 2 (each marked **S0 measured**).
 S2 is written up in [the S2 post](blog/s2-fused-tasks-2026-10.md):
 TileInfer now matches CUDA Graph replay at context 1 and beats it by up to
-15% at 4K. The next step is S3, weight prefetch across barriers.
+15% at 4K.
+
+**Re-plan, 2026-10-23: S3's probe came back negative.** Weights prefetched
+before a grid barrier hide none of the time lost around it; refilled right
+after the barrier, a 64 KB ring hides about half of the work that follows,
+which projects to at most 0.1 ms per token
+([Section 10](#10-s3-probe-results-and-the-re-plan),
+[the S3 post](blog/s3-weight-prefetch-2026-10.md)). The ring is not built
+into the decoder. The milestones in [Section 5](#5-milestones) are revised:
+next is **S2b, short-context attention**, then **S4, fewer wave
+boundaries**, and every milestone now opens with a probe gate.
 
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
@@ -259,6 +269,15 @@ dependent launch, which lets kernel N+1 start loading while kernel N drains,
 requires compute capability 9.0. The RTX 3050 is 8.6. It is the clearest
 mechanism the prototype can demonstrate.
 
+> **S3 probe:** the idea above fails on this GPU when the load is issued
+> *before* the barrier. DRAM stays saturated until the slowest worker
+> finishes, so an early worker's prefetch only takes bandwidth from the
+> stragglers, and it has landed long before the barrier releases. Loads
+> issued *after* the barrier, into the window where DRAM idles, do overlap
+> the post-barrier work, but only up to the ring's capacity (about 7 µs of
+> DRAM time for the whole GPU). See
+> [Section 10](#10-s3-probe-results-and-the-re-plan).
+
 ### Why static assignment beats a dynamic queue here
 
 A worker can prefetch the weights for its next task only if it knows which
@@ -313,6 +332,17 @@ Each milestone keeps the decoder reference and checkpoint regressions green,
 reprobes the compiled worker, and runs clang-format, Ruff, ty, CTest, and
 Compute Sanitizer before any timing is reported (AGENTS.md). Each one adds a
 row to the ablation table in S6.
+
+**Every milestone opens with a probe gate** (added after S3). Before the
+package format or the worker changes, a microbenchmark on the worker's own
+launch shape (`bandwidth_probe`, the operator unit harness, or the timeline
+trace) must show that the mechanism recovers its expected share of time.
+The gate states its threshold up front. Below it, the milestone is
+re-planned instead of built.
+
+Order after the re-plan: S0, S1, S2 (done) → S3 (probed, not built) →
+**S2b** short-context attention → **S4** fewer wave boundaries → S5 one
+launch per request → S6 showcase.
 
 ### S0 — Baseline and instruments (no kernel behavior change) — done
 
@@ -390,31 +420,83 @@ hoped are in [the S2 post](blog/s2-fused-tasks-2026-10.md).
 synchronization protocol. This alone may reach parity or better at short
 context.
 
-### S3 — Weight prefetch across synchronization
+### S3 — Weight prefetch across synchronization — probed, not built
 
-- Give each worker a shared-memory ring of weight slots (for example 2–3 ×
-  32 KB, sized from the probe). Fill it with `cuda::memcpy_async` and
-  `cuda::pipeline` from CCCL/libcu++, which lowers to `cp.async` on SM 8.x.
-- The planner inserts `prefetch(tile)` instructions before each `barrier`, so
-  each worker starts loading its next tiles before it waits. The GEMV consumes
-  from shared memory while the next slot fills. Weight tiles larger than the
-  ring stream through it.
-- The occupancy probe must now use the worker's **dynamic** shared-memory
-  size. `target.json` records it, and the validator rejects plans whose
-  prefetch depth exceeds it.
-- Read activations written in the same launch with ordinary loads, never
-  through the read-only path (`__ldg`, or `const __restrict__` that compiles
-  to `LDG.NC`). Weights may use it.
+The plan was a per-worker shared-memory ring of weight stages, filled with
+`cuda::memcpy_async`, that keeps loading the next task's weights while the
+worker waits at a barrier. Phase 1 built it in `bandwidth_probe ring` on
+decoder GEMV shapes and the worker's launch (commits `16f412e`, `00a68b8`).
 
-*Expected:* the remaining barrier and small-phase bubbles become invisible to
-DRAM. The trace should show near-continuous streaming. Of all the
-milestones, this is the most likely to beat graph replay *(hypothesis)*.
+- The ring keeps `project_rows`' per-lane summation order: outputs are
+  bit-identical in every mode and geometry.
+- With 16–32 KB stages it streams as fast as direct loads. Smaller stages
+  lose, because per-stage instruction overhead, not memory, sets the pace.
+- **Filled before the barrier, it hides none of the post-barrier time**, nor
+  does an L2 prefetch issued there.
+- Refilled right after the barrier, 4 × 16 KB hides about 2.3 µs per barrier
+  when 5–10 µs of work follows, and costs 0.4 µs per wave when none does.
+- `lm_head`, one long wave, gains about 1% (2 × 32 KB stages).
 
-### S4 — Dataflow counters instead of grid barriers
+Projected onto the decoder, that is at most 0.1 ms per token. The gate
+failed, so the ring stays a probe. Its after-barrier form (4 × 16 KB, refill
+right after each wait) is folded into S4's GEMV rewrite. Details are in
+[Section 10](#10-s3-probe-results-and-the-re-plan) and
+[the S3 post](blog/s3-weight-prefetch-2026-10.md).
 
-- Replace `barrier` with `wait(counter, target)` / `signal(counter)`.
-  Counters live in the `SequenceContext`, one per dependency group (for
-  example per layer × stage × KV head).
+### S2b — Short-context attention
+
+S2's two attention waves cost 0.42 ms per token above ideal at contexts 1–64,
+up from 0.22 ms in the baseline. Each layer runs 40 tiny chunk tasks twice.
+Each pays block-wide reductions and synchronizations per query head over a
+dozen time steps. That is now the largest single loss at contexts up to 1K,
+and fixing it needs no new synchronization protocol.
+
+- **Probe gate.** Extend the timeline trace with per-task cycle counts
+  inside the attention tasks, split into reductions, barriers within the
+  block, and K/V reads, at contexts 1, 64, and 256. Go if at least 0.2 ms
+  per token is fixed per-task overhead rather than K/V bytes or grid
+  barriers.
+- **Warp-level statistics.** Give each query head of a K/V group its own
+  warps, so the scores, maximum, and sum use warp reductions and one block
+  synchronization per task instead of block reductions per head.
+- **One attention wave for short prefixes.** When the visible prefix fits
+  one chunk, the scores task finishes the softmax and P·V itself, and the
+  barrier between the two attention waves is skipped. Every worker evaluates
+  the same `position`, so the skip is uniform. The instruction carries the
+  threshold, and the validator checks both paths.
+- **Numerics.** Keep the eager rounding points (scores and probabilities in
+  BF16). The FP32 combine order changes only where the chunking does, and
+  stays within the calibrated tolerances.
+
+*Expected (hypothesis):* attention above ideal falls from 0.42 to about
+0.15–0.2 ms at contexts up to 256, and long context does not regress.
+
+### S4 — Fewer wave boundaries: fused FFN, split-K, dataflow counters
+
+The S3 probe split S2's 0.72 ms of GEMV excess at context 1 into about
+0.32 ms of steady-state streaming below the roofline and about 0.40 ms at
+wave boundaries and in prologues. Each boundary costs about 2 µs beyond the
+steady-state rate, plus about 1 µs of barrier latency; S2 has 99 of them.
+Prefetch cannot hide a boundary, so S4 removes boundaries.
+
+- **Probe gate.** Extend `bandwidth_probe`'s layer program with the
+  candidate structure before touching the decoder: an FFN wave fused per
+  worker, Wo split by K/V group, and counter waits in place of `grid.sync()`.
+  Go if the probe saves at least 0.1 ms per token over S2's barriers.
+- **Fused FFN per worker.** Worker *k* computes gate/up rows for product
+  chunk *k*, then the down partial over that chunk's columns: `Wdown[:,
+  chunk k] · product[chunk k]`, which it produced itself. The gate/up → down
+  barrier disappears. The 20 FP32 partials are reduced in fixed order by the
+  next consumer, which also adds the residual and rounds `y`.
+- **Wo split-K by K/V group.** A Wo task for group *g* needs only that
+  group's four query heads, so it can start as soon as group *g*'s
+  attention is done.
+- **Counters instead of barriers** where dependencies are partial. They
+  replace `barrier` with `wait(counter, target)` / `signal(counter)`, and
+  counters live in the `SequenceContext`, one per dependency group (for
+  example per layer × stage × K/V head). A hard synchronization remains
+  where a norm needs the whole vector: after Wo (`r`) and after the FFN
+  (`y`).
 - **Memory ordering.** The producer does: all threads store, then
   `__syncthreads()`, then thread 0 does `__threadfence()` followed by an
   atomic increment (CUTLASS's semaphore pattern). The consumer does: thread 0
@@ -430,19 +512,25 @@ milestones, this is the most likely to beat graph replay *(hypothesis)*.
   inputs and can run, so progress is guaranteed. The C++ validator enforces
   this order. Debug builds add a bounded spin that records the stuck counter
   and traps.
+- **The GEMV loop moves to the weight ring.** A worker about to wait issues
+  its next task's first stages, then waits. This is the after-barrier form
+  that the S3 probe measured, with 4 × 16 KB stages. The same rewrite tries
+  `lm_head` with 2 × 32 KB stages (+1% in the probe) and 16-byte loads per
+  lane against the 0.32 ms steady-state shortfall, and adopts each only if
+  the probe shows a gain on every shape.
 - **Testing.** Compute Sanitizer racecheck covers shared memory only, so
   global ordering bugs need their own test. Add a debug mode that inserts
-  random `__nanosleep` delays before tasks, and compare against the S3
-  barrier executor. Without split-K the outputs must stay bit-identical.
-- Then add split-K Wo/down with deterministic reduction and producer-side
-  norm statistics, so the partial dependencies in Section 4 are expressed in
-  the graph.
+  random `__nanosleep` delays before tasks, and compare against the barrier
+  executor. The split-K reductions change the FP32 summation order, so
+  checkpoint outputs are held to the calibrated tolerances, not bit
+  equality; every split is introduced on its own, so a deviation points at
+  one change.
 - **Ablation.** Add a dynamic global work queue (atomic task claim, no
-  prefetch). Comparing it with static assignment plus prefetch is a result in
-  itself.
+  prefetch). Comparing it with static assignment is a result in itself.
 
-*Expected:* smaller gains than S3 at short context. The value is in the
-showcase, and in long context where attention and Wo overlap.
+*Expected (hypothesis):* 0.15–0.3 ms at short context, from fewer
+boundaries and from Wo streaming while later K/V groups still run
+attention. More at long context, where attention and Wo overlap.
 
 ### S5 — One launch per generation request
 
@@ -462,9 +550,10 @@ showcase, and in long context where attention and Wo overlap.
 - One command that imports the model, probes, plans each ablation stage,
   checks correctness, runs the controlled sweep, and writes a report.
 - **Ablation table**, in ms/token and % of attainable bandwidth: S0 baseline
-  → S2 balanced/fused waves → S3 prefetch → S4 dataflow → S4 + split-K/
-  split attention → S5 persistent, each at contexts 1/256/1K/2K/4K. Include
-  PyTorch eager and graph replay.
+  → S2 balanced/fused waves → S2b short-context attention → S4 fused FFN /
+  split-K / dataflow → S5 persistent, each at contexts 1/256/1K/2K/4K.
+  Include PyTorch eager and graph replay, and the S3 probe's prefetch result
+  as a negative control.
 - **Timeline figures** from the device trace: baseline (gaps at every
   barrier) next to the final schedule (continuous streaming), annotated with
   bytes per task.
@@ -487,7 +576,9 @@ showcase, and in long context where attention and Wo overlap.
   numerical policy, or state the limitation in the headline.
 - To attribute a speedup to *scheduling* rather than to a better operator,
   each ablation step changes one thing. The S0 row-dot microbenchmark and the
-  bit-identical S1 → S3 checks provide matched-operator controls.
+  bit-identical S1 and S2 checks provide matched-operator controls.
+- Report negative results with the same care as positive ones. A mechanism
+  that the probe rejects (S3) belongs in the write-up, with its numbers.
 - Prior art to cite and compare against in the write-up: Hazy Research's
   [Llama-1B "no bubbles" megakernel](https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles)
   (on-GPU instruction interpreter, weight prefetch across instructions,
@@ -504,12 +595,22 @@ showcase, and in long context where attention and Wo overlap.
   replay is already at the floor for short context. The showcase then rests on
   long context, the size sweep, and timeline evidence. Find this out in S0,
   before investing in S3–S4.
-- **Shared-memory prefetch and occupancy.** The design is already one block
-  per SM. Using about 64–96 KB of dynamic shared memory does not reduce
-  residency, but the probe and validator must account for it.
+- **Small wins per mechanism.** After S2 the remaining 1.3 ms at context 1
+  is spread over steady-state streaming (about 0.32 ms), wave boundaries and
+  prologues (about 0.40 ms), attention (0.42 ms), and barrier latency
+  (0.13 ms). No single mechanism is likely to recover more than 0.3 ms, so
+  each must pass its probe gate before it costs a format change.
+- **Shared-memory ring and occupancy.** The design is already one block per
+  SM. A 64 KB ring plus the worker's 23.8 KB of static shared memory fits the
+  99 KB limit and does not reduce residency, but it shrinks L1 to about
+  28 KB. The probe and validator must account for both.
 - **Spin-waiting at 1024 threads per block.** A single spinning thread with
   `__nanosleep` keeps the other warps idle at `__syncthreads()`. Confirm with
   the trace that waiting does not take issue slots from in-flight `cp.async`.
+- **Issue budget.** At 1,024 threads per SM, each 16 KB of weights allows
+  only about 350 instructions per thread at full bandwidth. The S3 probe's
+  first ring lost up to half its bandwidth to per-stage address arithmetic. Any new
+  per-stage or per-wait bookkeeping must stay a few adds.
 - **Numerical policy under fusion and split-K.** Every fusion must keep the
   BF16 rounding boundaries. Split-K changes the order of FP32 summation within
   the calibrated tolerances. Never tighten or refit tolerances to match
@@ -738,7 +839,8 @@ token, leaving 8 µs of launch gaps.
    remaining streaming excess, 0.79 ms, is spread across QKV (172 µs), Wo
    (112 µs), gate/up (316 µs), down (212 µs), and lm_head (40 µs). Each
    streaming wave restarts its DRAM pipeline after a barrier, so S3 prefetch
-   is a better lever for most of it than byte-balanced tiles. Balanced tiles
+   is a better lever for most of it than byte-balanced tiles. *(The S3 probe
+   disproved this; see Section 10.)* Balanced tiles
    stay in S2 but at lower priority.
 4. **Barrier latency is real but small:** about 1 µs per barrier, 0.14 ms per
    token. Fusion in S2 removes about half the barriers.
@@ -752,3 +854,51 @@ floor is 11.61 ms and graph replay 12.84 ms, so about 9.6% is available. At
 4K, graph replay spends 20.3 ms against a 12.24 ms floor, so a near-ideal
 attention schedule could beat it by a wide margin there.
 
+## 10. S3 probe results and the re-plan
+
+Measured on 2026-10-23 with `bandwidth_probe ring` (commits `16f412e`,
+`00a68b8`); raw runs in `runs/s3-2026-10-23/`. The full write-up, with
+figures, is [the S3 post](blog/s3-weight-prefetch-2026-10.md). One layer's
+four GEMV waves on 20 workers, time above the 571.3 µs floor, 4 × 16 KB
+rings:
+
+| Busy work after each barrier | Direct | Ring, before barrier | Ring, after barrier | L2 prefetch, 32 KB |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 µs | 23.5 µs | 21.8 µs | 25.0 µs | 27.2 µs |
+| 2 µs | 29.4 µs | 29.0 µs | 25.8 µs | 33.7 µs |
+| 5 µs | 40.7 µs | 40.5 µs | 31.0 µs | 45.0 µs |
+| 10 µs | 59.1 µs | 58.7 µs | 49.8 µs | 63.3 µs |
+
+### What the probe established
+
+1. **Prefetch before a barrier is zero-sum on this GPU.** Eight workers
+   saturate DRAM, so until the last stragglers finish, an early worker's
+   prefetch only slows them down. When the barrier releases, nothing is in
+   flight. This holds for the shared-memory ring and for L2 prefetch alike.
+2. **Prefetch after a barrier works, within capacity.** Loads issued as the
+   barrier releases overlap the post-barrier work. A 64 KB ring per SM hides
+   about half of the 4.5 µs it holds in flight. Without post-barrier work it
+   costs about 0.4 µs per wave.
+3. **The ring is cheap only if each stage is.** Per-stage overhead is paid
+   by all 32 warps, against a budget of about 350 instructions per thread
+   per 16 KB. With a constant-stride cursor, 16–32 KB stages tie with direct
+   loads, and 4–8 KB stages lose 4–28%.
+4. **The ring keeps the numerics.** It is bit-identical to `project_rows` in
+   every configuration.
+5. **The GEMV excess splits into two parts.** One long wave (`lm_head`)
+   streams at 207 of 213 GB/s, so about 0.32 ms per token is steady-state
+   shortfall. The other 0.40 ms comes from about 2 µs per wave boundary
+   plus prologues. The S2 budget lumped these together.
+
+### What changed in the plan
+
+- S3 is closed as a probe. The ring's after-barrier form moves into S4.
+- S2b, short-context attention, is next: 0.42 ms at context 64 and no new
+  protocol.
+- S4 now aims to *remove* boundaries (fused FFN with split-K down, Wo split
+  by K/V group, counters for partial dependencies) rather than hide them.
+- Every milestone opens with a probe gate and a stated threshold.
+
+*Targets (hypotheses):* S2b about −0.2 ms and S4 about −0.15 to −0.3 ms at
+short context. Together that is about 12.4–12.5 ms at context 1, 3–4% below
+graph replay (12.92 ms) and 7% above the 11.61 ms floor.
