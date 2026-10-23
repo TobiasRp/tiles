@@ -119,7 +119,8 @@ struct RingWave
 enum class Prefetch : int
 {
     direct,          // ops::project_rows, loads straight from global memory
-    within_task,     // ring drained at each task end, refilled after the barrier
+    within_task,     // ring drained at each task end, refilled after the gap
+    after_barrier,   // ring drained at each task end, refilled before the gap
     across_barriers, // ring runs ahead into the next task before the barrier
     l2,              // project_rows, after an L2 prefetch of the next task's first bytes
 };
@@ -299,11 +300,12 @@ __global__ __launch_bounds__(kThreads, 1) void ring_rowdot(
 
     using Stages = Ring<Depth, StageBytes>;
     const bool across = program.prefetch == Prefetch::across_barriers;
+    const bool early = program.prefetch == Prefetch::after_barrier;
     Stages ring(program, slots);
     ring.fill(across ? tasks : 1);
     for (int task = 0; task < tasks; ++task) {
         const int limit = across ? tasks : task + 1;
-        if (!across && task > 0)
+        if (program.prefetch == Prefetch::within_task && task > 0)
             ring.fill(limit);
         const RingWave& wave = program.waves[task % program.wave_count];
         int begin, end;
@@ -332,6 +334,8 @@ __global__ __launch_bounds__(kThreads, 1) void ring_rowdot(
         }
         __syncthreads();
         cg::this_grid().sync();
+        if (early)
+            ring.fill(limit + 1);
         spin(program.gap_cycles);
     }
     cuda::pipeline_consumer_wait_prior<0>(ring.pipe);
@@ -646,7 +650,8 @@ json ring_sweep(int sm_count)
                 record("l2", 0, l2_bytes, us, same_bits(reference, read_outputs(spec.waves)));
             }
             for (const auto& config : configs)
-                for (Prefetch mode : {Prefetch::within_task, Prefetch::across_barriers}) {
+                for (Prefetch mode :
+                    {Prefetch::within_task, Prefetch::after_barrier, Prefetch::across_barriers}) {
                     program.prefetch = mode;
                     for (int wave : spec.waves)
                         check(cudaMemsetAsync(outputs[wave].data(), 0,
@@ -654,8 +659,10 @@ json ring_sweep(int sm_count)
                             "clear outputs");
                     const double us =
                         time(config.kernel, config.depth * config.stage_bytes, program);
-                    record(mode == Prefetch::within_task ? "within_task" : "across_barriers",
-                        config.depth, config.stage_bytes, us,
+                    const char* name = mode == Prefetch::within_task     ? "within_task"
+                                       : mode == Prefetch::after_barrier ? "after_barrier"
+                                                                         : "across_barriers";
+                    record(name, config.depth, config.stage_bytes, us,
                         same_bits(reference, read_outputs(spec.waves)));
                 }
         }
