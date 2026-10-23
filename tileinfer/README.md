@@ -134,6 +134,10 @@ uv run --locked --project ../tileplan python tests/profile_timeline.py \
 `bandwidth_probe rowdot` times the worker's GEMV routine on the Llama 3.2 1B
 projection shapes with 1–20 active workers. See
 [the S0 results](../docs/megakernel_next_steps.md#9-s0-results-where-the-time-goes).
+`bandwidth_probe ring` runs the same shapes as wave programs separated by
+grid barriers. It compares direct loads with a `cp.async` shared-memory
+weight ring, with and without prefetch across barriers, and with an L2
+prefetch; see [the S3 results](../docs/blog/s3-weight-prefetch-2026-10.md).
 
 ## Checks
 
