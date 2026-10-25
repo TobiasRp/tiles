@@ -35,6 +35,11 @@ uv run rtbench report results/llamacpp.jsonl \
   --tileinfer-decode path/to/decode.json --tileinfer-generate path/to/generate.json
 ```
 
+On a CUDA machine, `scripts/run_phase2.sh OUT_DIR PACKAGE_DIR` runs the whole
+sweep (TileInfer, PyTorch eager and graph, six llama.cpp configurations, two
+passes in opposite order). `rtbench report` accepts several records files and
+TileInfer reports and averages cells that repeat, so the passes can be merged.
+
 Every row records whether it includes sampling (`none`: logits ready;
 `greedy`: next token id known). The report keeps the two apart.
 

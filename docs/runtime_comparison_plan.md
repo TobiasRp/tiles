@@ -1,7 +1,8 @@
 # Runtime comparison plan: llama.cpp next to TileInfer and PyTorch
 
-Status: Phases 0 and 1 are implemented in `experiments/runtimes/` and were run
-on an Apple M1 Pro (CPU). Phase 2 (CUDA on the RTX 3050) waits for `tux`.
+Status: Phases 0 to 2 are done. The harness in `experiments/runtimes/` was
+validated on an Apple M1 Pro (CPU, Phase 1) and then used for the measurements
+on the RTX 3050 in `tux` (Phase 2, results below).
 
 Phase 1 results (pinned checkpoint revision `4e20de36…`, llama.cpp b11871,
 CPU, 6 threads; harness validation only, never compared with CUDA numbers):
@@ -9,7 +10,7 @@ CPU, 6 threads; harness validation only, never compared with CUDA numbers):
 - GGUF: 147 tensors, 113 BF16 matrices + 34 F32 vectors (norms and
   `rope_freqs`), no quantized tensor. sha256
   `40241de51bb5634628bf29a583c34bcefe8d31849c677bb26a9ad6b47e272760`; compare
-  with the tux conversion in Phase 2.
+  with the tux conversion in Phase 2 (identical, see below).
 - Parity vs Transformers BF16 eager (CPU), teacher-forced, 3 prompts x 32
   steps: 0 real argmax mismatches, 3 mismatches at exact BF16 top-2 ties,
   max top-logit error 0.10 (tolerance 0.15 + 3%). Free-running comparison
@@ -20,8 +21,128 @@ CPU, 6 threads; harness validation only, never compared with CUDA numbers):
   default thread counts differed (4 vs 6), which first showed up as a 30%
   gap; the harness now passes an explicit count and records it.
 - Greedy sampling on the host adds under 1 ms on CPU (within noise).
-- Not yet exercised on real output: the TileInfer/PyTorch report adapters
-  (unit-tested with synthetic reports only), `--fa on`, `--kv f16`, Metal.
+- Not exercised on the Mac: Metal. The TileInfer/PyTorch report adapters were
+  first run on real reports in Phase 2.
+
+## Phase 2 results: RTX 3050, CUDA
+
+Measured on `tux` on 2026-10-25: RTX 3050 (20 SMs, driver 595.99.02, CUDA
+13.4, unlocked clocks, nothing else on the GPU), llama.cpp b11871 built for
+sm_86 with CUDA graphs on, PyTorch 2.14.1+cu130, TileInfer at the commit in
+`env.txt` (after S2 fused tasks). The same BF16 weights everywhere: the tux
+GGUF hash equals the Mac one (`40241de5…2760`). Everything ran in one session
+as two passes in opposite order (`scripts/run_phase2.sh`); the two passes
+differ by at most 0.5% in any cell (median 0.0%). Raw records, per-pass
+reports and Nsight reports are in `runs/rt-2026-10-25/` on `tux`.
+
+### Decode latency versus context (ms per token, logits ready, no sampling)
+
+Fixed-position timing as in the S0 baseline: the prefix is filled first and
+each timed call overwrites the same slot. llama.cpp numbers are from
+`rt_probe`; CUDA graphs on.
+
+| Context | PyTorch eager | PyTorch graph | TileInfer | llama.cpp FA, f16 K/V | llama.cpp FA, BF16 K/V | llama.cpp no FA, BF16 K/V | Floor |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 13.96 | 12.85 | 12.90 | 13.67 | 13.74 | 14.10 | 11.61 |
+| 256 | 14.75 | 13.37 | 13.14 | 13.67 | 13.73 | 14.08 | 11.65 |
+| 1,024 | 15.81 | 14.64 | 13.79 | 13.81 | 14.11 | 14.20 | 11.77 |
+| 2,048 | 17.39 | 16.23 | 14.63 | 13.98 | 14.67 | 14.42 | 11.92 |
+| 4,096 | 21.48 | 20.33 | 17.20 | 14.31 | 15.67 | 15.06 | 12.24 |
+
+- **Short context:** TileInfer and PyTorch's CUDA Graph are tied (12.9 ms, 11%
+  above the floor). llama.cpp is 6% slower at context 1 (13.7 ms, about
+  181 GB/s of the 212.9 GB/s measured).
+- **Crossover near 1,000 tokens:** TileInfer and llama.cpp with flash
+  attention are equal at 1,024. Beyond that llama.cpp's attention scales much
+  better: at 4,096 it is 17% faster than TileInfer (14.3 vs 17.2 ms, 17% above
+  the floor against TileInfer's 41%) and 30% faster than PyTorch's graph.
+  This is the attention weakness S2b targets.
+- **Matched precision costs llama.cpp:** with BF16 K/V (what the others use)
+  flash attention is slower than with f16 K/V, 9.5% at 4,096 (15.67 vs
+  14.31 ms) and 0.5% at context 1. It still beats TileInfer by 9% at 4,096.
+- **Flash attention helps in both:** without it llama.cpp is 3% slower at
+  context 1 and 5% slower at 4,096 (f16 K/V). K/V type makes no difference
+  without flash attention, which points to the flash-attention path as the
+  source of the BF16 penalty.
+
+The BF16 penalty is explained by the kernels. Nsight Systems on the probe
+(a 4,095-token prefix filled one token at a time, then decode) shows that with BF16 K/V flash attention runs
+`flash_attn_ext_f16` (the MMA kernel the source chooser picks on sm_86), fed
+by 32 `convert_unary_cont_vec4<bf16, half>` launches per token (K and V of 16
+layers): 261 kernels per token against 213 with f16 K/V, and 5.1% of GPU time
+(averaged over contexts 0 to 4,095). About 90% of kernel time is the 97
+`mul_mat_vec_f<bf16>` launches (weights), which makes llama.cpp's own BF16
+mat-vec kernel, not cuBLAS, the weight path. TileInfer runs one launch per
+token.
+
+### Other llama.cpp settings
+
+| Setting (flash attention on) | Context 1 | Context 4,096 |
+| --- | ---: | ---: |
+| f16 K/V, CUDA graphs on | 13.67 | 14.31 |
+| f16 K/V, CUDA graphs off | 13.95 | 14.59 |
+| BF16 K/V, CUDA graphs on | 13.74 | 15.67 |
+| BF16 K/V, CUDA graphs off | 14.11 | 15.98 |
+
+CUDA graphs are worth 0.3 ms (2%) in llama.cpp. `llama-bench` agrees with the
+probe within 0.25 ms (1.6%) at every context; it is slightly higher because its
+cache grows by 16 tokens during a test.
+
+### Sampling
+
+llama.cpp's greedy sampling on the host adds **0.21 ms per token** (1.5%),
+the same at every context and configuration (13.89 vs 13.67 ms at context 1).
+TileInfer's separate argmax kernel measured 0.165 ms in S0. The TileInfer
+fixed-context numbers above exclude it, so TileInfer plus its argmax is about
+13.1 ms at context 1, against llama.cpp plus sampling at 13.9 ms. Once
+TileInfer moves sampling into the token, the "decode only" TileInfer rows need
+a runtime switch or a trace subtraction.
+
+### Generation (9-token prompt `1, 2, 3,`, 64 new tokens, greedy included)
+
+| Runtime | ms per token | Tokens per second |
+| --- | ---: | ---: |
+| PyTorch eager | 14.51 | 69 |
+| PyTorch graph | 13.09 | 76 |
+| TileInfer | 12.94 | 77 |
+| llama.cpp FA, f16 K/V | 13.92 | 72 |
+| llama.cpp FA, BF16 K/V | 13.98 | 72 |
+
+All three PyTorch/TileInfer runs produce the same 64 ids. The prompt had to
+change from "The capital of France is": that prompt reaches an exact BF16
+top-2 tie, after which TileInfer and PyTorch eager break it differently, and
+the PyTorch ids even depend on the static-cache length. That is a real
+property of BF16 greedy decoding, not a bug in either runtime.
+
+### Correctness
+
+- GGUF is BF16-only (113 matrices) and its hash matches the Mac conversion.
+- Teacher-forced parity against Transformers BF16 eager on CUDA, 3 prompts x 32
+  steps, for flash attention on/BF16, on/f16 and off/BF16: 0 real argmax
+  mismatches, 1 tie mismatch each, max top-logit error 0.12 to 0.13 (within the
+  0.15 + 3% rule).
+- Cross-check at the swept contexts (next token and top logit versus PyTorch
+  eager, same filled context): every runtime picks the same token. TileInfer
+  stays within 0.06 of PyTorch. llama.cpp differs by 0.27 to 0.35 in every
+  configuration, a constant offset across contexts and K/V types. That points
+  to llama.cpp's numerics (float32 activations instead of BF16 rounding at
+  operator boundaries), not to K/V precision, and is inside the BF16
+  tolerance, but it is the largest margin of the three. The sweep context is
+  one token repeated, so it checks consistency, not quality.
+
+### Caveats
+
+- The decode sweep fills the context with one repeated token. Attention cost
+  does not depend on the values, but the cross-check logit is not a realistic
+  one.
+- TileInfer and PyTorch use CUDA events around batches of calls; the probe
+  uses wall clock with a synchronize per call. The 1.6% bench/probe gap and the
+  PyTorch graph match with TileInfer's S0 numbers suggest this is not a large
+  effect, but it is not identical instrumentation.
+- Clocks are unlocked; the 0.5% pass spread covers the thermal state of this
+  session only.
+- No investigation yet of why llama.cpp's weight streaming reaches about 85% of
+  peak bandwidth at context 1 while TileInfer reaches about 90%.
 
 ## Goal
 
@@ -150,7 +271,7 @@ The tokenizer is checked separately (llama.cpp's GGUF tokenizer vs HF
 - Done when: the whole pipeline produces a report from the Mac with correct
   parity.
 
-### Phase 2: CUDA on tux (when available)
+### Phase 2: CUDA on tux (done)
 - Rebuild llama.cpp with CUDA arch 86; regenerate the GGUF from the pinned
   checkpoint on tux and compare its sha256 to the Mac one (don't copy files
   from the Mac).
@@ -163,7 +284,8 @@ The tokenizer is checked separately (llama.cpp's GGUF tokenizer vs HF
   tells for PyTorch), and CUDA-graph use (`GGML_CUDA_GRAPHS` default on;
   record whether it was active).
 - Done when: the context sweep and generation row for four runtimes sit in one
-  table/SVG, with parity results next to them.
+  table/SVG, with parity results next to them. Done as tables above; SVG
+  figures are left for the blog post.
 
 ## Risks and open points
 
@@ -179,9 +301,9 @@ The tokenizer is checked separately (llama.cpp's GGUF tokenizer vs HF
   (head size 64, GQA 4, padded KV) to the **MMA kernel, not the vector
   kernel**, which per the source comment converts K/V to f16 first. That
   would add a K/V conversion pass per token and f16 range limits to BF16
-  values. Expect this to show up in Nsight Systems as extra conversion
-  kernels; treat as a hypothesis until measured on tux, and report f16 K/V as
-  the main llama.cpp configuration if it holds.
+  values. **Confirmed on tux:** 32 conversion kernels per token and a 9.5%
+  penalty at context 4,096, so both K/V types are reported, with BF16 K/V
+  as the matched-precision row.
 - **CUDA graphs:** on by default in CUDA builds (`GGML_CUDA_GRAPHS`);
   `GGML_CUDA_DISABLE_GRAPHS=1` turns them off at run time. Measure both; the
   graph is rebuilt per token, so "graphs on" is not the same as PyTorch graph
@@ -197,11 +319,20 @@ The tokenizer is checked separately (llama.cpp's GGUF tokenizer vs HF
   unknown, so a successful conversion is already a partial check. Parity still
   compares ids.
 
-### Still open (need tux)
+### Closed on tux
 
-- Whether the BF16 K/V MMA/conversion hypothesis above holds, and its cost.
-- Whether `llama-bench`'s graph behaviour matches the probe's.
-- Whether the `tux` GGUF hash matches the Mac one.
+- The BF16 K/V MMA/conversion hypothesis holds (see Phase 2 results).
+- `llama-bench` and the probe agree within 1.6% with graphs on.
+- The tux GGUF hash equals the Mac one.
+
+### Still open
+
+- Why llama.cpp reaches a lower share of DRAM bandwidth than TileInfer at
+  context 1 (its mat-vec kernel versus TileInfer's GEMV).
+- Backend (GPU) sampling in llama.cpp as a third sampling variant. The host
+  path costs 0.21 ms, so the effect is bounded by that.
+- Whether the constant 0.27 to 0.35 top-logit offset is float32 activations
+  or something else; a per-layer comparison would tell.
 
 ### Other risks
 
@@ -210,8 +341,9 @@ The tokenizer is checked separately (llama.cpp's GGUF tokenizer vs HF
 - Sustained-clock drift: interleave runtimes and keep the 3-round averages.
 - The Mac cannot validate any performance number; Metal/CPU runs are only for
   harness correctness.
-- `AGENTS.md` says tux is the working checkout and local is read-only. Phases
-  0 and 1 need a place to commit while tux is down.
+- `AGENTS.md` says tux is the working checkout. Phases 0 and 1 were built
+  and committed on the Mac while tux was down; Phase 2 and later changes were
+  made on tux.
 
 ## Deliverables
 
