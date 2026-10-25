@@ -7,8 +7,10 @@ from pathlib import Path
 from xml.etree import ElementTree
 
 from tileplan.cli import main
-from tileplan.decoder_plan import build, layer_view, read_package
+from tileplan.decoder_block import build
 from tileplan.decoder_stack import build_stack
+from tileplan.package import read_package
+from tileplan.plan_core import layer_view
 from tileplan.probe import ABI, OPCODES, normalize
 
 FIXTURES = Path(__file__).parent / "fixtures"

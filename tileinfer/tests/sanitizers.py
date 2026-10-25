@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
-from tileplan.decoder_plan import build
+from tileplan.decoder_block import build
 from tileplan.decoder_reference import DecoderSpec, generate_fixture
 from tileplan.decoder_stack import build_stack
 from tileplan.probe import probe

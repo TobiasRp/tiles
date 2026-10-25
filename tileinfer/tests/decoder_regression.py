@@ -9,13 +9,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from tileplan.decoder_plan import TID, build
+from tileplan.decoder_block import build
 from tileplan.decoder_reference import (
     DecoderSpec,
     ReferenceCache,
     decode_one,
     fixed_weights,
 )
+from tileplan.plan_core import TID
 from tileplan.probe import probe
 
 

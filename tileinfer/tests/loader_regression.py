@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from tileplan.decoder_plan import build
+from tileplan.decoder_block import build
 from tileplan.decoder_stack import build_stack
 from tileplan.probe import normalize
 

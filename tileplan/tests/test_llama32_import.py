@@ -7,7 +7,6 @@ from pathlib import Path
 
 import torch
 from safetensors.torch import save_file
-from tileplan.decoder_plan import read_package
 from tileplan.decoder_reference import DecoderSpec
 from tileplan.decoder_stack import StackSpec, fixed_stack_weights, make_stack_plan
 from tileplan.llama32_import import (
@@ -16,6 +15,7 @@ from tileplan.llama32_import import (
     pack_safetensors,
     read_llama32_config,
 )
+from tileplan.package import read_package
 from tileplan.probe import ABI, OPCODES, normalize
 
 

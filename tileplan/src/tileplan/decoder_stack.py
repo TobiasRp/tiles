@@ -3,38 +3,13 @@
 import json
 import math
 import mmap
-import os
-import shutil
-import tempfile
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
 import numpy as np
 import torch
 
-from .decoder_plan import (
-    FORMAT,
-    GENERATOR,
-    SCRATCH,
-    WEIGHTS,
-    _attention_bytes,
-    _attention_partial_bytes,
-    _descriptors,
-    _json_bytes,
-    _model_fields,
-    _pack_array,
-    _pack_weights,
-    _program,
-    _regions,
-    _require,
-    _schedule,
-    _shape,
-    _validate_policy,
-    _weight_size,
-    attention_chunks,
-    numeric_policy,
-)
 from .decoder_reference import (
     DecoderSpec,
     ReferenceCache,
@@ -43,7 +18,32 @@ from .decoder_reference import (
     fixed_weights,
     recompute_prefix,
 )
-from .probe import ABI, read_target
+from .plan_core import (
+    WEIGHTS,
+    align,
+    assemble_plan,
+    block_spec,
+    check_weight,
+    layer_view,
+    model_section,
+    numeric_policy,
+    pack_array,
+    pack_weights,
+    plan_target,
+    regions,
+    require,
+    scheduled_program,
+    storage_section,
+    tensor_shape,
+    validate_header,
+    validate_plan,
+    validate_target,
+    weight_size,
+    write_package,
+)
+from .probe import read_target
+
+MODEL_KIND = "llama_decoder_stack"
 
 
 @dataclass(frozen=True)
@@ -172,26 +172,29 @@ def recompute_stack_prefix(
     return final_hidden @ projection.T
 
 
-def _align(value: int, alignment: int = 64) -> int:
-    return value + (-value) % alignment
+def stack_spec(source: dict) -> StackSpec:
+    """Rebuild a stack spec from a reference fixture or a plan's model section."""
+    return StackSpec(
+        block_spec(source),
+        source["layers"],
+        source["vocab_size"],
+        source["tie_word_embeddings"],
+    )
 
 
 def read_stack_model(path: Path) -> StackSpec:
     document = json.loads(path.read_text())
-    _require(
+    require(
         document.get("kind") == "llama_decoder_stack_reference"
         and document.get("version") == 1,
         "unsupported stack fixture",
     )
-    names = {field.name for field in fields(DecoderSpec)}
-    block = DecoderSpec(**{name: document[name] for name in names})
-    _require(document["head_to_kv"] == block.head_to_kv, "head mapping mismatch")
-    return StackSpec(
-        block,
-        document["layers"],
-        document["vocab_size"],
-        document["tie_word_embeddings"],
-    )
+    return stack_spec(document)
+
+
+def read_stack_weights(path: Path) -> dict[str, np.ndarray]:
+    with np.load(path, allow_pickle=False) as source:
+        return {name: source[name].copy() for name in source.files}
 
 
 def _expected_names(spec: StackSpec) -> set[str]:
@@ -202,18 +205,8 @@ def _expected_names(spec: StackSpec) -> set[str]:
     return names
 
 
-def read_stack_weights(path: Path, spec: StackSpec) -> dict[str, np.ndarray]:
-    with np.load(path, allow_pickle=False) as source:
-        _require(
-            set(source.files) == _expected_names(spec), "stack weight names mismatch"
-        )
-        weights = {name: source[name].copy() for name in source.files}
-    _validate_weights(spec, weights)
-    return weights
-
-
-def _validate_weights(spec: StackSpec, weights: dict[str, np.ndarray]) -> None:
-    _require(set(weights) == _expected_names(spec), "stack weight names mismatch")
+def _check_weights(spec: StackSpec, weights: dict[str, np.ndarray]) -> None:
+    require(set(weights) == _expected_names(spec), "stack weight names mismatch")
     d, vocab = spec.block.hidden_size, spec.vocab_size
     for name, value in weights.items():
         if name in ("embedding", "lm_head"):
@@ -221,13 +214,64 @@ def _validate_weights(spec: StackSpec, weights: dict[str, np.ndarray]) -> None:
         elif name == "final_norm":
             shape = (d,)
         else:
-            shape = _shape(spec.block, name.split(".", 1)[1])
-        _require(
-            value.shape == shape
-            and value.dtype == np.float32
-            and bool(np.isfinite(value).all()),
-            f"invalid stack weight {name}",
-        )
+            shape = tensor_shape(spec.block, name.split(".", 1)[1])
+        check_weight(value, shape, name)
+
+
+def stack_layout(spec: StackSpec, dtype: str) -> tuple[dict, int]:
+    """Offsets of the stack's regions in weights.bin, and its total size."""
+    block, size = spec.block, weight_size(dtype)
+    embedding_bytes = spec.vocab_size * block.hidden_size * size
+    _, layer_weight_bytes = regions(block, WEIGHTS, 64, size)
+    _, layer_kv_bytes = regions(block, ("K", "V"), 16, size)
+    layer_stride = align(layer_weight_bytes)
+    layer_offset = align(embedding_bytes)
+    norm_offset = align(layer_offset + spec.layers * layer_stride)
+    total = norm_offset + block.hidden_size * size
+    lm_offset = 0
+    if not spec.tie_word_embeddings:
+        lm_offset = align(total)
+        total = lm_offset + embedding_bytes
+    return {
+        "embedding_offset": 0,
+        "embedding_bytes": embedding_bytes,
+        "layer_weights_offset": layer_offset,
+        "layer_weight_stride": layer_stride,
+        "layer_weight_bytes": layer_weight_bytes,
+        "final_norm_offset": norm_offset,
+        "final_norm_bytes": block.hidden_size * size,
+        "lm_head_offset": lm_offset,
+        "lm_head_alias": spec.tie_word_embeddings,
+        "layer_kv_stride": layer_kv_bytes,
+    }, total
+
+
+def stack_plan(spec: StackSpec, target: dict, dtype: str, weights_sha256: str) -> dict:
+    """Everything in a stack package except the weight bytes themselves.
+
+    Checkpoint importers build this before streaming weights, so it never
+    needs them; ``weights_sha256`` may be a placeholder until they are written.
+    """
+    require(len(weights_sha256) == 64, "invalid weight hash")
+    block, workers = spec.block, target["worker_count"]
+    stack, total = stack_layout(spec, dtype)
+    storage = storage_section(
+        block, dtype, workers, spec.layers, 4, spec.vocab_size * 4, total
+    )
+    return assemble_plan(
+        MODEL_KIND,
+        target,
+        model_section(spec.as_dict(), block, dtype, workers),
+        {**storage, "stack": stack},
+        scheduled_program(block, dtype, workers, spec.layers, spec.vocab_size),
+        weights_sha256,
+    )
+
+
+def make_stack_plan_metadata(
+    spec: StackSpec, target: dict, weight_dtype: str, weights_sha256: str
+) -> dict:
+    return stack_plan(spec, plan_target(target), weight_dtype, weights_sha256)
 
 
 def make_stack_plan(
@@ -236,218 +280,60 @@ def make_stack_plan(
     target: dict,
     weight_dtype: str = "float32",
 ) -> tuple[dict, bytes]:
-    _validate_weights(spec, weights)
-    block = spec.block
-    weight_bytes = _weight_size(weight_dtype)
-    embedding = _pack_array(weights["embedding"], weight_dtype)
-    layer_packed = []
+    _check_weights(spec, weights)
+    stack, total = stack_layout(spec, weight_dtype)
+    image = bytearray(total)
+
+    def put(offset: int, blob: bytes) -> None:
+        image[offset : offset + len(blob)] = blob
+
+    put(0, pack_array(weights["embedding"], weight_dtype))
     for layer in range(spec.layers):
-        packed, _ = _pack_weights(
-            block,
-            {name: weights[f"L{layer}.{name}"] for name in WEIGHTS},
-            weight_dtype,
+        layer_weights = {name: weights[f"L{layer}.{name}"] for name in WEIGHTS}
+        put(
+            stack["layer_weights_offset"] + layer * stack["layer_weight_stride"],
+            pack_weights(spec.block, layer_weights, weight_dtype),
         )
-        layer_packed.append(packed)
-    layer_stride = _align(len(layer_packed[0]))
-    layer_offset = _align(len(embedding))
-    norm_offset = _align(layer_offset + spec.layers * layer_stride)
-    cursor = norm_offset + block.hidden_size * weight_bytes
-    lm_offset = 0
+    put(stack["final_norm_offset"], pack_array(weights["final_norm"], weight_dtype))
     if not spec.tie_word_embeddings:
-        lm_offset = _align(cursor)
-        cursor = lm_offset + len(embedding)
-    packed = bytearray(cursor)
-    packed[: len(embedding)] = embedding
-    for layer, blob in enumerate(layer_packed):
-        start = layer_offset + layer * layer_stride
-        packed[start : start + len(blob)] = blob
-    packed[norm_offset : norm_offset + block.hidden_size * weight_bytes] = _pack_array(
-        weights["final_norm"], weight_dtype
-    )
-    if not spec.tie_word_embeddings:
-        packed[lm_offset : lm_offset + len(embedding)] = _pack_array(
-            weights["lm_head"], weight_dtype
-        )
+        put(stack["lm_head_offset"], pack_array(weights["lm_head"], weight_dtype))
+    packed = bytes(image)
     plan = make_stack_plan_metadata(
         spec, target, weight_dtype, sha256(packed).hexdigest()
     )
-    _require(len(packed) == plan["storage"]["weight_bytes"], "invalid packed size")
-    validate_stack(plan, bytes(packed))
-    return plan, bytes(packed)
-
-
-def make_stack_plan_metadata(
-    spec: StackSpec,
-    target: dict,
-    weight_dtype: str,
-    weights_sha256: str,
-) -> dict:
-    """Build the stack graph and layout without holding checkpoint weights."""
-    _require(len(weights_sha256) == 64, "invalid weight hash")
-    block = spec.block
-    weight_bytes = _weight_size(weight_dtype)
-    embedding_bytes = spec.vocab_size * block.hidden_size * weight_bytes
-    weight_regions, layer_weight_bytes = _regions(block, WEIGHTS, 64, weight_bytes)
-    layer_stride = _align(layer_weight_bytes)
-    layer_offset = _align(embedding_bytes)
-    norm_offset = _align(layer_offset + spec.layers * layer_stride)
-    cursor = norm_offset + block.hidden_size * weight_bytes
-    lm_offset = 0
-    if not spec.tie_word_embeddings:
-        lm_offset = _align(cursor)
-        cursor = lm_offset + embedding_bytes
-    scratch_regions, scratch_bytes = _regions(block, SCRATCH, 16, weight_bytes)
-    kv_regions, layer_kv_bytes = _regions(block, ("K", "V"), 16, weight_bytes)
-    workers = target["launch"]["worker_count"]
-    chunks = attention_chunks(block, workers)
-    tasks = _program(block, weight_dtype, workers, spec.layers, spec.vocab_size)
-    waves = _schedule(tasks, workers)
-    stack = {
-        "embedding_offset": 0,
-        "embedding_bytes": embedding_bytes,
-        "layer_weights_offset": layer_offset,
-        "layer_weight_stride": layer_stride,
-        "layer_weight_bytes": layer_weight_bytes,
-        "final_norm_offset": norm_offset,
-        "final_norm_bytes": block.hidden_size * weight_bytes,
-        "lm_head_offset": lm_offset,
-        "lm_head_alias": spec.tie_word_embeddings,
-        "layer_kv_stride": layer_kv_bytes,
-    }
-    plan = {
-        "header": {
-            "format_version": FORMAT,
-            "executor_abi": ABI,
-            "generator": GENERATOR,
-            "model_kind": "llama_decoder_stack",
-        },
-        "target": {
-            "compute_capability": target["device"]["compute_capability"],
-            "sm_count": target["device"]["sm_count"],
-            "cooperative_launch": True,
-            "worker_count": target["launch"]["worker_count"],
-            "threads_per_block": target["launch"]["threads_per_block"],
-            "kernel_fingerprint": target["executor"]["fingerprint"],
-        },
-        "model": {
-            **_model_fields(spec.as_dict(), weight_dtype),
-            "attention_chunks": chunks,
-            "tensors": _descriptors(block, weight_dtype),
-        },
-        "storage": {
-            "input_bytes": 4,
-            "output_bytes": spec.vocab_size * 4,
-            "scratch_bytes": scratch_bytes,
-            "attention_bytes": _attention_bytes(block, weight_dtype),
-            "attention_partial_bytes": _attention_partial_bytes(block, chunks),
-            "scratch": scratch_regions,
-            "kv_bytes": layer_kv_bytes * spec.layers,
-            "kv": kv_regions,
-            "weight_bytes": cursor,
-            "weights": weight_regions,
-            "stack": stack,
-        },
-        "tasks": tasks,
-        "waves": waves,
-        "integrity": {
-            "weights_bytes": cursor,
-            "weights_sha256": weights_sha256,
-        },
-    }
-    return plan
+    return plan, packed
 
 
 def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
-    header, model, storage = (plan[name] for name in ("header", "model", "storage"))
-    _require(
-        header["format_version"] == FORMAT
-        and header["executor_abi"] == ABI
-        and header["model_kind"] == "llama_decoder_stack",
-        "unsupported stack header; regenerate the package with the current planner",
+    validate_header(plan, MODEL_KIND)
+    model = plan["model"]
+    spec = stack_spec(model)
+    dtype = model.get("weight_dtype", "float32")
+    validate_target(plan["target"])
+    validate_plan(
+        plan, packed, lambda digest: stack_plan(spec, plan["target"], dtype, digest)
     )
-    weight_dtype = _validate_policy(model)
-    weight_bytes = _weight_size(weight_dtype)
-    names = {field.name for field in fields(DecoderSpec)}
-    block = DecoderSpec(**{name: model[name] for name in names if name != "dtype"})
-    spec = StackSpec(
-        block, model["layers"], model["vocab_size"], model["tie_word_embeddings"]
-    )
-    _require(
-        {name: model[name] for name in spec.as_dict() if name != "dtype"}
-        == {name: value for name, value in spec.as_dict().items() if name != "dtype"}
-        and model["tensors"] == _descriptors(block, weight_dtype),
-        "invalid stack model",
-    )
-    workers = plan["target"]["worker_count"]
-    _require(
-        type(workers) is int
-        and workers > 0
-        and workers == plan["target"]["sm_count"]
-        and plan["target"]["cooperative_launch"] is True
-        and type(plan["target"]["threads_per_block"]) is int
-        and plan["target"]["threads_per_block"] > 0,
-        "invalid stack target",
-    )
-    chunks = attention_chunks(block, workers)
-    _require(model["attention_chunks"] == chunks, "invalid attention chunks")
-    base_regions, layer_weights_bytes = _regions(block, WEIGHTS, 64, weight_bytes)
-    scratch_regions, scratch_bytes = _regions(block, SCRATCH, 16, weight_bytes)
-    kv_regions, layer_kv_bytes = _regions(block, ("K", "V"), 16, weight_bytes)
-    embedding_bytes = spec.vocab_size * block.hidden_size * weight_bytes
-    layer_offset = _align(embedding_bytes)
-    layer_stride = _align(layer_weights_bytes)
-    norm_offset = _align(layer_offset + spec.layers * layer_stride)
-    lm_offset = (
-        0
-        if spec.tie_word_embeddings
-        else _align(norm_offset + block.hidden_size * weight_bytes)
-    )
-    total = (
-        norm_offset + block.hidden_size * weight_bytes
-        if spec.tie_word_embeddings
-        else lm_offset + embedding_bytes
-    )
-    expected_stack = {
-        "embedding_offset": 0,
-        "embedding_bytes": embedding_bytes,
-        "layer_weights_offset": layer_offset,
-        "layer_weight_stride": layer_stride,
-        "layer_weight_bytes": layer_weights_bytes,
-        "final_norm_offset": norm_offset,
-        "final_norm_bytes": block.hidden_size * weight_bytes,
-        "lm_head_offset": lm_offset,
-        "lm_head_alias": spec.tie_word_embeddings,
-        "layer_kv_stride": layer_kv_bytes,
+
+
+def stack_summary(plan: dict, digest: str) -> dict:
+    storage = plan["storage"]
+    waves = plan["waves"]
+    return {
+        **numeric_policy(plan["model"].get("weight_dtype", "float32")),
+        "attention_bytes": storage["attention_bytes"],
+        "plan_sha256": digest,
+        "weights_sha256": plan["integrity"]["weights_sha256"],
+        "layers": plan["model"]["layers"],
+        "vocab_size": plan["model"]["vocab_size"],
+        "attention_chunks": plan["model"]["attention_chunks"],
+        "task_count": len(plan["tasks"]),
+        "wave_count": len(waves),
+        "layer_wave_count": len(layer_view(plan)["waves"]),
+        "scratch_bytes": storage["scratch_bytes"],
+        "kv_bytes": storage["kv_bytes"],
+        "weight_bytes": storage["weight_bytes"],
+        "worker_loads": [wave["estimated_work"] for wave in waves],
     }
-    _require(
-        storage
-        == {
-            "input_bytes": 4,
-            "output_bytes": spec.vocab_size * 4,
-            "scratch_bytes": scratch_bytes,
-            "attention_bytes": _attention_bytes(block, weight_dtype),
-            "attention_partial_bytes": _attention_partial_bytes(block, chunks),
-            "scratch": scratch_regions,
-            "kv_bytes": layer_kv_bytes * spec.layers,
-            "kv": kv_regions,
-            "weight_bytes": total,
-            "weights": base_regions,
-            "stack": expected_stack,
-        },
-        "invalid stack storage",
-    )
-    _require(
-        plan["integrity"]
-        == {"weights_bytes": len(packed), "weights_sha256": sha256(packed).hexdigest()}
-        and len(packed) == total,
-        "stack weight checksum or size mismatch",
-    )
-    tasks = _program(block, weight_dtype, workers, spec.layers, spec.vocab_size)
-    waves = _schedule(tasks, workers)
-    _require(
-        plan["tasks"] == tasks and plan["waves"] == waves,
-        "invalid stack program or schedule",
-    )
 
 
 def build_stack(
@@ -457,39 +343,13 @@ def build_stack(
     out: Path,
     weight_dtype: str = "float32",
 ) -> dict:
-    spec = read_stack_model(model_path)
-    weights = read_stack_weights(weights_path, spec)
-    target = read_target(target_path)
-    plan, packed = make_stack_plan(spec, weights, target, weight_dtype)
-    if out.exists():
-        raise FileExistsError(out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=f".{out.name}-", dir=out.parent))
-    try:
-        (temporary / "weights.bin").write_bytes(packed)
-        data = _json_bytes(plan)
-        (temporary / "plan.json").write_bytes(data)
-        report = {
-            **numeric_policy(weight_dtype),
-            "attention_bytes": plan["storage"]["attention_bytes"],
-            "plan_sha256": sha256(data).hexdigest(),
-            "weights_sha256": plan["integrity"]["weights_sha256"],
-            "layers": spec.layers,
-            "vocab_size": spec.vocab_size,
-            "attention_chunks": plan["model"]["attention_chunks"],
-            "task_count": len(plan["tasks"]),
-            "wave_count": len(plan["waves"]),
-            "scratch_bytes": plan["storage"]["scratch_bytes"],
-            "kv_bytes": plan["storage"]["kv_bytes"],
-            "weight_bytes": len(packed),
-            "worker_loads": [wave["estimated_work"] for wave in plan["waves"]],
-        }
-        (temporary / "planning_report.json").write_bytes(_json_bytes(report))
-        os.rename(temporary, out)
-    except BaseException:
-        shutil.rmtree(temporary)
-        raise
-    return report
+    plan, packed = make_stack_plan(
+        read_stack_model(model_path),
+        read_stack_weights(weights_path),
+        read_target(target_path),
+        weight_dtype,
+    )
+    return write_package(out, plan, packed, stack_summary)
 
 
 def generate_stack_fixture(

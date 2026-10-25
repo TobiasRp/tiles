@@ -2,10 +2,7 @@
 
 import json
 import mmap
-import os
 import re
-import shutil
-import tempfile
 from contextlib import ExitStack
 from hashlib import sha256
 from pathlib import Path
@@ -14,9 +11,9 @@ from typing import Any
 import torch
 from safetensors import safe_open
 
-from .decoder_plan import WEIGHTS, _json_bytes, _require, _shape
 from .decoder_reference import DecoderSpec
 from .decoder_stack import StackSpec, make_stack_plan_metadata, validate_stack
+from .plan_core import WEIGHTS, json_bytes, new_package_dir, require, tensor_shape
 from .probe import read_target
 
 MODEL_ID = "meta-llama/Llama-3.2-1B"
@@ -59,9 +56,9 @@ def read_llama32_config(path: Path, max_context: int) -> StackSpec:
         "torch_dtype": "bfloat16",
     }
     for name, value in expected.items():
-        _require(config.get(name) == value, f"unsupported Llama config {name}")
+        require(config.get(name) == value, f"unsupported Llama config {name}")
     rope = config.get("rope_scaling")
-    _require(isinstance(rope, dict), "missing Llama 3 RoPE scaling")
+    require(isinstance(rope, dict), "missing Llama 3 RoPE scaling")
     for name, value in {
         "rope_type": "llama3",
         "factor": 32.0,
@@ -69,8 +66,8 @@ def read_llama32_config(path: Path, max_context: int) -> StackSpec:
         "high_freq_factor": 4.0,
         "original_max_position_embeddings": 8192,
     }.items():
-        _require(rope.get(name) == value, f"unsupported RoPE {name}")
-    _require(
+        require(rope.get(name) == value, f"unsupported RoPE {name}")
+    require(
         type(max_context) is int
         and 1 <= max_context <= 8192
         and max_context <= config.get("max_position_embeddings", 0),
@@ -111,8 +108,8 @@ def _manifest(checkpoint: Path, expected: set[str], tied: bool) -> dict[str, Pat
     if index.exists():
         document = json.loads(index.read_text())
         weight_map = document.get("weight_map")
-        _require(isinstance(weight_map, dict), "invalid safetensors index")
-        _require(
+        require(isinstance(weight_map, dict), "invalid safetensors index")
+        require(
             all(
                 isinstance(name, str) and isinstance(file, str)
                 for name, file in weight_map.items()
@@ -122,26 +119,26 @@ def _manifest(checkpoint: Path, expected: set[str], tied: bool) -> dict[str, Pat
         names = weight_map
     else:
         file = checkpoint / "model.safetensors"
-        _require(file.is_file(), "missing model.safetensors or shard index")
+        require(file.is_file(), "missing model.safetensors or shard index")
         with safe_open(file, framework="pt", device="cpu") as source:
             names = dict.fromkeys(source.keys(), file.name)
     actual = set(names)
     optional = {"lm_head.weight"} if tied else set()
-    _require(
+    require(
         expected <= actual <= expected | optional, "checkpoint tensor names mismatch"
     )
     manifest = {}
     for name, filename in names.items():
-        _require(
+        require(
             filename == Path(filename).name and filename.endswith(".safetensors"),
             "invalid safetensors shard name",
         )
         path = checkpoint / filename
-        _require(path.is_file(), f"missing safetensors shard {filename}")
+        require(path.is_file(), f"missing safetensors shard {filename}")
         manifest[name] = path
     for path in set(manifest.values()):
         with safe_open(path, framework="pt", device="cpu") as source:
-            _require(
+            require(
                 set(source.keys())
                 == {name for name, shard in manifest.items() if shard == path},
                 f"safetensors index disagrees with {path.name}",
@@ -155,17 +152,17 @@ def _revision(checkpoint: Path, requested: str | None) -> tuple[str, str]:
     snapshot = checkpoint.parent.name == "snapshots" and checkpoint.name or None
     observed = recorded or snapshot
     if observed is not None:
-        _require(
+        require(
             bool(_HEX40.fullmatch(observed)), "invalid checkpoint revision metadata"
         )
     revision = requested or observed
     if revision is None:
         raise ValueError("checkpoint revision unavailable; pass --revision")
-    _require(
+    require(
         revision == PINNED_REVISION,
         "checkpoint revision is not the pinned 1B base revision",
     )
-    _require(observed is None or observed == revision, "checkpoint revision mismatch")
+    require(observed is None or observed == revision, "checkpoint revision mismatch")
     return (
         revision,
         "download_metadata"
@@ -193,12 +190,12 @@ def _copy_tensor(
     dtype: str = "bfloat16",
 ) -> None:
     tensor_slice = source.get_slice(name)
-    _require(
+    require(
         tuple(tensor_slice.get_shape()) == shape and tensor_slice.get_dtype() == "BF16",
         f"invalid BF16 tensor {name}",
     )
     tensor = source.get_tensor(name)
-    _require(bool(torch.isfinite(tensor).all()), f"non-finite tensor {name}")
+    require(bool(torch.isfinite(tensor).all()), f"non-finite tensor {name}")
     raw = (
         tensor.contiguous().view(torch.uint16).numpy().tobytes()
         if dtype == "bfloat16"
@@ -222,15 +219,11 @@ def pack_safetensors(
     for path in set(manifest.values()):
         metadata = checkpoint / ".cache/huggingface/download" / f"{path.name}.metadata"
         if metadata.is_file():
-            _require(
+            require(
                 metadata.read_text().splitlines()[0] == resolved_revision,
                 f"checkpoint shard {path.name} has a different revision",
             )
-    if out.exists():
-        raise FileExistsError(out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(tempfile.mkdtemp(prefix=f".{out.name}-", dir=out.parent))
-    try:
+    with new_package_dir(out) as temporary:
         plan = make_stack_plan_metadata(spec, target, dtype, "0" * 64)
         storage = plan["storage"]
         stack = storage["stack"]
@@ -269,7 +262,9 @@ def pack_safetensors(
                     for internal in WEIGHTS:
                         offset = base + weight_regions[descriptors[internal]]["offset"]
                         copy(
-                            f"L{layer}.{internal}", _shape(spec.block, internal), offset
+                            f"L{layer}.{internal}",
+                            tensor_shape(spec.block, internal),
+                            offset,
                         )
                 copy("final_norm", (d,), stack["final_norm_offset"])
                 if spec.tie_word_embeddings and "lm_head.weight" in manifest:
@@ -279,7 +274,7 @@ def pack_safetensors(
                     embedding = sources[manifest[names["embedding"]]].get_tensor(
                         names["embedding"]
                     )
-                    _require(
+                    require(
                         torch.equal(alias, embedding),
                         "tied lm_head differs from embedding",
                     )
@@ -297,7 +292,7 @@ def pack_safetensors(
                 path.name: _hash_file(path) for path in sorted(set(manifest.values()))
             },
         }
-        data = _json_bytes(plan)
+        data = json_bytes(plan)
         (temporary / "plan.json").write_bytes(data)
         report = {
             "numeric_policy": plan["model"]["numeric_policy"],
@@ -314,12 +309,8 @@ def pack_safetensors(
             "weight_bytes": storage["weight_bytes"],
             "kv_bytes": storage["kv_bytes"],
         }
-        (temporary / "planning_report.json").write_bytes(_json_bytes(report))
-        os.rename(temporary, out)
-        return report
-    except BaseException:
-        shutil.rmtree(temporary)
-        raise
+        (temporary / "planning_report.json").write_bytes(json_bytes(report))
+    return report
 
 
 def import_llama32(

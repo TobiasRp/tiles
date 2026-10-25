@@ -6,7 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tileplan.decoder_plan import build, read_package, validate
+from tileplan.decoder_block import build, validate
+from tileplan.package import read_package
 from tileplan.probe import ABI, normalize
 from tileplan.probe import OPCODES as PROBE_OPCODES
 

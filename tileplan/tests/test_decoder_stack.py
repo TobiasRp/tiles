@@ -8,7 +8,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from tileplan.decoder_plan import layer_view, read_package
 from tileplan.decoder_stack import (
     StackCache,
     StackSpec,
@@ -19,6 +18,8 @@ from tileplan.decoder_stack import (
     recompute_stack_prefix,
     validate_stack,
 )
+from tileplan.package import read_package
+from tileplan.plan_core import layer_view
 from tileplan.probe import ABI, normalize
 from tileplan.probe import OPCODES as PROBE_OPCODES
 

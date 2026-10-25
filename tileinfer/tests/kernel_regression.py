@@ -10,7 +10,7 @@ import numpy as np
 import torch
 from loader_regression import rearrange
 from stack_regression import check_generation, check_sequence
-from tileplan.decoder_plan import build
+from tileplan.decoder_block import build
 from tileplan.decoder_reference import (
     DecoderSpec,
     ReferenceCache,

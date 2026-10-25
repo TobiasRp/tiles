@@ -63,7 +63,7 @@ def synthetic_trace(plan: dict) -> tuple[dict, float]:
 class TimelineTest(unittest.TestCase):
     def test_alignment_and_budget_recover_the_synthetic_schedule(self):
         spec = read_stack_model(FIXTURE / "model.json")
-        weights = read_stack_weights(FIXTURE / "weights.npz", spec)
+        weights = read_stack_weights(FIXTURE / "weights.npz")
         plan, _ = make_stack_plan(spec, weights, target(4), "bfloat16")
         trace, total = synthetic_trace(plan)
         events, info = align(trace)

@@ -3,7 +3,8 @@
 from html import escape
 from pathlib import Path
 
-from .decoder_plan import layer_view, read_package
+from .package import read_package
+from .plan_core import layer_view
 
 COLORS = {
     "qkv_f32": "#dcfce7",

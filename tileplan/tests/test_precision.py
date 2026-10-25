@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from test_decoder_planning import target
-from tileplan.decoder_plan import make_plan, read_model, validate
+from tileplan.decoder_block import make_plan, read_model, validate
 from tileplan.decoder_reference import (
     ReferenceCache,
     _rms_norm,

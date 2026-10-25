@@ -6,10 +6,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .decoder_plan import build, read_package, summary
+from .decoder_block import build
 from .decoder_reference import generate_fixture
 from .decoder_stack import build_stack, generate_stack_fixture
 from .llama32_import import import_llama32
+from .package import read_package, summary
 from .probe import probe
 from .visualize import visualize
 
