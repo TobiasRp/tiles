@@ -46,8 +46,19 @@ class Record:
 
     @property
     def runtime_label(self) -> str:
-        extras = ",".join(f"{k}={v}" for k, v in sorted(self.flags.items()))
-        return f"{self.runtime}[{extras}]" if extras else self.runtime
+        """Runtime plus the flags that tell configurations apart.
+
+        Constant per sweep (backend, token counts) and default values (CUDA
+        graphs on) are left out; llama-bench rows are marked as such.
+        """
+        shown = [
+            f"{k}={self.flags[k]}" for k in ("fa", "kv", "threads") if k in self.flags
+        ]
+        if self.flags.get("graphs") == "off":
+            shown.append("graphs=off")
+        if self.flags.get("tool") == "llama-bench":
+            shown.append("llama-bench")
+        return f"{self.runtime} {' '.join(shown)}" if shown else self.runtime
 
     def to_json(self) -> dict:
         data = asdict(self)

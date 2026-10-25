@@ -15,9 +15,14 @@ def table(records: list[Record], test: str, sampling: str) -> str:
     if not selected:
         return f"_no {test} records with sampling={sampling}_\n"
     columns = sorted({r.runtime_label for r in selected})
-    cells: dict[int, dict[str, float]] = defaultdict(dict)
+    # Records of the same runtime and context (for example two passes) are averaged.
+    pooled: dict[int, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
     for r in selected:
-        cells[r.context_length][r.runtime_label] = r.mean_us
+        pooled[r.context_length][r.runtime_label].append(r.mean_us)
+    cells = {
+        context: {label: sum(v) / len(v) for label, v in by_label.items()}
+        for context, by_label in pooled.items()
+    }
     lines = [
         "| Context | " + " | ".join(columns) + " |",
         "| ---: | " + " | ".join("---:" for _ in columns) + " |",
@@ -51,10 +56,17 @@ def crosscheck(records: list[Record], reference: str = "pytorch-eager") -> str:
         f"| Context | Runtime | Token | Top logit | Error vs {reference} | Verdict |",
         "| ---: | --- | ---: | ---: | ---: | --- |",
     ]
+    seen = set()
     for r in sorted(rows, key=lambda r: (r.context_length, r.runtime_label)):
         ref = refs.get(r.context_length)
         if ref is None or r.runtime_label.startswith(reference):
             continue
+        if (
+            r.context_length,
+            r.runtime_label,
+        ) in seen:  # the same point from another pass
+            continue
+        seen.add((r.context_length, r.runtime_label))
         error = abs(r.outputs["top_logit"] - ref["top_logit"])
         ok = r.outputs["next_token"] == ref[
             "next_token"

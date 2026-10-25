@@ -50,7 +50,7 @@ def test_report_keeps_sampling_variants_apart() -> None:
     assert "decode only (no sampling)" in text
     assert "decode + greedy sampling" in text
     none_table = report.table(records, "decode_fixed_ctx", "none")
-    assert "llama.cpp[fa=on]" in none_table and "tileinfer" in none_table
+    assert "llama.cpp fa=on" in none_table and "tileinfer" in none_table
     assert "2.500" not in none_table
     assert "2.500" in report.table(records, "decode_fixed_ctx", "greedy")
 
