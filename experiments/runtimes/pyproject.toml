@@ -1,0 +1,40 @@
+[project]
+name = "rtbench"
+version = "0.1.0"
+description = "Runtime comparison harness: llama.cpp next to TileInfer and PyTorch"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.0,<3",
+    "accelerate>=1,<2",
+    "safetensors>=0.5,<1",
+    "torch>=2.11",
+    "transformers==4.57.6",
+    # Needed by llama.cpp's convert_hf_to_gguf.py, which bundles its own gguf-py.
+    "sentencepiece>=0.1.98,<0.3",
+    "protobuf>=4.21,<5",
+    "pyyaml>=6",
+    "tqdm>=4",
+]
+
+[project.scripts]
+rtbench = "rtbench.cli:main"
+
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.17.0",
+    "ty>=0.0.86",
+]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
