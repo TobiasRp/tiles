@@ -14,7 +14,10 @@ positions=(0 255 1023 2047 4095)
 new_tokens=64
 mkdir -p "$out"
 
-echo '{"tokens": [128000, 791, 6864, 315, 9822, 374]}' > "$out/prompt.json"
+# "1, 2, 3," has no BF16 near-tie in 64 tokens, so TileInfer and PyTorch generate
+# the same ids. Prompts such as "The capital of France is" hit a tie and the
+# PyTorch reference then depends on the static-cache length.
+echo '{"tokens": [128000, 16, 11, 220, 17, 11, 220, 18, 11]}' > "$out/prompt.json"
 {
   date -u +%FT%TZ
   git -C "$repo" rev-parse HEAD
