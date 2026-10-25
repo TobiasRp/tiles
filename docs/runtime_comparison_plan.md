@@ -80,8 +80,7 @@ experiments/runtimes/
 One JSON line per (runtime, model, test point):
 
 `runtime`, `runtime_version`/commit, `model`, `weight_dtype`, `kv_dtype`,
-`device`, `driver`/`cuda`, `test` (`decode_fixed_ctx` | `generate` |
-`prefill`), `sampling` (`none` = logits ready, `greedy` = next token id
+`device`, `driver`/`cuda`, `test` (`decode_fixed_ctx` | `generate`), `sampling` (`none` = logits ready, `greedy` = next token id
 known), `context_length`, `samples_us[]`, `mean_us`, `notes` (what else is
 included/excluded: logits copy, launch gaps), `flags`.
 
@@ -165,13 +164,6 @@ The tokenizer is checked separately (llama.cpp's GGUF tokenizer vs HF
   record whether it was active).
 - Done when: the context sweep and generation row for four runtimes sit in one
   table/SVG, with parity results next to them.
-
-### Phase 3: optional extras
-- Prefill speed (`-p 128,512`) as a secondary chart. TileInfer feeds the
-  prompt token by token, so this will not be a flattering comparison; label
-  it as out of scope for the TileInfer design.
-- A BF16 vs Q8_0/Q4_K_M row for llama.cpp as context only (what users
-  actually run), clearly marked as a different precision.
 
 ## Risks and open points
 
