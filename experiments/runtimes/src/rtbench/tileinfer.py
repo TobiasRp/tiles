@@ -44,10 +44,12 @@ def decode_records(report_path: Path, *, sampling: str = "none") -> list[Record]
                     sampling="none",
                     context_length=row["context_length"],
                     samples_us=row[f"{key}_samples_us"],
-                    outputs={
-                        "next_token": row["next_token"],
-                        "top_logit": row["top_logit"],
-                    },
+                    # The report records logits from the eager run only.
+                    outputs=(
+                        {"next_token": row["next_token"], "top_logit": row["top_logit"]}
+                        if key == "eager"
+                        else {}
+                    ),
                     flags={"attn": "eager"},
                     notes="CUDA events, batch average; logits ready, no sampling",
                 )
