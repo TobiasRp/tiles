@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 664" width="760" height="664" role="img" aria-label="Llama 3.2 1B: one-token decoder">
+<title>Llama 3.2 1B: one-token decoder</title>
+<rect width="100%" height="100%" fill="#fcfcfb"/>
+<text x="24.0" y="32.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="17" fill="#0b0b0b" text-anchor="start" font-weight="600">Llama 3.2 1B: one-token decoder</text>
+<text x="24.0" y="54.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#52514e" text-anchor="start" font-weight="400">One token in, one vector of vocabulary logits out; the hidden state is a 2,048-wide vector</text>
+<defs><marker id="ah" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#52514e"/></marker></defs>
+<rect x="24.0" y="71.0" width="10" height="10" rx="2" fill="#1baf7a"/>
+<text x="39.0" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">embedding table</text>
+<rect x="148.0" y="71.0" width="10" height="10" rx="2" fill="#2a78d6"/>
+<text x="163.0" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">decoder layers</text>
+<rect x="265.2" y="71.0" width="10" height="10" rx="2" fill="#eb6834"/>
+<text x="280.2" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">KV cache</text>
+<rect x="341.6" y="71.0" width="10" height="10" rx="2" fill="#8b8a85"/>
+<text x="356.6" y="80.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#52514e" text-anchor="start" font-weight="400">normalization</text>
+<rect x="150.0" y="104.0" width="200.0" height="28.0" rx="6" fill="#fcfcfb" stroke="#c9c8c2" stroke-width="1.5"></rect>
+<text x="250.0" y="123.2" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">token id t, position p</text>
+<path d="M250.0,132.0 L250.0,158.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="135.0" y="158.0" width="230.0" height="50.0" rx="6" fill="#e6f6ef" stroke="#1baf7a" stroke-width="1.5"><title>Row t of the embedding table: no arithmetic, one 2,048-wide row read.</title></rect>
+<text x="250.0" y="180.8" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Token embedding</text>
+<text x="250.0" y="195.8" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">128,256 × 2,048 lookup · 262.7M</text>
+<path d="M250.0,208.0 L250.0,238.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)"/>
+<text x="258.0" y="227.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">x₀  [2,048]</text>
+<rect x="120" y="238" width="260" height="212" rx="10" fill="#e8f1fc" fill-opacity="0.45" stroke="#2a78d6" stroke-width="1.5" stroke-dasharray="5 4"/>
+<text x="134.0" y="257.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="start" font-weight="600">16 × decoder layer</text>
+<rect x="155.0" y="272.0" width="190.0" height="32.0" rx="6" fill="#e8f1fc" stroke="#2a78d6" stroke-width="1.5"><title>Same graph as every layer; layer 0 has its own 60.8M weights.</title></rect>
+<text x="250.0" y="293.2" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Layer 0</text>
+<rect x="155.0" y="320.0" width="190.0" height="32.0" rx="6" fill="#e8f1fc" stroke="#2a78d6" stroke-width="1.5"><title>Same graph as every layer; layer 1 has its own 60.8M weights.</title></rect>
+<text x="250.0" y="341.2" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Layer 1</text>
+<rect x="155.0" y="402.0" width="190.0" height="32.0" rx="6" fill="#e8f1fc" stroke="#2a78d6" stroke-width="1.5"><title>Same graph as every layer; layer 15 has its own 60.8M weights.</title></rect>
+<text x="250.0" y="423.2" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Layer 15</text>
+<path d="M250.0,304.0 L250.0,320.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)"/>
+<path d="M250.0,352.0 L250.0,370.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)"/>
+<text x="250.0" y="388.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="18" fill="#52514e" text-anchor="middle" font-weight="400">⋮</text>
+<path d="M250.0,392.0 L250.0,402.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)"/>
+<path d="M250.0,450.0 L250.0,480.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)"/>
+<text x="258.0" y="470.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">x₁₆  [2,048]</text>
+<rect x="135.0" y="480.0" width="230.0" height="36.0" rx="6" fill="#f1f0ed" stroke="#8b8a85" stroke-width="1.5"></rect>
+<text x="250.0" y="495.8" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Final RMSNorm</text>
+<text x="250.0" y="510.8" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">scale [2,048]</text>
+<path d="M250.0,516.0 L250.0,542.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="135.0" y="542.0" width="230.0" height="50.0" rx="6" fill="#e6f6ef" stroke="#1baf7a" stroke-width="1.5"><title>Output projection reuses the embedding matrix: no second copy of the weights.</title></rect>
+<text x="250.0" y="564.8" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">lm_head</text>
+<text x="250.0" y="579.8" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">2,048 → 128,256 · shares the embedding</text>
+<path d="M250.0,592.0 L250.0,624.0" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)"/>
+<text x="258.0" y="613.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">one dot product per vocabulary entry</text>
+<rect x="120.0" y="624.0" width="260.0" height="28.0" rx="6" fill="#fcfcfb" stroke="#c9c8c2" stroke-width="1.5"></rect>
+<text x="250.0" y="643.2" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">logits  [128,256] → next token</text>
+<path d="M135.0,183.0 L72.0,183.0 L72.0,567.0 L135.0,567.0" fill="none" stroke="#1baf7a" stroke-width="1.5" stroke-dasharray="5 4"/>
+<text transform="translate(60,375) rotate(-90)" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle">tied weights: one matrix, two uses</text>
+<rect x="470.0" y="272.0" width="250.0" height="100.0" rx="6" fill="#fdeee7" stroke="#eb6834" stroke-width="1.5"><title>State that persists between tokens; everything else is recomputed per token.</title></rect>
+<text x="595.0" y="297.2" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">KV cache</text>
+<text x="595.0" y="312.2" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">16 layers × 8 KV heads × T × 64</text>
+<text x="595.0" y="327.2" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">keys and values, BF16</text>
+<text x="595.0" y="342.2" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">each layer appends position p,</text>
+<text x="595.0" y="357.2" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">then attends over positions 0…p</text>
+<path d="M380,322 L470,322" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)" marker-start="url(#ah)"/>
+<text x="425.0" y="314.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">r / w</text>
+<rect x="470" y="104" width="250" height="124" rx="6" fill="#f7f7f5" stroke="#e6e5e1" stroke-width="1.5"/>
+<text x="484.0" y="124.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="start" font-weight="400">hidden width</text>
+<text x="706.0" y="124.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="end" font-weight="600">2,048</text>
+<text x="484.0" y="140.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="start" font-weight="400">layers</text>
+<text x="706.0" y="140.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="end" font-weight="600">16</text>
+<text x="484.0" y="156.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="start" font-weight="400">query / KV heads</text>
+<text x="706.0" y="156.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="end" font-weight="600">32 / 8 × 64</text>
+<text x="484.0" y="172.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="start" font-weight="400">FFN width</text>
+<text x="706.0" y="172.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="end" font-weight="600">8,192</text>
+<text x="484.0" y="188.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="start" font-weight="400">vocabulary</text>
+<text x="706.0" y="188.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="end" font-weight="600">128,256</text>
+<text x="484.0" y="204.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="start" font-weight="400">RoPE base θ</text>
+<text x="706.0" y="204.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="end" font-weight="600">500,000</text>
+<text x="484.0" y="220.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="start" font-weight="400">RMSNorm ε</text>
+<text x="706.0" y="220.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="end" font-weight="600">1e-5</text>
+<text x="470.0" y="404.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600">1.24B parameters, 2.47 GB in BF16</text>
+<text x="470.0" y="421.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="start" font-weight="400">layers 973.1M (79%) · 60.8M each</text>
+<text x="470.0" y="438.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="start" font-weight="400">embedding 262.7M (21%)</text>
+</svg>
