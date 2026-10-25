@@ -21,3 +21,9 @@ __pycache__/
 .idea/
 .vscode/
 .DS_Store
+
+# Runtime comparison experiments
+/experiments/runtimes/third_party/
+/experiments/runtimes/models/
+/experiments/runtimes/results/
+/experiments/runtimes/probe/build-*/
