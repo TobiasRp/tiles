@@ -46,6 +46,17 @@ context 1 (−4%) and 13.16 against 20.31 ms at 4K (−35%)
 ([Section 12](#12-s2b-results)). One checkpoint step flips greedy selection on
 a one-unit BF16 near-tie; every calibrated tolerance passes.
 
+**Re-plan, 2026-10-25: S4 was sized on S2's numbers.** After S2b the
+context-1 loss is 0.71 ms, and the largest part of it is not a wave boundary.
+Each QKV task owns one whole head, so 48 tasks fall on 20 workers in rounds
+of 3 and 2. QKV loses 203 µs, 138 µs of it waiting for the last worker. The
+steady-state shortfall is about 0.18 ms, not 0.32, so S4 can remove at most
+about 0.15 ms. The order is now: **S6a, a controlled measurement protocol**,
+because S4's 0.1 ms gate is within the spread of the exploratory timings;
+**S2c, a balanced QKV**, with RoPE and the K cache write moved into the
+attention task; and then a smaller **S4**
+([Section 13](#13-the-re-plan-after-s2b)).
+
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
 measured, explained advantage over PyTorch CUDA Graph replay on the same
@@ -358,9 +369,10 @@ trace) must show that the mechanism recovers its expected share of time.
 The gate states its threshold up front. Below it, the milestone is
 re-planned instead of built.
 
-Order after the re-plan: S0, S1, S2 (done) → S3 (probed, not built) →
-**S2b** attention at the right parallelism (done) → **S4** fewer wave
-boundaries → S5 one launch per request → S6 showcase.
+Order after the re-plan of 2026-10-25: S0, S1, S2 (done) → S3 (probed, not
+built) → S2b attention at the right parallelism (done) → **S6a** controlled
+measurement protocol → **S2c** balanced QKV → **S4** fewer wave boundaries →
+S5 one launch per request → S6 showcase.
 
 ### S0 — Baseline and instruments (no kernel behavior change) — done
 
@@ -515,25 +527,112 @@ per token at context 1, 0.7 ms at 256, 1.1 ms at 1K, 1.6 ms at 2K and 3.9 ms
 at 4K. That puts TileInfer at about 12.6 ms at context 1, 12.7 ms at 1K and
 13.3 ms at 4K.
 
+### S6a — Controlled measurement protocol (moved forward from S6)
+
+Every timing so far is exploratory: unlocked clocks, one session, no stated
+minimum detectable difference. That was enough while each milestone moved the
+token by 0.5 ms or more. S2c and S4 each aim at about 0.1 ms, 0.8% of a
+token, which is inside the spread already seen (short-context probe sweeps
+differ by up to 10%, rtbench passes by 0.5%). Their gates cannot be judged
+without this step.
+
+- **Fix the GPU state.** Lock the SM and memory clocks where the driver
+  allows it, and record them with temperature and power for every run. If a
+  clock cannot be locked, say so and rely on interleaving.
+- **Measure the noise.** Run the same binary and package against itself (A/A)
+  at contexts 1, 256, 1K and 4K, interleaved, in several sessions. Report the
+  spread and the smallest difference the protocol detects in ms per token.
+  Each later gate states its threshold against that number.
+- **Freeze the S2b headline.** Rerun the context sweep of
+  [Section 12](#12-s2b-results) against PyTorch eager and graph replay under
+  the protocol of [Section 6](#6-measurement-and-honesty-rules-for-the-showcase-claim).
+  The −4% at context 1 and −35% at 4K become controlled numbers or are
+  corrected.
+- **Rerun the runtime comparison.** Its Phase 2 table
+  ([runtime comparison](runtime_comparison_plan.md)) still has S2's TileInfer
+  (17.2 ms at 4K, behind llama.cpp's 14.3 ms). Rerun it with S2b in the same
+  harness.
+
+*Done when* the A/A spread is stated, it is below the 0.08 ms S2c threshold
+(otherwise S2c and S4 are judged on their probes and the trace only, and the
+write-up says so), and the S2b and llama.cpp rows are controlled.
+
+### S2c — Balanced QKV
+
+After S2b, QKV is the largest single loss at context 1: 1,167 µs against
+946 µs ideal, at 172 GB/s, while the other projections stream at 192 to
+207 GB/s. Its tasks own one whole head each, so that RoPE and the cache write
+fit in the task (`plan_core.py`), which puts 48 tasks on 20 workers: 8 workers
+run 3 heads, 12 run 2. The last worker finishes 138 µs per token after the
+average one, 8.6 µs per wave ([Section 13](#13-the-re-plan-after-s2b)).
+
+The 3/2 split alone does not explain that: S0's row-dot probe measured only
+2.2 µs per QKV GEMV between 64-row tiles and an even split. Each head task
+also repeats the norm prologue (`normalize` over the 2,048-element input)
+and runs a pipeline of two rows per warp, and the 3-task workers pay both
+once more. Moving the work out of the head task removes both.
+
+- **Probe gate.** In `bandwidth_probe`, run the QKV wave of 16 layers as
+  head tasks with the per-task norm and RoPE epilogue, against one even row
+  range per worker with one norm. Go if the even split saves at least 5 µs
+  per layer (0.08 ms per token) and S6a can detect that.
+- **Even rows.** Split the 3,072 rows of `[Q; K; V]` into 20 near-equal
+  ranges with one norm prologue per worker. Q and K rows go, rounded to the
+  storage type as today, into a pre-RoPE scratch vector; V rows go straight
+  into the value cache.
+- **RoPE in the attention task.** The attention task of K/V head *g* already
+  owns its four query heads and is the only reader of K row *g* at the
+  current position. It rotates its query heads into registers or shared
+  memory, and the task whose chunk holds the current position rotates K and
+  writes the cache row before reading it. That is 5 × 64 elements per task,
+  against a fused task of about 6 µs.
+- **Validator.** It models the scratch vector and the K row written inside
+  the attention task, in the fused and the split regime, and rejects a split
+  that reads the current K row from any other chunk.
+- **Numerics.** The projection rounds before RoPE today, and `rotate_pair`
+  reads that rounded value, so the arithmetic is unchanged. *Acceptance:*
+  logits, K/V and block outputs **bit-identical** to S2b for float32 and
+  BF16, as in S1. Any difference is a bug.
+
+*Expected (hypothesis):* 0.05–0.13 ms per token at every context, most of
+the 138 µs of waiting for the last worker, minus what the attention task
+gains.
+
 ### S4 — Fewer wave boundaries: fused FFN, split-K, dataflow counters
 
-The S3 probe split S2's 0.72 ms of GEMV excess at context 1 into about
-0.32 ms of steady-state streaming below the roofline and about 0.40 ms at
-wave boundaries and in prologues. Each boundary costs about 2 µs beyond the
-steady-state rate, plus about 1 µs of barrier latency; S2 has 99 of them.
-Prefetch cannot hide a boundary, so S4 removes boundaries.
+*Re-scoped 2026-10-25* ([Section 13](#13-the-re-plan-after-s2b)). The S3
+probe split S2's 0.72 ms of GEMV excess at context 1 into about 0.32 ms of
+steady-state streaming below the roofline and about 0.40 ms at wave
+boundaries and in prologues. After S2b, GEMV excess is 0.49 ms and `lm_head`
+streams at 209.6 GB/s, so the steady-state part is about 0.18 ms. Barrier
+latency is 0.11 ms, in about 82 barriers (fused attention skips 16). At
+long context, attention now loses 0.28 ms, not 4 ms, so overlapping Wo with
+attention is worth little there.
+
+S4 removes three of the five barriers per layer: gate/up → down, QKV →
+attention and attention → Wo. The hard synchronizations after Wo (`r`) and
+after the FFN (`y`) stay. At about 1.3 µs of barrier latency plus about 2 µs
+of pipeline ramp per boundary, that is at most about 0.15 ms per token.
 
 - **Probe gate.** Extend `bandwidth_probe`'s layer program with the
-  candidate structure before touching the decoder: an FFN wave fused per
-  worker, Wo split by K/V group, and counter waits in place of `grid.sync()`.
-  Go if the probe saves at least 0.1 ms per token over S2's barriers.
-- **Fused FFN per worker.** Worker *k* computes gate/up rows for product
-  chunk *k*, then the down partial over that chunk's columns: `Wdown[:,
-  chunk k] · product[chunk k]`, which it produced itself. The gate/up → down
-  barrier disappears. The 20 FP32 partials are reduced in fixed order by the
-  next consumer, which also adds the residual and rounds `y`.
-- **Wo split-K by K/V group.** A Wo task for group *g* needs only that
-  group's four query heads, so it can start as soon as group *g*'s
+  candidate structure before touching the decoder, measured against S2c:
+  first the fused FFN alone, then counter waits in place of `grid.sync()`
+  around attention. The fused FFN's gate includes the cost it moves into the
+  next QKV prologue. Go for each part if it saves at least 0.06 ms per token
+  and S6a can detect that.
+- **Fused FFN per worker (first).** Gate/up → down is the largest boundary
+  left: 58 µs per token waiting for the last gate/up worker plus 33 µs of
+  barrier. Worker *k* computes gate/up rows for product chunk *k*, then the
+  down partial over that chunk's columns: `Wdown[:, chunk k] ·
+  product[chunk k]`, which it produced itself. The gate/up → down barrier
+  disappears. The 20 FP32 partials (160 KB per layer) are reduced in fixed
+  order by the next consumer, which also adds the residual and rounds `y`.
+  That consumer is the next layer's QKV, whose norm prologue already costs
+  about 4 µs per wave, and every one of its 20 workers repeats the reduction.
+  The probe compares that with one reduction step on a few workers before
+  the barrier.
+- **Wo split-K by K/V group (second).** A Wo task for group *g* needs only
+  that group's four query heads, so it can start as soon as group *g*'s
   attention is done.
 - **Counters instead of barriers** where dependencies are partial. They
   replace `barrier` with `wait(counter, target)` / `signal(counter)`, and
@@ -556,12 +655,17 @@ Prefetch cannot hide a boundary, so S4 removes boundaries.
   inputs and can run, so progress is guaranteed. The C++ validator enforces
   this order. Debug builds add a bounded spin that records the stuck counter
   and traps.
-- **The GEMV loop moves to the weight ring.** A worker about to wait issues
-  its next task's first stages, then waits. This is the after-barrier form
-  that the S3 probe measured, with 4 × 16 KB stages. The same rewrite tries
-  `lm_head` with 2 × 32 KB stages (+1% in the probe) and 16-byte loads per
-  lane against the 0.32 ms steady-state shortfall, and adopts each only if
-  the probe shows a gain on every shape.
+- **Prefetch Wo during short-context attention.** At contexts up to 384 the
+  fused attention wave runs 8 tasks for about 7 µs per layer while 12
+  workers idle and DRAM moves 0.3 GB/s. S3's negative result does not apply
+  there: it found prefetch zero-sum only while DRAM was saturated. Idle
+  workers that load their first Wo stages (4 × 16 KB, the S3 ring) hide at
+  most about 3.6 µs per layer, about 0.05 ms per token. Build it only if the
+  probe shows that.
+- **Other ring and load-width changes are optional.** The after-barrier ring
+  in general, `lm_head` with 2 × 32 KB stages (+1% in the S3 probe) and
+  16-byte loads per lane address the 0.18 ms steady-state shortfall. Adopt
+  each only if the probe shows a gain on every shape.
 - **Testing.** Compute Sanitizer racecheck covers shared memory only, so
   global ordering bugs need their own test. Add a debug mode that inserts
   random `__nanosleep` delays before tasks, and compare against the barrier
@@ -569,12 +673,14 @@ Prefetch cannot hide a boundary, so S4 removes boundaries.
   checkpoint outputs are held to the calibrated tolerances, not bit
   equality; every split is introduced on its own, so a deviation points at
   one change.
-- **Ablation.** Add a dynamic global work queue (atomic task claim, no
-  prefetch). Comparing it with static assignment is a result in itself.
+- **Ablation (optional).** A dynamic global work queue (atomic task claim,
+  no prefetch) against static assignment. With one task per worker in most
+  waves it is less informative than planned; run it only if the counter
+  executor makes it cheap.
 
-*Expected (hypothesis):* 0.15–0.3 ms at short context, from fewer
-boundaries and from Wo streaming while later K/V groups still run
-attention. More at long context, where attention and Wo overlap.
+*Expected (hypothesis):* 0.1–0.15 ms at short context, from fewer
+boundaries, and similar at long context. With S2c, about 12.0–12.1 ms at
+context 1, 3–4% above the 11.61 ms floor.
 
 ### S5 — One launch per generation request
 
@@ -586,16 +692,17 @@ attention. More at long context, where attention and Wo overlap.
   status word, so all exit uniformly. Prefetch layer-0 weights during the
   `lm_head` tail.
 - *Expected:* a small effect (launch gaps are microseconds against a 13 ms
-  token), but it completes the "single megakernel" story. Do it after
-  S2–S4.
+  token, and S2's argmax kernel takes 15 µs), but it completes the "single
+  megakernel" story. Do it after S2–S4.
 
 ### S6 — Showcase package
 
 - One command that imports the model, probes, plans each ablation stage,
-  checks correctness, runs the controlled sweep, and writes a report.
+  checks correctness, runs the controlled sweep of S6a, and writes a report.
 - **Ablation table**, in ms/token and % of attainable bandwidth: S0 baseline
-  → S2 balanced/fused waves → S2b short-context attention → S4 fused FFN /
-  split-K / dataflow → S5 persistent, each at contexts 1/256/1K/2K/4K.
+  → S2 balanced/fused waves → S2b attention at the right parallelism → S2c
+  balanced QKV → S4 fused FFN / split-K / dataflow → S5 persistent, each at
+  contexts 1/256/1K/2K/4K, with llama.cpp from the runtime comparison.
   Include PyTorch eager and graph replay, and the S3 probe's prefetch result
   as a negative control.
 - **Timeline figures** from the device trace: baseline (gaps at every
@@ -643,7 +750,9 @@ attention. More at long context, where attention and Wo overlap.
   is spread over steady-state streaming (about 0.32 ms), wave boundaries and
   prologues (about 0.40 ms), attention (0.42 ms), and barrier latency
   (0.13 ms). No single mechanism is likely to recover more than 0.3 ms, so
-  each must pass its probe gate before it costs a format change.
+  each must pass its probe gate before it costs a format change. *(After
+  S2b the remaining 0.71 ms is smaller still, and S2c and S4 each aim at
+  about 0.1 ms; that is why S6a comes first. See Section 13.)*
 - **Shared-memory ring and occupancy.** The design is already one block per
   SM. A 64 KB ring plus the worker's 23.8 KB of static shared memory fits the
   99 KB limit and does not reduce residency, but it shrinks L1 to about
@@ -1246,3 +1355,57 @@ short context is mostly GEMV streaming excess (0.49 ms) and barrier latency
 - Attention at 4K still runs at 142 GB/s, against the 169 GB/s row-read floor
   of Section 11; a shared P·V pass for the four query heads of a group is the
   next candidate.
+
+## 13. The re-plan after S2b
+
+Written on 2026-10-25 from the S2b timeline in
+`runs/s2b-impl-2026-10-25/timeline/` on tux (the trace of
+[Section 12](#12-s2b-results), exploratory, unlocked clocks). Nothing new
+was measured.
+
+### Where the context-1 loss is now
+
+The token takes 12,316 µs against 11,607 µs of ideal streaming. By phase, in
+µs per token: *excess* is time beyond ideal streaming and barrier latency;
+*tail* is the part of it between the average worker's finish and the last
+one's; *sync* is barrier latency.
+
+| Phase | Waves | Duration | Ideal | Excess | of which tail | Sync | GB/s |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| QKV | 16 | 1,167 | 946 | **203** | **138** | 19 | 172 |
+| attention (fused) | 16 | 119 | 0 | 104 | 51 | 14 | 0.3 |
+| gate/up | 16 | 5,178 | 5,043 | 103 | 58 | 33 | 207 |
+| down | 16 | 2,641 | 2,521 | 96 | 14 | 24 | 203 |
+| Wo | 16 | 699 | 630 | 48 | 17 | 21 | 192 |
+| lm_head | 1 | 2,506 | 2,467 | 39 | 9 | 0 | 210 |
+| embedding, final norm | 2 | 6 | 0 | 4 | 1 | 2 | — |
+
+The total, 709 µs, is 489 µs of GEMV excess, 104 µs of attention, 112 µs of
+barrier latency and 4 µs of small phases. At 4K, the same GEMV phases are
+within 11 µs of these, and attention loses 284 µs in 32 waves at 142 GB/s.
+
+### What this changes
+
+1. **S4's premise is out of date.** It assumed 0.32 ms of steady-state
+   shortfall and 0.40 ms at wave boundaries, from S2. `lm_head`, one long
+   wave, now streams at 209.6 GB/s, so the steady-state part is about
+   0.18 ms (1.6% of 11.6 ms). S2b's faster GEMVs (Section 12) are part of
+   the reason.
+2. **The largest loss is QKV's head quantization, not a boundary.** QKV
+   tasks own whole heads for the RoPE epilogue: 48 tasks on 20 workers.
+   S2's even row split never reached QKV. That is S2c, and it needs no new
+   synchronization protocol.
+3. **S4 shrinks.** Removing three barriers per layer is worth at most about
+   0.15 ms at context 1, and the split-K reduction and counter bookkeeping
+   take some of it back. The long-context case for overlapping Wo with
+   attention is mostly gone with S2b.
+4. **One prefetch case survives S3.** During the fused attention wave DRAM
+   idles and 12 workers do nothing, so prefetching Wo there is not
+   zero-sum. It is worth at most about 0.05 ms.
+5. **The next gains are below the noise of the current measurements.** S2c
+   and S4 each target about 0.1 ms, 0.8% of a token. The controlled
+   protocol therefore moves forward from S6 as S6a, together with a rerun
+   of the runtime comparison, whose TileInfer rows are still S2.
+
+*Targets (hypotheses):* S2c −0.05 to −0.13 ms and S4 −0.1 to −0.15 ms at
+context 1, about 12.0–12.1 ms together, 3–4% above the 11.61 ms floor.
