@@ -138,6 +138,10 @@ projection shapes with 1–20 active workers. See
 grid barriers. It compares direct loads with a `cp.async` shared-memory
 weight ring, refilled before or after each barrier, and with an L2 prefetch;
 see [the S3 results](../docs/blog/s3-weight-prefetch-2026-10.md).
+`attention_probe [POSITIONS [CHUNKS]]` runs the attention waves of 16 layers
+with one block per SM: the production kernels, an instrumented copy with
+per-phase cycle counts, and wide-load candidates, for each context and chunk
+count. See [the S2b results](../docs/megakernel_next_steps.md#11-s2b-probe-results-attention-at-the-right-parallelism).
 
 ## Checks
 

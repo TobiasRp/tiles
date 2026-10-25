@@ -28,6 +28,16 @@ into the decoder. The milestones in [Section 5](#5-milestones) are revised:
 next is **S2b, short-context attention**, then **S4, fewer wave
 boundaries**, and every milestone now opens with a probe gate.
 
+**Re-plan, 2026-10-25: the S2b probe found a bigger problem than planned.**
+The S2b gate passed, but its diagnosis was wrong. Attention at short context
+is a chain of dependent global-memory round trips per task, and at long
+context it is a one-row-in-flight K/V loop that reaches 25 GB/s of 213. A
+`attention_probe` replacement with 16-byte loads and one task per block is
+3.7 times faster at 4K and 2.8 to 3.7 times faster at context 1 to 256, which
+projects to 0.3 ms per token at context 1 and 3.9 ms at 4K
+([Section 11](#11-s2b-probe-results-attention-at-the-right-parallelism)).
+S2b now covers both ends of the context range and stays first in line.
+
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
 measured, explained advantage over PyTorch CUDA Graph replay on the same
@@ -341,8 +351,8 @@ The gate states its threshold up front. Below it, the milestone is
 re-planned instead of built.
 
 Order after the re-plan: S0, S1, S2 (done) → S3 (probed, not built) →
-**S2b** short-context attention → **S4** fewer wave boundaries → S5 one
-launch per request → S6 showcase.
+**S2b** attention at the right parallelism (probed, go) → **S4** fewer wave
+boundaries → S5 one launch per request → S6 showcase.
 
 ### S0 — Baseline and instruments (no kernel behavior change) — done
 
@@ -443,33 +453,53 @@ right after each wait) is folded into S4's GEMV rewrite. Details are in
 [Section 10](#10-s3-probe-results-and-the-re-plan) and
 [the S3 post](blog/s3-weight-prefetch-2026-10.md).
 
-### S2b — Short-context attention
+### S2b — Attention at the right parallelism — probed, go
 
-S2's two attention waves cost 0.42 ms per token above ideal at contexts 1–64,
-up from 0.22 ms in the baseline. Each layer runs 40 tiny chunk tasks twice.
-Each pays block-wide reductions and synchronizations per query head over a
-dozen time steps. That is now the largest single loss at contexts up to 1K,
-and fixing it needs no new synchronization protocol.
+S2's attention costs 0.42 ms per token above ideal at contexts 1–64 and
+4.1 ms at 4K, in 40 chunk tasks per wave on 20 workers. The probe in
+[Section 11](#11-s2b-probe-results-attention-at-the-right-parallelism)
+replaced the original diagnosis (block reductions per query head) with two
+others:
 
-- **Probe gate.** Extend the timeline trace with per-task cycle counts
-  inside the attention tasks, split into reductions, barriers within the
-  block, and K/V reads, at contexts 1, 64, and 256. Go if at least 0.2 ms
-  per token is fixed per-task overhead rather than K/V bytes or grid
-  barriers.
-- **Warp-level statistics.** Give each query head of a K/V group its own
-  warps, so the scores, maximum, and sum use warp reductions and one block
-  synchronization per task instead of block reductions per head.
-- **One attention wave for short prefixes.** When the visible prefix fits
-  one chunk, the scores task finishes the softmax and P·V itself, and the
-  barrier between the two attention waves is skipped. Every worker evaluates
-  the same `position`, so the skip is uniform. The instruction carries the
-  threshold, and the validator checks both paths.
-- **Numerics.** Keep the eager rounding points (scores and probabilities in
-  BF16). The FP32 combine order changes only where the chunking does, and
-  stays within the calibrated tolerances.
+- **Short context is a chain of dependent global round trips per task**, not
+  reduction arithmetic. Each task loads `q` and K, stores scores, reloads
+  them for the statistics, stores the statistics, and the values task reloads
+  those. That is about 7 µs per task (inferred from 15 µs per wave of two
+  tasks), and 40 tasks on 20 workers run two in a row. The warp reductions
+  in the dot products cost only 1 µs per layer.
+- **Long context is memory-level parallelism.** The K loop keeps one 128-byte
+  row in flight per warp with two dependent 2-byte-strided loads each (about
+  3 µs per row, derived from the K-only loop), so the 4K waves reach
+  25 GB/s. The K/V layout is not the cause: a pure row-read kernel with
+  16-byte loads reaches 169 GB/s on the same layout.
 
-*Expected (hypothesis):* attention above ideal falls from 0.42 to about
-0.15–0.2 ms at contexts up to 256, and long context does not regress.
+- **Probe gate: passed.** Fixed per-task overhead outside K/V reads and grid
+  barriers is 22 µs per layer at context 1, 0.36 ms per token against the
+  0.2 ms threshold (0.3 ms after discounting the instrumentation's 15%).
+- **Wide K/V loads.** A lane loads 16 bytes, a warp loads four rows per
+  instruction, and four loads are in flight per lane. `q` stays in registers
+  as packed BF16 and one warp reduces each query head's statistics.
+- **One task per worker.** Tasks per wave are `kv_heads × chunks`, and the
+  planner's rule (the fewest chunks that balance 20 workers, 5) put two
+  serial tasks on every worker. Use the fewest chunks that make a task fit
+  in shared memory: 1 up to 2,048 steps, 2 up to 4,096. Eight workers
+  already pull 170 GB/s with wide loads.
+- **A fused single-wave task.** When the prefix fits one chunk, the task keeps
+  scores and probabilities in shared memory, finishes the softmax and P·V
+  itself, and the barrier between the two attention waves is skipped.
+  Every worker evaluates the same `position`, so the skip is uniform. The
+  instruction carries the threshold, and the validator checks both paths.
+- **Numerics.** Scores and probabilities still round to BF16 at the eager
+  points. The FP32 summation order changes (8-lane dot trees, per-lane P·V
+  accumulation, the warp-level statistics), so outputs match S2 up to
+  rounding, not bitwise. The probe's worst difference is 2.9e-6 in the FP32
+  attention vector. The decoder regression and the checkpoint tolerances must
+  pass unchanged before any timing counts.
+
+*Expected (hypothesis, from the probe):* attention above ideal falls by 0.3 ms
+per token at context 1, 0.7 ms at 256, 1.1 ms at 1K, 1.6 ms at 2K and 3.9 ms
+at 4K. That puts TileInfer at about 12.6 ms at context 1, 12.7 ms at 1K and
+13.3 ms at 4K.
 
 ### S4 — Fewer wave boundaries: fused FFN, split-K, dataflow counters
 
@@ -611,6 +641,15 @@ attention. More at long context, where attention and Wo overlap.
   only about 350 instructions per thread at full bandwidth. The S3 probe's
   first ring lost up to half its bandwidth to per-stage address arithmetic. Any new
   per-stage or per-wait bookkeeping must stay a few adds.
+- **Wide attention changes numerics at the margin.** The wide kernels sum in
+  a different FP32 order than S2, and the effective chunk count now depends
+  on `position`. A BF16 probability can flip by one unit in rare cases. The
+  CPU reference, package regression and checkpoint comparison must run at
+  contexts on both sides of each chunk threshold before S2b is accepted.
+- **Shared memory.** The fused task keeps up to 4 heads × 2,048 probabilities
+  (16 KB, the existing input-vector region) plus an 8 KB reduction buffer.
+  The worker's static shared memory grows from 23.8 KB to about 32 KB and the
+  L1 shrinks with it.
 - **Numerical policy under fusion and split-K.** Every fusion must keep the
   BF16 rounding boundaries. Split-K changes the order of FP32 summation within
   the calibrated tolerances. Never tighten or refit tolerances to match
@@ -902,3 +941,113 @@ rings:
 *Targets (hypotheses):* S2b about −0.2 ms and S4 about −0.15 to −0.3 ms at
 short context. Together that is about 12.4–12.5 ms at context 1, 3–4% below
 graph replay (12.92 ms) and 7% above the 11.61 ms floor.
+
+## 11. S2b probe results: attention at the right parallelism
+
+`attention_probe` (new, `tileinfer/tests/attention_probe.cu`) runs the
+Llama 3.2 1B attention waves of 16 layers (32 query heads, 8 K/V heads,
+head dimension 64, BF16) in one cooperative launch with one block per SM:
+scores wave, grid barrier, values wave, grid barrier. K and V rotate through
+16 layers of 4,096-step caches (128 MB) so every layer reads from DRAM.
+Variants run the production `ops::attention_*`, an instrumented copy with
+`clock64` stamps between phases and two ablations, and the candidates below.
+Timings are CUDA-event averages, exploratory (unlocked clocks, SM clock
+about 1.85 GHz, random K/V). Repeated sweeps agree within 3%. Raw runs are
+in `runs/s2b-2026-10-25/` on tux.
+
+The production variant reproduces S2's trace: 30.6 µs per layer at context 1
+(0.43 ms per token beyond the two barriers) and 316 µs at 4K, against 297 µs
+of attention waves in the S2 timeline.
+
+### Where S2's attention time goes
+
+Average block, µs per layer (the instrumented copy runs about 15% slower than
+production):
+
+| Context | dot | max | sum | combine | prob | P·V | final |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.6 | 4.8 | 5.7 | 5.8 | 1.8 | 2.1 | 4.2 |
+| 64 | 5.9 | 5.7 | 6.1 | 6.0 | 3.2 | 3.0 | 4.6 |
+| 256 | 19.7 | 6.5 | 6.5 | 6.8 | 4.5 | 7.4 | 4.8 |
+| 1024 | 46.5 | 7.5 | 6.9 | 7.4 | 5.2 | 21.3 | 5.6 |
+| 4096 | 149.7 | 9.3 | 7.1 | 13.3 | 8.2 | 133.4 | 16.5 |
+
+- At contexts 1–64, max, sum, combine, prob and final are 22 to 26 µs per
+  layer (0.36 to 0.41 ms per token, stamping included) and do not depend on K/V
+  bytes. Each of
+  the two tasks per block repeats the sequence for four heads, with a block
+  reduction or a thread-0 loop and a `__syncthreads` each.
+- Removing the warp reductions from the dot products saves 1 µs per layer
+  (context 64: 5.9 → 5.1 µs). Skipping the `q` loads as well saves 7 µs per
+  layer at context 256 (18.5 → 11.1 µs): `q` is reloaded from global memory
+  for every time step.
+- At 4K the K-only loop (no `q`, no reductions) still takes 141 µs for 4.2 MB,
+  30 GB/s. The P·V loop takes 133 µs for 4.2 MB, 31 GB/s.
+
+### Candidates against a pure row-read floor
+
+Layer time in µs, both waves with their barriers (the empty program costs
+3.4 to 5 µs). `production` uses 5 chunks. The floor is a kernel that only
+reads the rows, with the chunk count of the wide column.
+
+| Context | production | wide, chunks | fused, 1 chunk | row-read floor |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 30.7 | 15.2 (1) | 10.9 | 5.6 |
+| 64 | 38.2 | 16.7 (1) | 12.3 | 6.2 |
+| 256 | 61.3 | 21.1 (1) | 16.6 | 7.5 |
+| 1024 | 101.5 | 38.0 (2) | 35.7 | 17.6 |
+| 2048 | 154.0 | 55.9 (2) | 60.4 | 28.9 |
+| 4096 | 331.0 | 89.1 (2) | — | 49.6 |
+
+- **The row-read floor is 169 GB/s at 4K** (8.4 MB in 49.6 µs), 79% of the
+  213 GB/s roofline, for the decoder's own `[time][kv_head][head_dim]`
+  layout. A head-major layout gives the same time (50.0 µs), so no format
+  change is needed.
+- **Wide loads give 3.7 times the production speed at 4K** (89 µs against
+  331 µs) and stay 1.8 times above the floor. The rest is dot arithmetic
+  (32 FMAs and 12 shuffles per four rows) and four heads' P·V groups each
+  re-reading the V rows from L1.
+- **Fewer tasks win.** Chunks 1 and 2 give 8 and 16 tasks, one per worker.
+  At 4K, 2 chunks cost 89 µs against 108 (5), 106 (4), 123 (3) and 134 (8);
+  3 and 4 chunks (24 and 32 tasks) give some workers a second serial task.
+  Eight busy
+  workers pull 173 GB/s.
+- **Two rows in flight beat four** (78 against 83 µs at 4K, chunks 2), and
+  eight are slower (138 µs), probably from register spills (not checked).
+- **The fused task** saves another 4 µs per layer at short context (10.9
+  against 15.2 µs at context 1) by dropping the barrier and the second
+  task's round trips. At 2K it is no longer better than 2 chunks.
+
+### Projected change per token
+
+Savings are 16 times the per-layer difference between production and the best
+candidate, assuming the attention waves stay serial with the rest of the
+token (they are separated by barriers):
+
+| Context | Best candidate | Saves per layer µs | Saves per token ms | TileInfer today → projected, ms |
+| ---: | --- | ---: | ---: | --- |
+| 1 | fused, 1 chunk | 19.8 | 0.32 | 12.90 → 12.58 |
+| 64 | fused, 1 chunk | 25.9 | 0.41 | |
+| 256 | fused, 1 chunk | 44.7 | 0.72 | |
+| 1024 | fused, 1 chunk | 65.8 | 1.05 | 13.79 → 12.74 |
+| 2048 | wide, 2 chunks | 98.1 | 1.57 | |
+| 4096 | wide, 2 chunks | 241.9 | 3.87 | 17.20 → 13.33 |
+
+llama.cpp with flash attention and f16 K/V takes 13.67, 13.81 and 14.31 ms at
+those three contexts
+([runtime comparison](runtime_comparison_plan.md)). If the projection holds,
+TileInfer would lead it at all three, by 8%, 8% and 7%.
+
+### What was not shown
+
+- The probe isolates the attention waves with random K/V, so near-uniform
+  softmax. It does not include the Wo, QKV or FFN waves, and the decoder
+  regression has not been run on the candidates.
+- The wide kernels hard-code head dimension 64 and four heads per K/V head,
+  and keep probabilities in a 16 KB shared buffer (2,048 steps per task).
+  Other models need the generic path or a global-memory probability buffer.
+- The remaining gap to the floor at 4K (89 against 50 µs) is not
+  decomposed. The next candidates are a shared P·V pass for all four heads
+  and `q` in registers across the K loop.
+- The latency of one global round trip on this GPU was inferred (about 1 to
+  1.5 µs per dependent step), not measured with a pointer-chase.
