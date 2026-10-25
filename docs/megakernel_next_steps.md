@@ -38,6 +38,14 @@ projects to 0.3 ms per token at context 1 and 3.9 ms at 4K
 ([Section 11](#11-s2b-probe-results-attention-at-the-right-parallelism)).
 S2b now covers both ends of the context range and stays first in line.
 
+**Progress, 2026-10-25: S2b is done.** Attention runs as one fused task per
+K/V head up to 384 steps and as two wide chunk tasks beyond, with the barrier
+between the attention waves skipped while it is fused. TileInfer is now faster
+than CUDA Graph replay at every measured context: 12.32 against 12.85 ms at
+context 1 (−4%) and 13.16 against 20.31 ms at 4K (−35%)
+([Section 12](#12-s2b-results)). One checkpoint step flips greedy selection on
+a one-unit BF16 near-tie; every calibrated tolerance passes.
+
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
 measured, explained advantage over PyTorch CUDA Graph replay on the same
@@ -351,7 +359,7 @@ The gate states its threshold up front. Below it, the milestone is
 re-planned instead of built.
 
 Order after the re-plan: S0, S1, S2 (done) → S3 (probed, not built) →
-**S2b** attention at the right parallelism (probed, go) → **S4** fewer wave
+**S2b** attention at the right parallelism (done) → **S4** fewer wave
 boundaries → S5 one launch per request → S6 showcase.
 
 ### S0 — Baseline and instruments (no kernel behavior change) — done
@@ -453,7 +461,13 @@ right after each wait) is folded into S4's GEMV rewrite. Details are in
 [Section 10](#10-s3-probe-results-and-the-re-plan) and
 [the S3 post](blog/s3-weight-prefetch-2026-10.md).
 
-### S2b — Attention at the right parallelism — probed, go
+### S2b — Attention at the right parallelism — done
+
+Implemented as planned below, with one change to the chunk rule: a prefix
+runs fused only up to 384 steps, and longer ones use at least two chunks,
+because the probe found two half-length tasks faster beyond that. Results,
+including a code-size regression that had to be fixed, are in
+[Section 12](#12-s2b-results).
 
 S2's attention costs 0.42 ms per token above ideal at contexts 1–64 and
 4.1 ms at 4K, in 40 chunk tasks per wave on 20 workers. The probe in
@@ -646,10 +660,14 @@ attention. More at long context, where attention and Wo overlap.
   on `position`. A BF16 probability can flip by one unit in rare cases. The
   CPU reference, package regression and checkpoint comparison must run at
   contexts on both sides of each chunk threshold before S2b is accepted.
+  *(S2b: they do, and all tolerances pass; one checkpoint step's greedy token
+  flips on a one-unit logit tie. See Section 12.)*
 - **Shared memory.** The fused task keeps up to 4 heads × 2,048 probabilities
   (16 KB, the existing input-vector region) plus an 8 KB reduction buffer.
   The worker's static shared memory grows from 23.8 KB to about 32 KB and the
-  L1 shrinks with it.
+  L1 shrinks with it. *(S2b: the reduction reuses the probabilities' region
+  and the S2 block-reduction scratch is gone; static shared memory fell to
+  19.0 KB.)*
 - **Numerical policy under fusion and split-K.** Every fusion must keep the
   BF16 rounding boundaries. Split-K changes the order of FP32 summation within
   the calibrated tolerances. Never tighten or refit tolerances to match
@@ -1051,3 +1069,180 @@ TileInfer would lead it at all three, by 8%, 8% and 7%.
   and `q` in registers across the K loop.
 - The latency of one global round trip on this GPU was inferred (about 1 to
   1.5 µs per dependent step), not measured with a pointer-chase.
+
+## 12. S2b results
+
+Implemented and checked on `tux`, 2026-10-25, starting from `87d8152`. GPU
+clocks were unlocked (SM about 1.9 GHz under load). All timings are
+exploratory, not a controlled shape/tile sweep. The S2 comparison reruns the
+saved S2 binary and package in the same session where noted. Artifacts are
+in `runs/s2b-impl-2026-10-25/` on tux.
+
+### What changed
+
+- **Chunk rule by position (format 7, ABI v7).** The model section declares
+  `attention_chunks`, `attention_chunk_steps` (C) and
+  `attention_fused_steps` (F). A visible prefix of at most F steps is one
+  chunk. A longer one splits evenly into the fewest chunks of at most C steps,
+  but at least two. The program holds the chunk tasks of a `max_context`
+  prefix; tasks of inactive chunks return at once. C defaults to what the
+  worker's shared attention region holds (`attention_shared_bytes`, 16 KB, a
+  new `target.json` field): 2,048 steps for Llama 3.2 1B in BF16, so a 4K
+  context is two chunks, 16 tasks on 20 workers. F defaults to 384, the
+  probe's crossover. Section 11's rule ("one chunk up to 2,048 steps") lost
+  to two chunks beyond about 384 steps: 59 against 44 µs per layer at 2K in
+  `attention_probe`.
+- **Fused task and conditional barrier.** With one active chunk, the scores
+  task keeps scores and probabilities in shared memory and computes the
+  softmax and P·V itself; values tasks do nothing. The barrier after each
+  scores wave carries F (`conditional_barrier` in the plan, `begin` in the
+  barrier record), and every worker skips it while `position + 1 <= F`.
+- **Wide kernels in the worker.** `ops::attention_scores` and
+  `ops::attention_values` replace S2's tasks: 16-byte K/V loads, two rows in
+  flight per lane, `q` in registers, one warp per query head for the
+  statistics, and the P·V cross-warp reduction in the probabilities' shared
+  region. They are general: float32 or BF16, power-of-two groups up to 8,
+  `head_dim` up to 128 with a power-of-two number of 16-byte vectors per
+  row. S2's kernels moved into `attention_probe` as its reference, and a
+  `worker` variant runs the real ops with the default chunk rule.
+- **Validator.** It derives each attention task's accesses in both regimes:
+  split (all chunks active) and fused (chunk 0 reads q, K and V and writes
+  the partials; values tasks do nothing; Wo reads chunk 0 only). It runs the
+  dataflow check twice and merges the two waves around each conditional
+  barrier in the fused run. Positions with 2 to `attention_chunks - 1`
+  active chunks only drop accesses of the split run. Conditional barriers are
+  required exactly between a scores-only and a values-only wave, with
+  threshold F.
+- **Worker resources.** 64 registers, no spills in either variant, one block
+  per SM. Static shared memory fell from 23,760 to 18,992 bytes, because the
+  block-reduction scratch and per-thread slices are gone.
+
+### A codegen lesson, again
+
+The first general version instantiated the attention tasks for every group
+(1, 2, 4) and lane count (1 to 32). The worker grew from 8,824 to 89,248
+SASS instructions, and although only one instantiation runs, QKV and down
+projections became 85 and 68 µs per token slower than S2. One fixed-lane
+instantiation per group still left 37,184 instructions and QKV 36 µs slow.
+Moving the general shapes out of line (`__noinline__`) was far worse
+(14.3 ms per token at context 1): the calls' register saves leaked into every
+task. The final worker has two inlined instantiations per precision: Llama
+3.2 1B's shape (four heads of 64 per K/V head) with group and lane count fixed
+at compile time, and one general path that reads both at run time and reloads
+`q` from L1. It has 17,816 instructions, and its GEMV phases are as fast as or
+faster than S2's. Fixing the lane count at compile time matters: computed at
+run time, it costs about 1 µs per layer in the attention tasks themselves.
+
+### Probe gate on the worker's own kernels
+
+`attention_probe` with the final kernels, layer time in µs with both waves
+and barriers, all columns from one sweep:
+
+| Context | S2, 5 chunks | Section 11 `fused` | Section 11 `wide_u2`, 2 chunks | worker |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 31.2 | 8.4 | 10.9 | 9.5 (fused) |
+| 64 | 36.9 | 9.5 | 12.7 | 10.4 (fused) |
+| 256 | 59.8 | 13.6 | 15.9 | 14.2 (fused) |
+| 1024 | 99.7 | 32.5 | 29.2 | 28.9 (2 chunks) |
+| 2048 | 152.9 | 56.1 | 45.8 | 45.4 (2 chunks) |
+| 4096 | 311.2 | — | 76.6 | 75.6 (2 chunks) |
+
+Split, the worker's kernels are as fast as the best candidate. Fused, they are
+0.6 to 1.1 µs per layer slower than Section 11's hard-coded `fused` task,
+at most 18 µs per token. That task keeps four rows in flight; in the worker,
+four rows in flight were slower than two at every context. Short-context probe times vary by up to 10% between sweeps. Every
+variant's attention vector matches S2 within 3e-6.
+
+### Correctness
+
+- CTest 13/13 (release) and 4/4 (`cpu-debug`, 148 loader/UBSan cases,
+  including misplaced, missing or mis-thresholded conditional barriers,
+  chunk steps beyond shared memory, and too few chunks); 28 Python tests;
+  clang-format, Ruff and ty report nothing beyond the pre-existing findings.
+- `ops_unit` covers fused and split attention on both sides of F, uneven
+  splits, one-step chunks, groups 1 to 8, `head_dim` 8 to 128, the fixed
+  Llama shape and the general path, in float32 and BF16. The decoder, stack
+  and kernel regressions build their packages with two-step chunks, so every
+  run crosses from fused to split attention. Compute Sanitizer: all 64 checks
+  pass (memcheck, racecheck, synccheck, initcheck), with traced launches in
+  both regimes.
+- **Checkpoint.** Against Transformers eager BF16, every calibrated tolerance
+  passes (blocks, K, V, logits) for the default package and for a package
+  with C = 4 and F = 2 that runs the same prompts split. Greedy selection
+  matches on the split package. On the default package it differs at one of
+  27 steps: position 7 of "The capital of France is", where the reference's
+  top two logits are 21.625 and 21.5, one BF16 unit apart, and TileInfer
+  rounds both to 21.625 and breaks the tie toward the lower token ID. S2
+  matched this step. This is the near-tie risk of Section 7; the
+  tolerances were not changed. In 64-token generation the output diverges
+  from S2 at that third token.
+- `benchmark_decode`'s top-token and logit checks pass at every context
+  below.
+
+### Fixed context (ms per decoder call, kernel only)
+
+| Context | PyTorch eager | PyTorch graph | S2 (2026-10-23) | S2b | S2b − graph |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 13.95 | 12.85 | 12.90 | 12.32 | −0.54 (−4%) |
+| 256 | 14.74 | 13.37 | 13.14 | 12.37 | −1.01 (−8%) |
+| 384 | 14.93 | 13.58 | | 12.42 | −1.16 |
+| 385 | 14.91 | 13.59 | | 12.43 | −1.15 |
+| 1024 | 15.78 | 14.65 | 13.79 | 12.56 | −2.09 (−14%) |
+| 2048 | 17.37 | 16.24 | 14.64 | 12.75 | −3.49 (−21%) |
+| 2049 | 17.36 | 16.23 | | 12.79 | −3.44 |
+| 4096 | 21.43 | 20.31 | 17.22 | 13.16 | −7.15 (−35%) |
+
+The saved S2 binary, traced in the same session, takes 12,900 µs at context 1
+and 17,170 µs at 4K (S2b: 12,316 and 13,159). The changes, −0.59 ms at
+context 1 and −4.0 ms at 4K, exceed Section 11's projection (−0.32 and
+−3.87 ms). The fixed-context numbers exclude greedy selection; 64-token
+generation after the 6-token prompt takes 12,333 µs per token against S2's
+12,930 µs, interleaved three times in the same session (−4.6%).
+
+### Bubble budget per token (µs)
+
+| Context | Traced | Ideal stream | Barrier sync | Streaming excess | Attention excess | Attention waves | Attention GB/s |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 12,316 | 11,607 | 112 | 489 | 104 | 16 | — |
+| 64 | 12,319 | 11,617 | 101 | 493 | 104 | 16 | 17 |
+| 256 | 12,364 | 11,646 | 106 | 491 | 117 | 16 | 49 |
+| 384 | 12,413 | 11,666 | 111 | 485 | 147 | 16 | 57 |
+| 385 | 12,432 | 11,666 | 129 | 497 | 137 | 32 | 56 |
+| 1024 | 12,547 | 11,765 | 131 | 500 | 148 | 32 | 100 |
+| 2048 | 12,744 | 11,922 | 130 | 493 | 194 | 32 | 124 |
+| 4096 | 13,159 | 12,237 | 122 | 513 | 284 | 32 | 142 |
+
+Attention excess fell from 430 to 104 µs at context 1 and from 4,047 to
+284 µs at 4K (same-session S2 trace). Up to 384 steps each layer has one
+attention wave; at 385 the second wave and its barrier return, and barrier
+sync grows by about 18 µs.
+
+Streaming excess also fell, from 733 to 489 µs at context 1. Part of it is
+explained: Wo's prologue now sums one chunk's partials instead of five (Wo
+763 → 699 µs). The down projections are 153 µs faster although their code did
+not change. Padding static shared memory back to S2's 23,760 bytes does not
+change this (12,305 µs), so the likely cause is code generation in the shared
+GEMV loop; it is not isolated.
+
+### The fused limit
+
+Packages with F = 256, 384 and 512, at contexts 192 to 640, are within 20 µs
+of each other per token; the 384 default is kept.
+
+### Against the plan
+
+S2b's projection was 12.6 ms at context 1, 12.7 ms at 1K and 13.3 ms at 4K;
+the measurements are 12.32, 12.56 and 13.16 ms. TileInfer is now faster than
+CUDA Graph replay at every measured context, by 4% at context 1 and 35% at
+4K, and at 4K it needs 0.92 ms above the 12.24 ms floor. The remaining loss at
+short context is mostly GEMV streaming excess (0.49 ms) and barrier latency
+(0.11 ms), the targets of S4.
+
+### Open
+
+- The greedy near-tie at one checkpoint step above is accepted as is
+  (2026-10-25); the checkpoint check stays strict, so it reports the flip.
+- The down-projection speedup is not attributed.
+- Attention at 4K still runs at 142 GB/s, against the 169 GB/s row-read floor
+  of Section 11; a shared P·V pass for the four query heads of a group is the
+  next candidate.
