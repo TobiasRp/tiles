@@ -5,6 +5,7 @@ import os
 import platform
 import subprocess
 from pathlib import Path
+from typing import Any
 
 from .paths import llamacpp_bin, llamacpp_pin, probe_bin
 from .schema import Record
@@ -140,6 +141,10 @@ def decode_records(
                     sampling=sampling,
                     context_length=row["context_length"],
                     samples_us=row[f"{sampling}_samples_us"],
+                    outputs={
+                        "next_token": row["next_token"],
+                        "top_logit": row["top_logit"],
+                    },
                     flags=_flags(backend, kv, fa, graphs, threads)
                     | {"tool": "rt_probe"},
                     notes="wall clock, one llama_decode + synchronize per call; "
@@ -200,7 +205,7 @@ def generate_records(
     graphs: bool = True,
     data: dict,
 ) -> list[Record]:
-    common = {
+    common: dict[str, Any] = {
         "runtime": "llama.cpp",
         "runtime_version": version_label(),
         "model": MODEL_NAME,

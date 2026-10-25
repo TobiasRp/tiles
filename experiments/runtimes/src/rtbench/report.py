@@ -28,10 +28,48 @@ def table(records: list[Record], test: str, sampling: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def crosscheck(records: list[Record], reference: str = "pytorch-eager") -> str:
+    """Next token and top logit per context against one runtime's outputs.
+
+    Uses the decode-only rows. A runtime is "ok" when its token matches and
+    its top logit is within the BF16 tolerance used by benchmark_decode.py.
+    """
+    atol, rtol = 0.15, 0.03
+    rows = [
+        r
+        for r in records
+        if r.test == "decode_fixed_ctx" and r.sampling == "none" and r.outputs
+    ]
+    refs = {
+        r.context_length: r.outputs
+        for r in rows
+        if r.runtime_label.startswith(reference)
+    }
+    if not refs:
+        return f"_no {reference} outputs to check against_\n"
+    lines = [
+        f"| Context | Runtime | Token | Top logit | Error vs {reference} | Verdict |",
+        "| ---: | --- | ---: | ---: | ---: | --- |",
+    ]
+    for r in sorted(rows, key=lambda r: (r.context_length, r.runtime_label)):
+        ref = refs.get(r.context_length)
+        if ref is None or r.runtime_label.startswith(reference):
+            continue
+        error = abs(r.outputs["top_logit"] - ref["top_logit"])
+        ok = r.outputs["next_token"] == ref[
+            "next_token"
+        ] and error <= atol + rtol * abs(ref["top_logit"])
+        lines.append(
+            f"| {r.context_length} | {r.runtime_label} | {int(r.outputs['next_token'])} "
+            f"| {r.outputs['top_logit']:.3f} | {error:.3f} | {'ok' if ok else 'MISMATCH'} |"
+        )
+    return "\n".join(lines) + "\n"
+
+
 def report(records: list[Record]) -> str:
     """ms/token tables for every (test, sampling) pair present, with provenance."""
     out = []
-    for test in ("decode_fixed_ctx", "generate", "prefill"):
+    for test in ("decode_fixed_ctx", "generate"):
         for sampling in ("none", "greedy"):
             if any(r.test == test and r.sampling == sampling for r in records):
                 title = {
@@ -40,6 +78,9 @@ def report(records: list[Record]) -> str:
                 }
                 out.append(f"### {test}: {title[sampling]}, ms per token\n")
                 out.append(table(records, test, sampling))
+    if any(r.outputs for r in records):
+        out.append("### Cross-check at the swept contexts\n")
+        out.append(crosscheck(records))
     versions = sorted(
         {f"{r.runtime}: {r.runtime_version} on {r.device}" for r in records}
     )

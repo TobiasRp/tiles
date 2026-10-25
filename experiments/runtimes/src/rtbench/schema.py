@@ -5,7 +5,7 @@ import statistics
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-TESTS = ("decode_fixed_ctx", "generate", "prefill")
+TESTS = ("decode_fixed_ctx", "generate")
 # "none": logits are ready, no next token chosen. "greedy": next token id known.
 SAMPLING = ("none", "greedy")
 
@@ -24,6 +24,8 @@ class Record:
     samples_us: list[float]
     flags: dict[str, str] = field(default_factory=dict)
     notes: str = ""
+    # Model outputs at this point (next_token, top_logit), for cross-checks.
+    outputs: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.test not in TESTS:

@@ -44,11 +44,19 @@ def decode_records(report_path: Path, *, sampling: str = "none") -> list[Record]
                     sampling="none",
                     context_length=row["context_length"],
                     samples_us=row[f"{key}_samples_us"],
+                    outputs={
+                        "next_token": row["next_token"],
+                        "top_logit": row["top_logit"],
+                    },
                     flags={"attn": "eager"},
                     notes="CUDA events, batch average; logits ready, no sampling",
                 )
             )
     for position, runtime in zip(report["positions"], report["runtime"], strict=True):
+        outputs = {
+            "next_token": runtime["top_token"],
+            "top_logit": runtime["top_logit"],
+        }
         samples = runtime.get("samples_us") or [runtime["mean_us"]]
         records.append(
             _record(
@@ -60,6 +68,7 @@ def decode_records(report_path: Path, *, sampling: str = "none") -> list[Record]
                 context_length=position + 1,
                 samples_us=samples,
                 notes=report["timing"],
+                outputs=outputs,
             )
         )
     return records

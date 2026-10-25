@@ -84,15 +84,22 @@ def test_tileinfer_decode_adapter(tmp_path: Path) -> None:
                     "context_length": 1,
                     "eager_samples_us": [14000.0],
                     "graph_samples_us": [12800.0],
+                    "next_token": 11,
+                    "top_logit": 8.9,
                 },
                 {
                     "context_length": 64,
                     "eager_samples_us": [14100.0],
                     "graph_samples_us": [12900.0],
+                    "next_token": 11,
+                    "top_logit": 9.0,
                 },
             ],
         },
-        "runtime": [{"mean_us": 13000.0}, {"mean_us": 13100.0}],
+        "runtime": [
+            {"mean_us": 13000.0, "top_token": 11, "top_logit": 8.9},
+            {"mean_us": 13100.0, "top_token": 11, "top_logit": 9.0},
+        ],
     }
     path = tmp_path / "decode.json"
     path.write_text(json.dumps(report_json))
@@ -125,3 +132,23 @@ def test_llama_bench_parsing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     assert record.context_length == 255 + 1
     assert record.weight_dtype == "bfloat16"
     assert record.flags["tool"] == "llama-bench"
+
+
+def test_crosscheck_flags_token_and_logit_mismatches() -> None:
+    def rec(runtime: str, token: int, logit: float) -> Record:
+        return make_record(
+            runtime=runtime,
+            flags={},
+            outputs={"next_token": token, "top_logit": logit},
+        )
+
+    records = [
+        rec("pytorch-eager", 7, 20.0),
+        rec("tileinfer", 7, 20.1),
+        rec("llama.cpp", 7, 21.0),
+        rec("other", 8, 20.0),
+    ]
+    text = report.crosscheck(records)
+    assert "| tileinfer | 7 | 20.100 | 0.100 | ok |" in text
+    assert "| llama.cpp | 7 | 21.000 | 1.000 | MISMATCH |" in text
+    assert "| other | 8 | 20.000 | 0.000 | MISMATCH |" in text
