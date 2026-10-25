@@ -83,6 +83,19 @@ struct Region
     int end;
 };
 
+// Attention runs in one of two regimes per position. Split: several chunks
+// are active, scores and values tasks pass scores and statistics through the
+// workspaces. Fused: one chunk is active, the chunk-0 scores task computes
+// the partials itself, values tasks do nothing, and the conditional barrier
+// between the two waves is skipped. Positions with fewer active chunks than
+// the program holds only drop accesses of the all-chunks split regime, so
+// checking these two covers every position.
+enum class Regime
+{
+    split,
+    fused,
+};
+
 struct CheckedTask
 {
     TaskRecord record{};
@@ -91,7 +104,19 @@ struct CheckedTask
     std::int64_t work;
     std::vector<Access> reads;
     std::vector<Access> writes;
-    std::vector<Region> owned;
+    std::vector<Region> owned; // split regime, as the plan declares
+    bool fused_differs = false;
+    std::vector<Access> fused_reads;
+    std::vector<Access> fused_writes;
+
+    [[nodiscard]] const std::vector<Access>& reads_in(Regime regime) const
+    {
+        return regime == Regime::fused && fused_differs ? fused_reads : reads;
+    }
+    [[nodiscard]] const std::vector<Access>& writes_in(Regime regime) const
+    {
+        return regime == Regime::fused && fused_differs ? fused_writes : writes;
+    }
 };
 
 constexpr int kLayerKeys = static_cast<int>(kTensorCount) + kWorkspaceCount;
@@ -252,7 +277,15 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
         read(Id::K, kv_head * s.dh, (kv_head + 1) * s.dh);
         for (Workspace kind : {Workspace::scores, Workspace::stats})
             result.writes.push_back({workspace(kind), first, first + group, produced});
-        result.work = static_cast<std::int64_t>(s.context) * s.dh * group / s.chunks;
+        result.fused_differs = true;
+        if (chunk == 0) {
+            result.fused_reads = result.reads;
+            result.fused_reads.push_back(
+                {buffer(Id::V), kv_head * s.dh, (kv_head + 1) * s.dh, version(Id::V)});
+            result.fused_writes.push_back(
+                {workspace(Workspace::partials), first, first + group, produced});
+        }
+        result.work = 2LL * std::min(s.steps, s.context) * s.dh * group;
     } else if (code == "attention_values") {
         result.record.opcode = Opcode::attention_values;
         const auto [kv_head, chunk, first] = attention_chunk(Workspace::partials, "partials");
@@ -265,7 +298,8 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
         read(Id::V, kv_head * s.dh, (kv_head + 1) * s.dh);
         result.writes.push_back({workspace(Workspace::scores), first, first + group, produced});
         result.writes.push_back({workspace(Workspace::partials), first, first + group, produced});
-        result.work = static_cast<std::int64_t>(s.context) * s.dh * group / s.chunks;
+        result.fused_differs = true; // nothing to do
+        result.work = 2LL * std::min(s.steps, s.context) * s.dh * group;
     } else if (code == "output_projection") {
         result.record.opcode = Opcode::output_projection;
         const auto [begin, end] = rows(s.d);
@@ -275,6 +309,10 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
         // The task owning row 0 also stores the combined attention vector.
         if (begin == 0)
             write(Id::attention, 0, s.d);
+        result.fused_differs = true;
+        result.fused_reads = result.reads;
+        result.fused_reads.front().end = s.nq; // chunk 0 only
+        result.fused_writes = result.writes;
         result.work = static_cast<std::int64_t>(end - begin) * s.d;
     } else if (code == "gate_up") {
         result.record.opcode = Opcode::gate_up;
@@ -362,11 +400,12 @@ class Dataflow
                 cells_[Buffers::kv + 2 * layer + value].assign(s.nkv * s.dh, {});
     }
 
-    void run_wave(int wave, const std::vector<int>& ids, const std::vector<CheckedTask>& tasks)
+    void run_wave(
+        int wave, const std::vector<int>& ids, const std::vector<CheckedTask>& tasks, Regime regime)
     {
         constexpr int many = -2;
         for (const int id : ids)
-            for (const auto access : tasks[id].reads)
+            for (const auto access : tasks[id].reads_in(regime))
                 for (auto& cell : range(access)) {
                     require(cell.version == access.version, "read does not see its producer");
                     if (cell.read_wave != wave) {
@@ -377,7 +416,7 @@ class Dataflow
                     }
                 }
         for (const int id : ids)
-            for (const auto access : tasks[id].writes)
+            for (const auto access : tasks[id].writes_in(regime))
                 for (auto& cell : range(access)) {
                     require(cell.write_wave != wave || cell.write_task == id,
                         "tasks in one wave write the same element");
@@ -433,19 +472,41 @@ void validate_program(const json& document, const PlanShape& s, int workers, Loa
     }
     check_ownership(program, tasks);
 
+    // A wave of only scores tasks followed by a wave of only values tasks ends
+    // with a conditional barrier, and every other wave with a plain one.
+    std::vector<int> wave_opcode(result.wave_count, -1); // the opcode all members share, or -2
+    for (const auto& task : tasks) {
+        auto& code = wave_opcode[task.wave];
+        const int opcode = static_cast<int>(task.record.opcode);
+        code = code == -1 || code == opcode ? opcode : -2;
+    }
+    auto conditional = [&](int wave) {
+        return wave + 1 < result.wave_count &&
+               wave_opcode[wave] == static_cast<int>(Opcode::attention_scores) &&
+               wave_opcode[wave + 1] == static_cast<int>(Opcode::attention_values);
+    };
+
     std::fill(seen.begin(), seen.end(), false);
     std::vector<std::vector<TaskRecord>> streams(workers);
     std::vector<std::vector<std::int32_t>> stream_tasks(workers);
-    TaskRecord barrier{};
-    barrier.opcode = Opcode::barrier;
-    barrier.layer = kNoLayer;
-    Dataflow dataflow(program);
+    Dataflow split(program);
+    Dataflow fused(program);
+    std::vector<int> fused_members;
     for (int wave = 0; wave < result.wave_count; ++wave) {
         const auto& entry = waves[wave];
         require(index(entry.at("id"), result.wave_count) == wave &&
                     entry.at("workers").is_array() &&
                     entry.at("workers").size() == static_cast<std::size_t>(workers),
             "invalid wave workers");
+        const json expected_condition = {{"skip_up_to_length", s.fused}};
+        require(conditional(wave) ? entry.contains("conditional_barrier") &&
+                                        entry.at("conditional_barrier") == expected_condition
+                                  : !entry.contains("conditional_barrier"),
+            "invalid conditional barrier");
+        TaskRecord barrier{};
+        barrier.opcode = Opcode::barrier;
+        barrier.layer = kNoLayer;
+        barrier.begin = conditional(wave) ? s.fused : 0;
         std::vector<std::int64_t> loads(workers);
         std::vector<int> members;
         for (int worker = 0; worker < workers; ++worker) {
@@ -469,7 +530,13 @@ void validate_program(const json& document, const PlanShape& s, int workers, Loa
                 stream_tasks[worker].push_back(-1);
             }
         }
-        dataflow.run_wave(wave, members, tasks);
+        split.run_wave(wave, members, tasks, Regime::split);
+        // Without the conditional barrier, its two waves run as one.
+        fused_members.insert(fused_members.end(), members.begin(), members.end());
+        if (!conditional(wave)) {
+            fused.run_wave(wave, fused_members, tasks, Regime::fused);
+            fused_members.clear();
+        }
         result.worker_loads.push_back(std::move(loads));
     }
     require(std::all_of(seen.begin(), seen.end(), [](bool value) { return value; }),

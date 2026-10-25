@@ -8,7 +8,7 @@ weights. Each layer has six task waves: one Q, K or V head per task (with its
 RMSNorm, RoPE and cache write fused in); attention scores and attention
 values per K/V head and context chunk; and the output, gate/up (with
 SiLU·up) and down projections split into one row range per worker.
-`visualize` draws one layer of that program. Version-6 packages
+`visualize` draws one layer of that program. Version-7 packages
 use the same storage dtype for weights, activations, and K/V, with float32
 accumulation and selected float32 internal math. Python validates graph
 dependencies and planning metadata; [TileInfer](../tileinfer/README.md) checks
@@ -62,8 +62,13 @@ operands; [the measured comparison](../docs/bf16_compute_results.md) explains
 why the native Tensor Core variant was removed.
 
 There is no tile-size parameter. Projections split their rows evenly over the
-target's workers, and attention uses the fewest context chunks per K/V head
-that give every worker equal work (five for Llama 3.2 1B on 20 SMs).
+target's workers. Attention chunk tasks follow the position: a visible prefix
+of at most `--attention-fused-steps` (default 384) runs as one fused task per
+K/V head and skips the barrier before the values wave; a longer prefix splits
+into the fewest chunks of at most `--attention-chunk-steps`, but at least two.
+The chunk steps default to the most the worker's shared attention region
+holds (`attention_shared_bytes` in `target.json`; 2,048 steps for Llama 3.2
+1B in BF16), so a 4K context needs two chunks, 16 tasks on 20 SMs.
 
 Other commands are available through `python -m tileplan --help`:
 

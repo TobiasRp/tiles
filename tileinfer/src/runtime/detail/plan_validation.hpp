@@ -15,7 +15,9 @@ struct PlanShape
     int nkv;
     int dh;
     int context;
-    int chunks; // attention context chunks per K/V head
+    int chunks; // attention chunk tasks per K/V head
+    int steps;  // most time steps one attention chunk task covers
+    int fused;  // longest prefix one fused attention task per K/V head handles
 };
 
 // Checks the supplied whole-token program without choosing tiles, waves, or

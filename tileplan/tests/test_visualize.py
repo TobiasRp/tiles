@@ -34,6 +34,7 @@ class VisualizationTest(unittest.TestCase):
                         "active_blocks_per_sm": 2,
                         "threads_per_block": 128,
                         "fingerprint": "fixture-worker",
+                        "attention_shared_bytes": 16384,
                     },
                 }
             )

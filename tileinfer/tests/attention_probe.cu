@@ -8,7 +8,11 @@
 // block per SM and prints JSON. Variants:
 //
 //   empty           barriers only
-//   production      ops::attention_scores / ops::attention_values
+//   production      S2's attention tasks (s2_scores / s2_values), the reference
+//   worker          the worker's ops::attention_scores / ops::attention_values,
+//                   with the planner's default chunk rule (one fused task up to
+//                   384 steps, then at least two chunks of at most 2,048) and
+//                   the barrier skip; runs once per position, whatever CHUNKS says
 //   instr           copy of production with clock64 stamps between phases
 //   instr_noreduce  as instr, without the warp reductions of the dot products
 //   instr_konly     as instr, K loads only (no q loads, no reductions)
@@ -20,7 +24,7 @@
 //   stream, stream_hm  row reads only, as a bandwidth floor for each layout
 //
 // The wide variants assume head_dim 64 and four query heads per K/V head, and
-// match production up to FP32 summation order.
+// match production up to FP32 summation order, as does the worker variant.
 //
 // Timings are CUDA-event averages and diagnostic: they split the S2 attention
 // waves into K/V reads, reductions and block synchronizations.
@@ -32,6 +36,7 @@
 #include <cuda/__event/timed_event.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#include <cub/block/block_reduce.cuh>
 #include <cuda/buffer>
 #include <cuda/launch>
 #include <cuda/memory_pool>
@@ -58,6 +63,152 @@ constexpr int kQueryHeads = 32;
 constexpr int kKvHeads = 8;
 constexpr int kHeadDim = 64;
 constexpr int kMaxContext = 4096;
+// The planner's defaults for this model: the BF16 worker's capacity at four
+// heads per K/V head, and the fused-task limit.
+constexpr int kWorkerChunkSteps = 2048;
+constexpr int kWorkerFusedSteps = 384;
+
+// S2's attention tasks (commit 87d8152) and their shared scratch, kept as the
+// probe's baseline. The wide candidates below share its even split of the
+// prefix over attention_chunks; the worker's own ops split by chunk steps.
+using BlockSum = cub::BlockReduce<float, kThreads>;
+
+struct FloatMax
+{
+    __device__ float operator()(float a, float b) const { return cuda::std::fmax(a, b); }
+};
+
+struct S2Shared
+{
+    ops::WarpSum::TempStorage warp[ops::kWarpsPerBlock];
+    BlockSum::TempStorage block;
+    float softmax_max;
+    float softmax_sum;
+    float slices[kThreads];
+};
+
+__device__ inline void legacy_range(int chunk, const ops::Shape& shape, int& begin, int& end)
+{
+    const int length = shape.position + 1;
+    begin = static_cast<int>(static_cast<long long>(length) * chunk / shape.attention_chunks);
+    end = static_cast<int>(static_cast<long long>(length) * (chunk + 1) / shape.attention_chunks);
+}
+
+/// Scores of every query head of one K/V head over one context chunk, plus each
+/// head's chunk maximum and sum of exp(score - maximum). Each warp owns whole
+/// time steps and reads K[t] once for all heads of the group. QK and the scaling
+/// are separate BF16 rounding boundaries, as in eager attention.
+template <typename Scalar>
+__device__ inline void s2_scores(int kv_head, int chunk, const ops::Layer<Scalar>& layer,
+    const ops::Shape& shape, S2Shared& shared)
+{
+    const int dh = shape.head_dim;
+    const int group = shape.query_heads / shape.kv_heads;
+    const int first_head = kv_head * group;
+    const int lane = threadIdx.x % ops::kWarpSize;
+    const int warp = threadIdx.x / ops::kWarpSize;
+    const float scale = 1.0f / cuda::std::sqrt(static_cast<float>(dh));
+    int begin = 0, end = 0;
+    legacy_range(chunk, shape, begin, end);
+
+    for (int time = begin + warp; time < end; time += ops::kWarpsPerBlock) {
+        const Scalar* key = layer.key_cache + (time * shape.kv_heads + kv_head) * dh;
+        float dots[kMaxGroup] = {};
+        for (int i = lane; i < dh; i += ops::kWarpSize) {
+            const float k = static_cast<float>(key[i]);
+#pragma unroll
+            for (int g = 0; g < kMaxGroup; ++g)
+                if (g < group)
+                    dots[g] += static_cast<float>(layer.q_rot[(first_head + g) * dh + i]) * k;
+        }
+        for (int g = 0; g < group; ++g) {
+            const float dot = ops::WarpSum(shared.warp[warp]).Sum(dots[g]);
+            __syncwarp();
+            if (lane == 0)
+                layer.scores[(first_head + g) * shape.max_context + time] =
+                    static_cast<Scalar>(static_cast<float>(static_cast<Scalar>(dot)) * scale);
+        }
+    }
+    __syncthreads();
+
+    for (int g = 0; g < group; ++g) {
+        const Scalar* scores = layer.scores + (first_head + g) * shape.max_context;
+        float maximum = -cuda::std::numeric_limits<float>::infinity();
+        for (int time = begin + threadIdx.x; time < end; time += blockDim.x)
+            maximum = cuda::std::fmax(maximum, static_cast<float>(scores[time]));
+        maximum = BlockSum(shared.block).Reduce(maximum, FloatMax());
+        if (threadIdx.x == 0)
+            shared.softmax_max = maximum;
+        __syncthreads();
+        float sum = 0.0f;
+        for (int time = begin + threadIdx.x; time < end; time += blockDim.x)
+            sum += cuda::std::exp(static_cast<float>(scores[time]) - shared.softmax_max);
+        sum = BlockSum(shared.block).Sum(sum);
+        if (threadIdx.x == 0) {
+            float* stats = layer.stats + (chunk * shape.query_heads + first_head + g) * 2;
+            stats[0] = shared.softmax_max;
+            stats[1] = sum;
+        }
+        __syncthreads();
+    }
+}
+
+/// Probabilities and partial P*V of one K/V head's query heads over one chunk.
+/// The softmax maximum and denominator combine every chunk's statistics in
+/// chunk order. Probabilities round once to Scalar before P*V, as eager
+/// attention does; the FP32 partial sums are combined by output_projection.
+template <typename Scalar>
+__device__ inline void s2_values(int kv_head, int chunk, const ops::Layer<Scalar>& layer,
+    const ops::Shape& shape, S2Shared& shared)
+{
+    const int dh = shape.head_dim;
+    const int group = shape.query_heads / shape.kv_heads;
+    int begin = 0, end = 0;
+    legacy_range(chunk, shape, begin, end);
+    // Threads split the chunk's time steps into slices for each output coordinate.
+    const int slices = kThreads / dh;
+    const int coordinate = threadIdx.x % dh;
+    const int slice = threadIdx.x / dh;
+
+    for (int g = 0; g < group; ++g) {
+        const int head = kv_head * group + g;
+        if (threadIdx.x == 0) {
+            float maximum = -cuda::std::numeric_limits<float>::infinity();
+            for (int c = 0; c < shape.attention_chunks; ++c)
+                maximum = cuda::std::fmax(maximum, layer.stats[(c * shape.query_heads + head) * 2]);
+            float sum = 0.0f;
+            for (int c = 0; c < shape.attention_chunks; ++c) {
+                const float* stats = layer.stats + (c * shape.query_heads + head) * 2;
+                sum += stats[1] * cuda::std::exp(stats[0] - maximum);
+            }
+            shared.softmax_max = maximum;
+            shared.softmax_sum = sum;
+        }
+        __syncthreads();
+        Scalar* probabilities = layer.scores + head * shape.max_context;
+        for (int time = begin + threadIdx.x; time < end; time += blockDim.x)
+            probabilities[time] = static_cast<Scalar>(
+                cuda::std::exp(static_cast<float>(probabilities[time]) - shared.softmax_max) /
+                shared.softmax_sum);
+        __syncthreads();
+
+        float sum = 0.0f;
+        if (slice < slices)
+            for (int time = begin + slice; time < end; time += slices)
+                sum += static_cast<float>(probabilities[time]) *
+                       static_cast<float>(
+                           layer.value_cache[(time * shape.kv_heads + kv_head) * dh + coordinate]);
+        shared.slices[threadIdx.x] = sum;
+        __syncthreads();
+        if (threadIdx.x < dh) {
+            float total = 0.0f;
+            for (int s = 0; s < slices; ++s)
+                total += shared.slices[s * dh + threadIdx.x];
+            layer.partials[(chunk * shape.query_heads + head) * dh + threadIdx.x] = total;
+        }
+        __syncthreads();
+    }
+}
 
 enum Variant : int
 {
@@ -75,17 +226,18 @@ enum Variant : int
     v_fused,       // chunks == 1: scores, softmax and P*V in one task, one wave
     v_stream,      // K then V row reads only, production layout
     v_stream_hm,   // K then V row reads only, head-major layout
+    v_worker,      // the worker's attention ops, chunk rule and barrier skip
     kVariants,
 };
 constexpr const char* kVariantNames[kVariants] = {"empty", "production", "instr", "instr_noreduce",
     "instr_konly", "wide", "wide_scores", "wide_values", "wide_hm", "wide_u2", "wide_u8", "fused",
-    "stream", "stream_hm"};
+    "stream", "stream_hm", "worker"};
 // Variants whose attention vector must match production up to rounding order.
 constexpr bool compares_with_production(int variant)
 {
     return variant == v_production || variant == v_instr || variant == v_wide ||
            variant == v_wide_scores || variant == v_wide_values || variant == v_fused ||
-           variant == v_wide_u2 || variant == v_wide_u8;
+           variant == v_wide_u2 || variant == v_wide_u8 || variant == v_worker;
 }
 
 enum Phase : int
@@ -135,7 +287,7 @@ struct Stamps
 // reductions (lane 0 stores its own partial dot); mode 2 also skips the q loads.
 template <int Mode>
 __device__ inline void scores_instrumented(int kv_head, int chunk, const ops::Layer<Bf16>& layer,
-    const ops::Shape& shape, ops::SharedStorage& shared, Stamps& stamps)
+    const ops::Shape& shape, S2Shared& shared, Stamps& stamps)
 {
     const int dh = shape.head_dim;
     const int group = shape.query_heads / shape.kv_heads;
@@ -144,7 +296,7 @@ __device__ inline void scores_instrumented(int kv_head, int chunk, const ops::La
     const int warp = threadIdx.x / ops::kWarpSize;
     const float scale = 1.0f / cuda::std::sqrt(static_cast<float>(dh));
     int begin = 0, end = 0;
-    ops::chunk_range(chunk, shape, begin, end);
+    legacy_range(chunk, shape, begin, end);
     stamps.start();
 
     for (int time = begin + warp; time < end; time += ops::kWarpsPerBlock) {
@@ -178,7 +330,7 @@ __device__ inline void scores_instrumented(int kv_head, int chunk, const ops::La
         float maximum = -cuda::std::numeric_limits<float>::infinity();
         for (int time = begin + threadIdx.x; time < end; time += blockDim.x)
             maximum = cuda::std::fmax(maximum, static_cast<float>(scores[time]));
-        maximum = ops::BlockSum(shared.block).Reduce(maximum, ops::FloatMax());
+        maximum = BlockSum(shared.block).Reduce(maximum, FloatMax());
         if (threadIdx.x == 0)
             shared.softmax_max = maximum;
         __syncthreads();
@@ -186,7 +338,7 @@ __device__ inline void scores_instrumented(int kv_head, int chunk, const ops::La
         float sum = 0.0f;
         for (int time = begin + threadIdx.x; time < end; time += blockDim.x)
             sum += cuda::std::exp(static_cast<float>(scores[time]) - shared.softmax_max);
-        sum = ops::BlockSum(shared.block).Sum(sum);
+        sum = BlockSum(shared.block).Sum(sum);
         if (threadIdx.x == 0) {
             float* stats = layer.stats + (chunk * shape.query_heads + first_head + g) * 2;
             stats[0] = shared.softmax_max;
@@ -199,12 +351,12 @@ __device__ inline void scores_instrumented(int kv_head, int chunk, const ops::La
 
 // Copy of ops::attention_values with phase stamps.
 __device__ inline void values_instrumented(int kv_head, int chunk, const ops::Layer<Bf16>& layer,
-    const ops::Shape& shape, ops::SharedStorage& shared, Stamps& stamps)
+    const ops::Shape& shape, S2Shared& shared, Stamps& stamps)
 {
     const int dh = shape.head_dim;
     const int group = shape.query_heads / shape.kv_heads;
     int begin = 0, end = 0;
-    ops::chunk_range(chunk, shape, begin, end);
+    legacy_range(chunk, shape, begin, end);
     const int slices = kThreads / dh;
     const int coordinate = threadIdx.x % dh;
     const int slice = threadIdx.x / dh;
@@ -300,7 +452,7 @@ __device__ inline void scores_wide(
     const int first_head = kv_head * group;
     const float scale = 1.0f / cuda::std::sqrt(static_cast<float>(kHeadDim));
     int begin = 0, end = 0;
-    ops::chunk_range(chunk, shape, begin, end);
+    legacy_range(chunk, shape, begin, end);
 
     uint4 q[group];
 #pragma unroll
@@ -369,7 +521,7 @@ __device__ inline void values_wide(int kv_head, int chunk, const ops::Layer<Bf16
     const int sub = lane / 8, v = lane % 8;
     const int first_head = kv_head * group;
     int begin = 0, end = 0;
-    ops::chunk_range(chunk, shape, begin, end);
+    legacy_range(chunk, shape, begin, end);
     const int length = end - begin;
     if (group * length * static_cast<int>(sizeof(Bf16)) > static_cast<int>(sizeof(shared.vector)))
         __trap();
@@ -562,12 +714,12 @@ __device__ inline void attention_fused(int kv_head, const ops::Layer<Bf16>& laye
 // Reads one chunk's K or V rows the way the wide kernels do, with no arithmetic.
 template <int Unroll, int Layout>
 __device__ inline void stream_rows(
-    const Bf16* base, int kv_head, int chunk, const ops::Shape& shape, ops::SharedStorage& shared)
+    const Bf16* base, int kv_head, int chunk, const ops::Shape& shape, S2Shared& shared)
 {
     const int lane = threadIdx.x % 32, warp = threadIdx.x / 32;
     const int sub = lane / 8, v = lane % 8;
     int begin = 0, end = 0;
-    ops::chunk_range(chunk, shape, begin, end);
+    legacy_range(chunk, shape, begin, end);
     unsigned bits = 0;
     constexpr int rows = ops::kWarpsPerBlock * 4 * Unroll;
     for (int first = begin; first < end; first += rows) {
@@ -603,6 +755,7 @@ struct Program
 __global__ __launch_bounds__(kThreads, 1) void attention_program(Program program)
 {
     __shared__ ops::SharedStorage shared;
+    __shared__ S2Shared s2;
     __shared__ float reduce[4 * 8 * kHeadDim];
     const auto& shape = program.shape;
     const int tasks = shape.kv_heads * shape.attention_chunks;
@@ -629,23 +782,26 @@ __global__ __launch_bounds__(kThreads, 1) void attention_program(Program program
                 const int chunk = task % shape.attention_chunks;
                 switch (program.variant) {
                 case v_production:
+                    s2_scores(kv_head, chunk, layer, shape, s2);
+                    break;
+                case v_worker:
                     ops::attention_scores(kv_head, chunk, layer, shape, shared);
                     break;
                 case v_instr:
-                    scores_instrumented<0>(kv_head, chunk, layer, shape, shared, stamps);
+                    scores_instrumented<0>(kv_head, chunk, layer, shape, s2, stamps);
                     break;
                 case v_instr_noreduce:
-                    scores_instrumented<1>(kv_head, chunk, layer, shape, shared, stamps);
+                    scores_instrumented<1>(kv_head, chunk, layer, shape, s2, stamps);
                     break;
                 case v_instr_konly:
-                    scores_instrumented<2>(kv_head, chunk, layer, shape, shared, stamps);
+                    scores_instrumented<2>(kv_head, chunk, layer, shape, s2, stamps);
                     break;
                 case v_wide:
                 case v_wide_scores:
                     scores_wide<4, 0>(kv_head, chunk, layer, shape);
                     break;
                 case v_wide_values:
-                    ops::attention_scores(kv_head, chunk, layer, shape, shared);
+                    s2_scores(kv_head, chunk, layer, shape, s2);
                     break;
                 case v_wide_hm:
                     scores_wide<4, 1>(kv_head, chunk, layer, shape);
@@ -660,17 +816,20 @@ __global__ __launch_bounds__(kThreads, 1) void attention_program(Program program
                     attention_fused<4, 0>(kv_head, layer, shape, shared, reduce);
                     break;
                 case v_stream:
-                    stream_rows<4, 0>(layer.key_cache, kv_head, chunk, shape, shared);
+                    stream_rows<4, 0>(layer.key_cache, kv_head, chunk, shape, s2);
                     break;
                 case v_stream_hm:
-                    stream_rows<4, 1>(layer.key_cache, kv_head, chunk, shape, shared);
+                    stream_rows<4, 1>(layer.key_cache, kv_head, chunk, shape, s2);
                     break;
                 default:
                     break;
                 }
                 __syncthreads();
             }
-            grid.sync();
+            // The worker skips this barrier while one chunk is active.
+            const bool fused_worker = program.variant == v_worker && ops::active_chunks(shape) == 1;
+            if (!fused_worker)
+                grid.sync();
             const unsigned long long t1 = global_timer_ns();
             const long long c1 = clock64();
             for (int task = blockIdx.x; task < tasks && program.variant != v_fused;
@@ -679,19 +838,22 @@ __global__ __launch_bounds__(kThreads, 1) void attention_program(Program program
                 const int chunk = task % shape.attention_chunks;
                 switch (program.variant) {
                 case v_production:
+                    s2_values(kv_head, chunk, layer, shape, s2);
+                    break;
+                case v_worker:
                     ops::attention_values(kv_head, chunk, layer, shape, shared);
                     break;
                 case v_instr:
                 case v_instr_noreduce:
                 case v_instr_konly:
-                    values_instrumented(kv_head, chunk, layer, shape, shared, stamps);
+                    values_instrumented(kv_head, chunk, layer, shape, s2, stamps);
                     break;
                 case v_wide:
                 case v_wide_values:
                     values_wide<4, 0>(kv_head, chunk, layer, shape, shared, reduce);
                     break;
                 case v_wide_scores:
-                    ops::attention_values(kv_head, chunk, layer, shape, shared);
+                    s2_values(kv_head, chunk, layer, shape, s2);
                     break;
                 case v_wide_hm:
                     values_wide<4, 1>(kv_head, chunk, layer, shape, shared, reduce);
@@ -703,10 +865,10 @@ __global__ __launch_bounds__(kThreads, 1) void attention_program(Program program
                     values_wide<8, 0>(kv_head, chunk, layer, shape, shared, reduce);
                     break;
                 case v_stream:
-                    stream_rows<4, 0>(layer.value_cache, kv_head, chunk, shape, shared);
+                    stream_rows<4, 0>(layer.value_cache, kv_head, chunk, shape, s2);
                     break;
                 case v_stream_hm:
-                    stream_rows<4, 1>(layer.value_cache, kv_head, chunk, shape, shared);
+                    stream_rows<4, 1>(layer.value_cache, kv_head, chunk, shape, s2);
                     break;
                 default:
                     break;
@@ -804,6 +966,14 @@ json attention_sweep(
                     continue;
                 if (variant == v_fused && chunks != 1)
                     continue;
+                if (variant == v_worker && chunks != chunk_counts.front())
+                    continue;
+                // The worker's rule, as in ops::active_chunks.
+                const bool worker = variant == v_worker;
+                const int program_chunks = worker ? kMaxContext / kWorkerChunkSteps : chunks;
+                const int active = !worker                             ? chunks
+                                   : position + 1 <= kWorkerFusedSteps ? 1
+                                                                       : program_chunks;
                 Program program{};
                 program.key = key.data();
                 program.value = value.data();
@@ -812,7 +982,8 @@ json attention_sweep(
                 program.partials = partials.data();
                 program.stats = stats.data();
                 program.shape = ops::Shape{2048, 8192, kQueryHeads, kKvHeads, kHeadDim, position,
-                    kMaxContext, chunks, NumericConfig{}, nullptr};
+                    kMaxContext, program_chunks, worker ? kWorkerChunkSteps : kMaxContext,
+                    worker ? kWorkerFusedSteps : kMaxContext, NumericConfig{}, nullptr};
                 program.layers = kLayers;
                 program.variant = variant;
                 program.cycles = cycles.data();
@@ -835,7 +1006,7 @@ json attention_sweep(
                 std::vector<long long> host_cycles(static_cast<std::size_t>(sm_count) * kPhases);
                 unsigned long long host_wave[4];
                 std::vector<float> host_partials(
-                    static_cast<std::size_t>(chunks) * kQueryHeads * kHeadDim);
+                    static_cast<std::size_t>(active) * kQueryHeads * kHeadDim);
                 check(cudaMemcpy(host_cycles.data(), cycles.data(),
                           host_cycles.size() * sizeof(long long), cudaMemcpyDeviceToHost),
                     "copy cycles");
@@ -852,7 +1023,7 @@ json attention_sweep(
                                              static_cast<double>(host_wave[0] + host_wave[1])
                                        : 0.0;
                 json row{{"variant", kVariantNames[variant]}, {"position", position},
-                    {"context", position + 1}, {"chunks", chunks}, {"layer_us", layer_us},
+                    {"context", position + 1}, {"chunks", active}, {"layer_us", layer_us},
                     {"scores_wave_us", host_wave[0] / evals / 1e3},
                     {"values_wave_us", host_wave[1] / evals / 1e3}, {"sm_mhz", mhz}};
                 if (variant >= v_instr) {
@@ -873,7 +1044,7 @@ json attention_sweep(
                 }
                 // Fixed-order chunk sum per head coordinate, as output_projection does.
                 std::vector<float> combined(kQueryHeads * kHeadDim, 0.0f);
-                for (int c = 0; c < chunks; ++c)
+                for (int c = 0; c < active; ++c)
                     for (int i = 0; i < kQueryHeads * kHeadDim; ++i)
                         combined[i] += host_partials[c * kQueryHeads * kHeadDim + i];
                 if (variant == v_production)

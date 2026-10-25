@@ -44,6 +44,7 @@ json target_json(const tileinfer::Target& t)
                          {"active_blocks_per_sm", t.active_blocks_per_sm},
                          {"registers_per_thread", t.registers_per_thread},
                          {"static_shared_bytes", t.static_shared_bytes},
+                         {"attention_shared_bytes", tileinfer::kAttentionSharedBytes},
                          {"fingerprint", tileinfer::kFingerprint}}}};
 }
 
@@ -87,7 +88,9 @@ json inspect(const tileinfer::LoadedPlan& plan)
             {{"hidden_size", plan.hidden_size}, {"intermediate_size", plan.intermediate_size},
                 {"num_attention_heads", plan.query_heads}, {"num_key_value_heads", plan.kv_heads},
                 {"head_dim", plan.head_dim}, {"max_context", plan.max_context},
-                {"attention_chunks", plan.attention_chunks}}},
+                {"attention_chunks", plan.attention_chunks},
+                {"attention_chunk_steps", plan.attention_chunk_steps},
+                {"attention_fused_steps", plan.attention_fused_steps}}},
         {"workers", plan.workers}, {"wave_count", plan.wave_count}, {"task_count", plan.task_count},
         {"instruction_count", plan.instructions.size()}, {"worker_loads", plan.worker_loads},
         {"scratch_bytes", plan.scratch_bytes}, {"attention_bytes", plan.attention_bytes},

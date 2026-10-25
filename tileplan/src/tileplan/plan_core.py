@@ -24,8 +24,8 @@ import torch
 from .decoder_reference import WEIGHT_SHAPES, DecoderSpec
 from .probe import ABI
 
-FORMAT = 6
-GENERATOR = "tileplan-decoder-0.6"
+FORMAT = 7
+GENERATOR = "tileplan-decoder-0.7"
 WEIGHT_DTYPES = {"float32": 4, "bfloat16": 2}
 # Weights keep this order inside each layer's block of weights.bin.
 TENSOR_NAMES = (
@@ -88,13 +88,51 @@ def numeric_policy(dtype: str) -> dict:
     }
 
 
-def attention_chunks(spec: DecoderSpec, workers: int) -> int:
-    """Context chunks per K/V head: the fewest that give every worker equal work."""
-    return next(
-        chunks
-        for chunks in range(1, workers + 1)
-        if spec.num_key_value_heads * chunks % workers == 0
+def attention_capacity(spec: DecoderSpec, dtype: str, target: dict) -> int:
+    """Most time steps one attention task holds: the probabilities of all its
+    query heads must fit the compiled worker's shared attention region."""
+    group = spec.num_attention_heads // spec.num_key_value_heads
+    return target["attention_shared_bytes"] // (group * weight_size(dtype))
+
+
+# Longest prefix that one fused attention task per K/V head handles by
+# default: the S2b probe's crossover against two split chunks on the RTX 3050.
+FUSED_STEPS = 384
+
+
+def attention_chunking(
+    spec: DecoderSpec,
+    dtype: str,
+    target: dict,
+    steps: int | None = None,
+    fused: int | None = None,
+) -> dict:
+    """Chunk tasks per K/V head, the most time steps each covers, and the
+    longest prefix handled by one fused task.
+
+    The worker runs a prefix of at most ``fused`` steps as one fused task per
+    K/V head, which also skips the barrier before the values wave. A longer
+    prefix splits evenly into the fewest chunks of at most ``steps`` time
+    steps, but at least two. ``steps`` defaults to the shared-memory capacity;
+    the program holds the chunk tasks of a ``max_context`` prefix.
+    """
+    capacity = attention_capacity(spec, dtype, target)
+    steps = capacity if steps is None else steps
+    require(
+        type(steps) is int and 0 < steps <= capacity,
+        f"attention chunk steps must be in [1, {capacity}]",
     )
+    fused = min(FUSED_STEPS, steps) if fused is None else fused
+    require(
+        type(fused) is int and 0 < fused <= steps,
+        "attention fused steps must be in [1, attention chunk steps]",
+    )
+    longest = spec.max_context
+    return {
+        "attention_chunks": 1 if longest <= fused else max(2, -(-longest // steps)),
+        "attention_chunk_steps": steps,
+        "attention_fused_steps": fused,
+    }
 
 
 def block_spec(source: dict) -> DecoderSpec:
@@ -227,13 +265,14 @@ def _split(rows: int, parts: int) -> list[tuple[int, int]]:
     return [(i * rows // count, (i + 1) * rows // count) for i in range(count)]
 
 
-def _graph(spec: DecoderSpec, workers: int, chunks: int, dtype: str) -> list[dict]:
+def _graph(spec: DecoderSpec, workers: int, chunking: dict, dtype: str) -> list[dict]:
     """One layer's tasks with their minimal data dependencies.
 
     Projections read a whole input vector, so each depends on every producer
     of that vector. Q/K/V tasks own one head, so RoPE and the cache write
     fit in the same task. Attention splits every K/V head's context into
-    chunks; the remaining projections split their rows evenly over workers.
+    chunks of at most ``attention_chunk_steps`` time steps; the remaining
+    projections split their rows evenly over workers.
     """
     d, f, dh = spec.hidden_size, spec.intermediate_size, spec.head_dim
     nq, nkv = spec.num_attention_heads, spec.num_key_value_heads
@@ -271,7 +310,9 @@ def _graph(spec: DecoderSpec, workers: int, chunks: int, dtype: str) -> list[dic
             output = [{"tensor": TID[cache], "position": "current", "head": head}]
         heads.append(add("qkv", {"rows": [begin, begin + dh]}, output, [], dh * d))
 
-    chunk_work = 2 * spec.max_context * dh * group // chunks
+    chunks = chunking["attention_chunks"]
+    steps = min(chunking["attention_chunk_steps"], spec.max_context)
+    chunk_work = 2 * steps * dh * group
     scores, values = [], []
     for kv_head in range(nkv):
         queries = [kv_head * group, (kv_head + 1) * group]
@@ -333,6 +374,7 @@ def _program(
     spec: DecoderSpec,
     dtype: str,
     workers: int,
+    chunking: dict,
     layers: int,
     vocab_size: int | None,
 ) -> list[dict]:
@@ -372,7 +414,7 @@ def _program(
         if vocab_size is not None
         else []
     )
-    template = _graph(spec, workers, attention_chunks(spec, workers), dtype)
+    template = _graph(spec, workers, chunking, dtype)
     for layer in range(layers):
         offset = len(tasks)
         for task in template:
@@ -434,16 +476,38 @@ def _schedule(tasks: list[dict], workers: int) -> list[dict]:
     return result
 
 
+def _mark_conditional_barriers(
+    tasks: list[dict], waves: list[dict], fused: int
+) -> None:
+    """Mark the barrier between each scores wave and its values wave.
+
+    While the visible prefix has at most ``fused`` time steps, scores tasks
+    finish attention alone and values tasks do nothing, so every worker skips
+    that barrier at the same positions.
+    """
+
+    def only(wave: dict, opcode: str) -> bool:
+        ids = [task for lane in wave["workers"] for task in lane]
+        return bool(ids) and all(tasks[i]["opcode"].startswith(opcode) for i in ids)
+
+    for wave, following in zip(waves, waves[1:]):
+        if only(wave, "attention_scores") and only(following, "attention_values"):
+            wave["conditional_barrier"] = {"skip_up_to_length": fused}
+
+
 def scheduled_program(
     spec: DecoderSpec,
     dtype: str,
     workers: int,
+    chunking: dict,
     layers: int = 1,
     vocab_size: int | None = None,
 ) -> tuple[list[dict], list[dict]]:
     """The whole-token tasks, each annotated with its wave, and the waves."""
-    tasks = _program(spec, dtype, workers, layers, vocab_size)
-    return tasks, _schedule(tasks, workers)
+    tasks = _program(spec, dtype, workers, chunking, layers, vocab_size)
+    waves = _schedule(tasks, workers)
+    _mark_conditional_barriers(tasks, waves, chunking["attention_fused_steps"])
+    return tasks, waves
 
 
 def layer_view(plan: dict, layer: int = 0) -> dict:
@@ -466,15 +530,16 @@ def layer_view(plan: dict, layer: int = 0) -> dict:
     waves = []
     for wave in plan["waves"][first : last + 1]:
         lanes = [[ids[i] for i in lane if i in ids] for lane in wave["workers"]]
-        waves.append(
-            {
-                "id": wave["id"] - first,
-                "workers": lanes,
-                "estimated_work": [
-                    sum(tasks[i]["estimated_work"] for i in lane) for lane in lanes
-                ],
-            }
-        )
+        local = {
+            "id": wave["id"] - first,
+            "workers": lanes,
+            "estimated_work": [
+                sum(tasks[i]["estimated_work"] for i in lane) for lane in lanes
+            ],
+        }
+        if "conditional_barrier" in wave:
+            local["conditional_barrier"] = wave["conditional_barrier"]
+        waves.append(local)
     return {**plan, "tasks": tasks, "waves": waves}
 
 
@@ -490,6 +555,7 @@ def plan_target(probe: dict) -> dict:
         "worker_count": probe["launch"]["worker_count"],
         "threads_per_block": probe["launch"]["threads_per_block"],
         "kernel_fingerprint": probe["executor"]["fingerprint"],
+        "attention_shared_bytes": probe["executor"]["attention_shared_bytes"],
     }
 
 
@@ -503,19 +569,22 @@ def validate_target(target: dict) -> None:
         and type(target["threads_per_block"]) is int
         and target["threads_per_block"] > 0
         and isinstance(target["kernel_fingerprint"], str)
-        and bool(target["kernel_fingerprint"]),
+        and bool(target["kernel_fingerprint"])
+        and type(target["attention_shared_bytes"]) is int
+        and target["attention_shared_bytes"] > 0,
         "invalid target",
     )
 
 
 def model_section(
-    model_fields: dict, block: DecoderSpec, dtype: str, workers: int
+    model_fields: dict, block: DecoderSpec, dtype: str, chunking: dict
 ) -> dict:
-    """Model fields (without the reference dtype) plus policy and tensors."""
+    """Model fields (without the reference dtype) plus policy, attention
+    chunking, and tensors."""
     return {
         **{key: value for key, value in model_fields.items() if key != "dtype"},
         **numeric_policy(dtype),
-        "attention_chunks": attention_chunks(block, workers),
+        **chunking,
         "tensors": descriptors(block, dtype),
     }
 
@@ -523,7 +592,7 @@ def model_section(
 def storage_section(
     block: DecoderSpec,
     dtype: str,
-    workers: int,
+    chunks: int,
     layers: int,
     input_bytes: int,
     output_bytes: int,
@@ -534,7 +603,6 @@ def storage_section(
     weights, layer_weight_bytes = regions(block, WEIGHTS, 64, size)
     scratch, scratch_bytes = regions(block, SCRATCH, 16, size)
     kv, layer_kv_bytes = regions(block, ("K", "V"), 16, size)
-    chunks = attention_chunks(block, workers)
     return {
         "input_bytes": input_bytes,
         "output_bytes": output_bytes,

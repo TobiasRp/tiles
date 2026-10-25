@@ -22,6 +22,8 @@ struct WorkerProgramView
     int head_dim;
     int max_context;
     int attention_chunks;
+    int attention_chunk_steps;
+    int attention_fused_steps;
     NumericConfig numeric;
     StackConfig stack;
     WeightDtype weight_dtype;

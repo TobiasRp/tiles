@@ -6,7 +6,9 @@ at its start. Cycle counters are per SM, so each worker's cycles are mapped to
 nanoseconds by a least-squares fit against its own global-timer samples.
 
 The bubble budget partitions the traced kernel into waves, delimited by the
-first worker leaving each grid barrier. A wave's duration is the time an
+first worker leaving each grid barrier. A conditional barrier that the
+position skips does not delimit a wave; its two plan waves count as one, as
+the fused attention tasks run them. A wave's duration is the time an
 ideal stream would need for its unique bytes at the measured roofline
 bandwidth, plus its excess work until the last worker finishes, plus the
 barrier latency after that. Grouped by decoder phase, ideal streaming,
@@ -84,17 +86,36 @@ def phase(task: dict) -> str:
     }[task["opcode"].rsplit("_", 1)[0]]
 
 
+def active_chunks(model: dict, position: int) -> int:
+    """Attention chunk tasks with work at ``position`` (ops::active_chunks)."""
+    length = position + 1
+    if length <= model["attention_fused_steps"]:
+        return 1
+    return max(2, -(-length // model["attention_chunk_steps"]))
+
+
+def executed_barriers(plan: dict, position: int) -> list[bool]:
+    """Whether each barrier between consecutive waves synchronizes at ``position``."""
+    return [
+        position + 1 > wave.get("conditional_barrier", {}).get("skip_up_to_length", 0)
+        for wave in plan["waves"][:-1]
+    ]
+
+
 def streamed_bytes(task: dict, model: dict, position: int) -> int:
     """Weight or K/V bytes a task reads; activations are omitted."""
     element = 2 if model["weight_dtype"] == "bfloat16" else 4
     opcode = task["opcode"].rsplit("_", 1)[0]
     d, f = model["hidden_size"], model["intermediate_size"]
     if opcode.startswith("attention"):
-        # Scores read the chunk's K rows of one K/V head; values read its V rows.
-        length, chunks = position + 1, model["attention_chunks"]
+        # Split chunks: scores read the chunk's K rows of one K/V head, values
+        # its V rows. One fused chunk: the scores task reads both.
+        length, chunks = position + 1, active_chunks(model, position)
         chunk = task["operands"]["chunk"]
+        if chunk >= chunks or (chunks == 1 and opcode == "attention_values"):
+            return 0
         steps = length * (chunk + 1) // chunks - length * chunk // chunks
-        return steps * model["head_dim"] * element
+        return (2 if chunks == 1 else 1) * steps * model["head_dim"] * element
     begin, end = task["operands"]["rows"]
     width = {"embedding": 1, "gate_up": 2 * d, "down": f}.get(opcode, d)
     return 0 if opcode == "final_rms_norm" else (end - begin) * width * element
@@ -161,11 +182,15 @@ def budget(
     for event in events:
         if event.task < 0:
             barriers[event.worker].append(event)
-    releases, arrivals = [], []
-    for barrier in range(wave_count - 1):
-        group = [barriers[worker][barrier] for worker in range(workers)]
-        releases.append(min(e.end for e in group))
-        arrivals.append(max(e.start for e in group))
+    # Plan waves between two executed barriers form one traced wave.
+    executed = executed_barriers(plan, position)
+    first_waves, segment_of, releases = [0], [], []
+    for wave in range(wave_count):
+        segment_of.append(len(first_waves) - 1)
+        if wave + 1 < wave_count and executed[wave]:
+            group = [barriers[worker][wave] for worker in range(workers)]
+            releases.append(min(e.end for e in group))
+            first_waves.append(wave + 1)
     kernel_end = max(e.end for e in events)
     starts = [0.0, *releases]
     ends = [*releases, kernel_end]
@@ -173,9 +198,9 @@ def budget(
     by_wave: dict[int, list[Event]] = defaultdict(list)
     for event in events:
         if event.task >= 0:
-            by_wave[tasks[event.task]["wave"]].append(event)
+            by_wave[segment_of[tasks[event.task]["wave"]]].append(event)
     waves = []
-    for wave in range(wave_count):
+    for wave, first_wave in enumerate(first_waves):
         members = by_wave[wave]
         names = [phase(tasks[e.task]) for e in members]
         unique = sum(streamed_bytes(tasks[e.task], model, position) for e in members)
@@ -187,7 +212,7 @@ def budget(
         ideal = unique / bandwidth_gbps  # bytes / (GB/s) = ns
         waves.append(
             Wave(
-                wave=wave,
+                wave=first_wave,
                 phase=max(set(names), key=names.count),
                 bytes=unique,
                 duration_ns=ends[wave] - starts[wave],

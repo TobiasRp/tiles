@@ -42,6 +42,7 @@ def target(threads: int = 128) -> dict:
                 "active_blocks_per_sm": 2,
                 "threads_per_block": threads,
                 "fingerprint": "fixture-stack-kernel",
+                "attention_shared_bytes": 16384,
             },
         }
     )

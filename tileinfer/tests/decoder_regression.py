@@ -35,11 +35,16 @@ def main() -> None:
         root = Path(directory)
         probe(args.executor, root / "target.json")
         package = root / "package"
+        # Two-step chunks: positions 0-1 run fused attention, 2-5 split it
+        # into two or three chunks.
         build(
             fixture / "model.json",
             fixture / "weights.npz",
             root / "target.json",
             package,
+            "float32",
+            2,
+            2,
         )
         result = run(args.executor, "--inspect-plan", str(package))
         if result.returncode:
@@ -131,6 +136,8 @@ def main() -> None:
             root / "target.json",
             bf16_package,
             "bfloat16",
+            2,
+            2,
         )
         bf16_plan = json.loads((bf16_package / "plan.json").read_text())
         if bf16_plan["model"]["weight_dtype"] != "bfloat16":

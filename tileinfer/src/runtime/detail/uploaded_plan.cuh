@@ -37,6 +37,8 @@ class UploadedPlan
     int workers;
     int max_context;
     int attention_chunks;
+    int attention_chunk_steps;
+    int attention_fused_steps;
     std::size_t scratch_count;
     std::size_t kv_count;
     std::size_t attention_count;         // scores workspace elements

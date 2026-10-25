@@ -50,8 +50,10 @@ __global__ __launch_bounds__(kThreads, 1) void run_operator(int op, int begin, i
         ops::qkv(begin, layer, shape, shared);
         break;
     case attention:
-        // Every head's chunks, then the output projection with Wo = identity
-        // and a zero residual, which stores the combined attention vector.
+        // Every head's chunk tasks, then the output projection with Wo =
+        // identity and a zero residual, which stores the combined attention
+        // vector. Inactive chunk tasks and, for a fused prefix, values tasks
+        // return at once, as in the worker.
         for (int kv_head = 0; kv_head < shape.kv_heads; ++kv_head)
             for (int chunk = 0; chunk < shape.attention_chunks; ++chunk) {
                 ops::attention_scores(kv_head, chunk, layer, shape, shared);
@@ -97,7 +99,11 @@ json evaluate(const json& item)
     const int dh = item.value("head_dim", 2);
     const int position = item.value("position", 0);
     const int capacity = item.value("capacity", position + 1);
-    const int chunks = item.value("chunks", 1);
+    // The planner's chunk rule for a `capacity`-step context (ops::active_chunks).
+    const int chunk_steps = item.value("chunk_steps", capacity);
+    const int fused_steps = item.value("fused_steps", chunk_steps);
+    const int chunks =
+        capacity <= fused_steps ? 1 : std::max(2, (capacity + chunk_steps - 1) / chunk_steps);
     const int rows = item.value("rows", d);
     const int kv_width = nkv * dh;
 
@@ -169,8 +175,8 @@ json evaluate(const json& item)
         nullptr};
     NumericConfig numeric{};
     numeric.rms_norm_eps = item.value("epsilon", 1e-5f);
-    const ops::Shape shape{
-        d, f, nq, nkv, dh, position, capacity, chunks, numeric, d_frequencies.data()};
+    const ops::Shape shape{d, f, nq, nkv, dh, position, capacity, chunks, chunk_steps, fused_steps,
+        numeric, d_frequencies.data()};
     const int begin = item.value("begin", 0);
     const int end = item.value("end", rows);
     const auto config = cuda::make_config(cuda::block_dims<kThreads>(), cuda::grid_dims(1));

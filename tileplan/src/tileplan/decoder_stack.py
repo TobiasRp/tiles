@@ -22,6 +22,7 @@ from .plan_core import (
     WEIGHTS,
     align,
     assemble_plan,
+    attention_chunking,
     block_spec,
     check_weight,
     layer_view,
@@ -246,7 +247,14 @@ def stack_layout(spec: StackSpec, dtype: str) -> tuple[dict, int]:
     }, total
 
 
-def stack_plan(spec: StackSpec, target: dict, dtype: str, weights_sha256: str) -> dict:
+def stack_plan(
+    spec: StackSpec,
+    target: dict,
+    dtype: str,
+    weights_sha256: str,
+    chunk_steps: int | None = None,
+    fused_steps: int | None = None,
+) -> dict:
     """Everything in a stack package except the weight bytes themselves.
 
     Checkpoint importers build this before streaming weights, so it never
@@ -255,23 +263,44 @@ def stack_plan(spec: StackSpec, target: dict, dtype: str, weights_sha256: str) -
     require(len(weights_sha256) == 64, "invalid weight hash")
     block, workers = spec.block, target["worker_count"]
     stack, total = stack_layout(spec, dtype)
+    chunking = attention_chunking(block, dtype, target, chunk_steps, fused_steps)
     storage = storage_section(
-        block, dtype, workers, spec.layers, 4, spec.vocab_size * 4, total
+        block,
+        dtype,
+        chunking["attention_chunks"],
+        spec.layers,
+        4,
+        spec.vocab_size * 4,
+        total,
     )
     return assemble_plan(
         MODEL_KIND,
         target,
-        model_section(spec.as_dict(), block, dtype, workers),
+        model_section(spec.as_dict(), block, dtype, chunking),
         {**storage, "stack": stack},
-        scheduled_program(block, dtype, workers, spec.layers, spec.vocab_size),
+        scheduled_program(
+            block, dtype, workers, chunking, spec.layers, spec.vocab_size
+        ),
         weights_sha256,
     )
 
 
 def make_stack_plan_metadata(
-    spec: StackSpec, target: dict, weight_dtype: str, weights_sha256: str
+    spec: StackSpec,
+    target: dict,
+    weight_dtype: str,
+    weights_sha256: str,
+    chunk_steps: int | None = None,
+    fused_steps: int | None = None,
 ) -> dict:
-    return stack_plan(spec, plan_target(target), weight_dtype, weights_sha256)
+    return stack_plan(
+        spec,
+        plan_target(target),
+        weight_dtype,
+        weights_sha256,
+        chunk_steps,
+        fused_steps,
+    )
 
 
 def make_stack_plan(
@@ -279,6 +308,8 @@ def make_stack_plan(
     weights: dict[str, np.ndarray],
     target: dict,
     weight_dtype: str = "float32",
+    chunk_steps: int | None = None,
+    fused_steps: int | None = None,
 ) -> tuple[dict, bytes]:
     _check_weights(spec, weights)
     stack, total = stack_layout(spec, weight_dtype)
@@ -299,7 +330,12 @@ def make_stack_plan(
         put(stack["lm_head_offset"], pack_array(weights["lm_head"], weight_dtype))
     packed = bytes(image)
     plan = make_stack_plan_metadata(
-        spec, target, weight_dtype, sha256(packed).hexdigest()
+        spec,
+        target,
+        weight_dtype,
+        sha256(packed).hexdigest(),
+        chunk_steps,
+        fused_steps,
     )
     return plan, packed
 
@@ -310,8 +346,11 @@ def validate_stack(plan: dict, packed: bytes | mmap.mmap) -> None:
     spec = stack_spec(model)
     dtype = model.get("weight_dtype", "float32")
     validate_target(plan["target"])
+    steps, fused = model["attention_chunk_steps"], model["attention_fused_steps"]
     validate_plan(
-        plan, packed, lambda digest: stack_plan(spec, plan["target"], dtype, digest)
+        plan,
+        packed,
+        lambda digest: stack_plan(spec, plan["target"], dtype, digest, steps, fused),
     )
 
 
@@ -326,6 +365,8 @@ def stack_summary(plan: dict, digest: str) -> dict:
         "layers": plan["model"]["layers"],
         "vocab_size": plan["model"]["vocab_size"],
         "attention_chunks": plan["model"]["attention_chunks"],
+        "attention_chunk_steps": plan["model"]["attention_chunk_steps"],
+        "attention_fused_steps": plan["model"]["attention_fused_steps"],
         "task_count": len(plan["tasks"]),
         "wave_count": len(waves),
         "layer_wave_count": len(layer_view(plan)["waves"]),
@@ -342,12 +383,16 @@ def build_stack(
     target_path: Path,
     out: Path,
     weight_dtype: str = "float32",
+    chunk_steps: int | None = None,
+    fused_steps: int | None = None,
 ) -> dict:
     plan, packed = make_stack_plan(
         read_stack_model(model_path),
         read_stack_weights(weights_path),
         read_target(target_path),
         weight_dtype,
+        chunk_steps,
+        fused_steps,
     )
     return write_package(out, plan, packed, stack_summary)
 

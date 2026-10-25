@@ -10,6 +10,7 @@ from .decoder_reference import DecoderSpec
 from .plan_core import (
     WEIGHTS,
     assemble_plan,
+    attention_chunking,
     block_spec,
     check_weight,
     model_section,
@@ -47,17 +48,24 @@ def read_weights(path: Path) -> dict[str, np.ndarray]:
 
 
 def block_plan(
-    spec: DecoderSpec, target: dict, dtype: str, weights_sha256: str
+    spec: DecoderSpec,
+    target: dict,
+    dtype: str,
+    weights_sha256: str,
+    chunk_steps: int | None = None,
+    fused_steps: int | None = None,
 ) -> dict:
     """Everything in a block package except the weight bytes themselves."""
     workers = target["worker_count"]
     io_bytes = spec.hidden_size * weight_size(dtype)
+    chunking = attention_chunking(spec, dtype, target, chunk_steps, fused_steps)
+    chunks = chunking["attention_chunks"]
     return assemble_plan(
         MODEL_KIND,
         target,
-        model_section({**spec.as_dict(), "layers": 1}, spec, dtype, workers),
-        storage_section(spec, dtype, workers, 1, io_bytes, io_bytes),
-        scheduled_program(spec, dtype, workers),
+        model_section({**spec.as_dict(), "layers": 1}, spec, dtype, chunking),
+        storage_section(spec, dtype, chunks, 1, io_bytes, io_bytes),
+        scheduled_program(spec, dtype, workers, chunking),
         weights_sha256,
     )
 
@@ -67,13 +75,20 @@ def make_plan(
     weights: dict[str, np.ndarray],
     target: dict,
     weight_dtype: str = "float32",
+    chunk_steps: int | None = None,
+    fused_steps: int | None = None,
 ) -> tuple[dict, bytes]:
     require(set(weights) == set(WEIGHTS), "weight names mismatch")
     for name, value in weights.items():
         check_weight(value, tensor_shape(spec, name), name)
     packed = pack_weights(spec, weights, weight_dtype)
     plan = block_plan(
-        spec, plan_target(target), weight_dtype, sha256(packed).hexdigest()
+        spec,
+        plan_target(target),
+        weight_dtype,
+        sha256(packed).hexdigest(),
+        chunk_steps,
+        fused_steps,
     )
     return plan, packed
 
@@ -85,8 +100,11 @@ def validate(plan: dict, packed: bytes) -> None:
     spec = block_spec(model)
     dtype = model.get("weight_dtype", "float32")
     validate_target(plan["target"])
+    steps, fused = model["attention_chunk_steps"], model["attention_fused_steps"]
     validate_plan(
-        plan, packed, lambda digest: block_plan(spec, plan["target"], dtype, digest)
+        plan,
+        packed,
+        lambda digest: block_plan(spec, plan["target"], dtype, digest, steps, fused),
     )
 
 
@@ -108,6 +126,8 @@ def block_summary(plan: dict, digest: str) -> dict:
                 "head_dim",
                 "max_context",
                 "attention_chunks",
+                "attention_chunk_steps",
+                "attention_fused_steps",
             )
         },
         "task_counts": {
@@ -144,9 +164,16 @@ def build(
     target_path: Path,
     out: Path,
     weight_dtype: str = "float32",
+    chunk_steps: int | None = None,
+    fused_steps: int | None = None,
 ) -> dict:
     spec = read_model(model_path)
     plan, packed = make_plan(
-        spec, read_weights(weights_path), read_target(target_path), weight_dtype
+        spec,
+        read_weights(weights_path),
+        read_target(target_path),
+        weight_dtype,
+        chunk_steps,
+        fused_steps,
     )
     return write_package(out, plan, packed, block_summary)

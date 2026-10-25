@@ -18,7 +18,6 @@
 #include <cuda_bf16.h>
 #include <cuda/std/type_traits>
 
-#include <cub/block/block_reduce.cuh>
 #include <cub/warp/warp_reduce.cuh>
 
 #include <cuda/std/cmath>
@@ -31,28 +30,20 @@ inline constexpr int kWarpSize = 32;
 inline constexpr int kWarpsPerBlock = kThreads / kWarpSize;
 inline constexpr int kNormReductionThreads = 512;
 using WarpSum = cub::WarpReduce<float>;
-using BlockSum = cub::BlockReduce<float, kThreads>;
 
-/// FP32 reduction operator for the softmax maximum.
-struct FloatMax
-{
-    __device__ float operator()(float a, float b) const { return cuda::std::fmax(a, b); }
-};
-
-/// Block-private scratch. Each warp owns one warp slot; block collectives share block.
+/// Block-private scratch. Each warp owns one warp slot.
 struct SharedStorage
 {
     WarpSum::TempStorage warp[kWarpsPerBlock];
-    BlockSum::TempStorage block;
     float inverse_rms;
     float norm_partials[kNormReductionThreads];
-    float softmax_max;
-    float softmax_sum;
-    float slices[kThreads]; // one partial sum per thread
-    // A task's input vector and one projected head, typed by the caller.
-    alignas(16) unsigned char vector[kMaxHidden * sizeof(float)];
+    // A task's input vector, or an attention task's scores, probabilities and
+    // P*V reduction; typed by the caller.
+    alignas(16) unsigned char vector[kAttentionSharedBytes];
     alignas(16) unsigned char head[kMaxHeadDim * sizeof(float)];
 };
+static_assert(kAttentionSharedBytes >= kMaxHidden * sizeof(float));
+static_assert(kAttentionSharedBytes >= kWarpsPerBlock * kMaxHeadDim * sizeof(float));
 
 template <typename Scalar>
 __device__ inline Scalar* shared_vector(SharedStorage& shared)
@@ -70,7 +61,9 @@ struct Shape
     int head_dim;
     int position;
     int max_context;
-    int attention_chunks;
+    int attention_chunks;      // chunk tasks per K/V head in the program
+    int attention_chunk_steps; // most time steps one chunk task covers
+    int attention_fused_steps; // longest prefix that one fused task per K/V head handles
     NumericConfig numeric;
     const float* rotary_frequencies;
 };
@@ -286,142 +279,392 @@ __device__ inline void qkv(
         rotate_pair(head, rotated, pair, shape);
 }
 
-/// The time steps of the visible prefix [0, position] that a context chunk covers.
+/// Chunk tasks with work at this position. A prefix of at most
+/// attention_fused_steps time steps is one chunk, and its scores task finishes
+/// attention by itself. A longer prefix splits into the fewest chunks of at
+/// most attention_chunk_steps steps, but at least two: the S2b probe found two
+/// half-length tasks faster than one beyond about 384 steps.
+__device__ inline int active_chunks(const Shape& shape)
+{
+    const int length = shape.position + 1;
+    if (length <= shape.attention_fused_steps)
+        return 1;
+    const int chunks = (length + shape.attention_chunk_steps - 1) / shape.attention_chunk_steps;
+    return chunks > 2 ? chunks : 2;
+}
+
+/// The time steps of the visible prefix that active chunk `chunk` covers; the
+/// active chunks split the prefix evenly.
 __device__ inline void chunk_range(int chunk, const Shape& shape, int& begin, int& end)
 {
     const int length = shape.position + 1;
-    begin = static_cast<int>(static_cast<long long>(length) * chunk / shape.attention_chunks);
-    end = static_cast<int>(static_cast<long long>(length) * (chunk + 1) / shape.attention_chunks);
+    const int chunks = active_chunks(shape);
+    begin = static_cast<int>(static_cast<long long>(length) * chunk / chunks);
+    end = static_cast<int>(static_cast<long long>(length) * (chunk + 1) / chunks);
 }
 
-/// Scores of every query head of one K/V head over one context chunk, plus each
-/// head's chunk maximum and sum of exp(score - maximum). Each warp owns whole
-/// time steps and reads K[t] once for all heads of the group. QK and the scaling
-/// are separate BF16 rounding boundaries, as in eager attention.
+/// Scalar elements in one 16-byte q or K/V load.
+template <typename Scalar>
+inline constexpr int kVectorElements = 16 / static_cast<int>(sizeof(Scalar));
+/// Independent K/V loads in flight per lane; the S2b probe found two fastest.
+inline constexpr int kRowsInFlight = 2;
+
+/// Element j of a 16-byte vector of Scalar values, widened to FP32.
+template <typename Scalar>
+__device__ inline float vector_element(const uint4& raw, int j)
+{
+    const unsigned words[4] = {raw.x, raw.y, raw.z, raw.w};
+    if constexpr (cuda::std::is_same_v<Scalar, __nv_bfloat16>)
+        return __uint_as_float((j & 1) ? words[j >> 1] & 0xffff0000u : words[j >> 1] << 16);
+    else
+        return __uint_as_float(words[j]);
+}
+
+__device__ inline uint4 load_vector(const void* address, bool valid)
+{
+    return valid ? *static_cast<const uint4*>(address) : uint4{0, 0, 0, 0};
+}
+
+/// Element offset of time step `time` of one K/V head in a layer's cache.
+__device__ inline cuda::std::size_t kv_row(int time, int kv_head, const Shape& shape)
+{
+    return (static_cast<cuda::std::size_t>(time) * shape.kv_heads + kv_head) * shape.head_dim;
+}
+
+/// How a warp reads K/V rows: `count` lanes load one head_dim row as 16-byte
+/// vectors, so one warp instruction covers `rows` rows. Lanes > 0 fixes the
+/// count at compile time, which saves about 1 us per layer of run-time
+/// geometry; Lanes == 0 reads it from head_dim (see attention_scores).
+template <typename Scalar, int Lanes>
+struct RowLanes
+{
+    int count;
+    int rows;
+    int sub;    // this lane's row in the warp instruction
+    int vector; // this lane's vector within the row
+
+    __device__ explicit RowLanes(const Shape& shape)
+        : count(Lanes > 0 ? Lanes : shape.head_dim / kVectorElements<Scalar>)
+        , rows(kWarpSize / count)
+        , sub(threadIdx.x % kWarpSize / count)
+        , vector(threadIdx.x % kWarpSize % count)
+    {
+    }
+};
+
+/// The head width compiled with a fixed lane count: Llama 3.2 1B's.
+inline constexpr int kFixedLaneHeadDim = 64;
+
+/// Query heads per K/V head: Group, or the shape's when Group == 0.
+template <int Group>
+__device__ inline int group_size(const Shape& shape)
+{
+    return Group > 0 ? Group : shape.query_heads / shape.kv_heads;
+}
+
+/// One K/V row's dot product with a query head, reduced over the row's lanes.
+template <typename Scalar>
+__device__ inline float row_dot(const uint4& query, const uint4& row, int lanes_per_row)
+{
+    float dot = 0.0f;
+#pragma unroll
+    for (int j = 0; j < kVectorElements<Scalar>; ++j)
+        dot += vector_element<Scalar>(query, j) * vector_element<Scalar>(row, j);
+#pragma unroll
+    for (int offset = lanes_per_row / 2; offset > 0; offset /= 2)
+        dot += __shfl_xor_sync(0xffffffffu, dot, offset);
+    return dot;
+}
+
+/// Scores of a K/V head's query heads over time steps [begin,end):
+/// scores[g * stride + time - begin]. QK and the scaling are separate BF16
+/// rounding boundaries, as in eager attention. With a fixed Group, lanes keep
+/// q in registers; Group == 0 reloads it from L1 for each row.
+template <typename Scalar, int Group, int Lanes>
+__device__ inline void score_rows(int kv_head, int begin, int end, const Layer<Scalar>& layer,
+    const Shape& shape, Scalar* scores, int stride)
+{
+    constexpr int kVector = kVectorElements<Scalar>;
+    const RowLanes<Scalar, Lanes> lanes(shape);
+    const int warp = threadIdx.x / kWarpSize;
+    const float scale = 1.0f / cuda::std::sqrt(static_cast<float>(shape.head_dim));
+    const int group = group_size<Group>(shape);
+    const Scalar* query = layer.q_rot + kv_head * group * shape.head_dim + lanes.vector * kVector;
+    uint4 q[Group > 0 ? Group : 1];
+    if constexpr (Group > 0)
+#pragma unroll
+        for (int g = 0; g < Group; ++g)
+            q[g] = load_vector(query + g * shape.head_dim, true);
+    auto store = [&](int g, int time, float dot) {
+        if (lanes.vector == 0 && time < end)
+            scores[g * stride + time - begin] =
+                static_cast<Scalar>(static_cast<float>(static_cast<Scalar>(dot)) * scale);
+    };
+
+    const int rows = kWarpsPerBlock * lanes.rows * kRowsInFlight;
+    for (int first = begin; first < end; first += rows) {
+        uint4 raw[kRowsInFlight];
+#pragma unroll
+        for (int u = 0; u < kRowsInFlight; ++u) {
+            const int time = first + (u * kWarpsPerBlock + warp) * lanes.rows + lanes.sub;
+            raw[u] =
+                load_vector(layer.key_cache + kv_row(time < end ? time : begin, kv_head, shape) +
+                                lanes.vector * kVector,
+                    time < end);
+        }
+#pragma unroll
+        for (int u = 0; u < kRowsInFlight; ++u) {
+            const int time = first + (u * kWarpsPerBlock + warp) * lanes.rows + lanes.sub;
+            if constexpr (Group > 0) {
+#pragma unroll
+                for (int g = 0; g < Group; ++g)
+                    store(g, time, row_dot<Scalar>(q[g], raw[u], lanes.count));
+            } else {
+                for (int g = 0; g < group; ++g)
+                    store(g, time,
+                        row_dot<Scalar>(
+                            load_vector(query + g * shape.head_dim, true), raw[u], lanes.count));
+            }
+        }
+    }
+}
+
+/// Softmax statistics of `length` scores by one warp: the maximum and the sum
+/// of exp(score - maximum), returned in every lane.
+template <typename Scalar>
+__device__ inline float2 warp_softmax_statistics(const Scalar* scores, int length)
+{
+    const int lane = threadIdx.x % kWarpSize;
+    float maximum = -cuda::std::numeric_limits<float>::infinity();
+    for (int time = lane; time < length; time += kWarpSize)
+        maximum = cuda::std::fmax(maximum, static_cast<float>(scores[time]));
+    for (int offset = kWarpSize / 2; offset > 0; offset /= 2)
+        maximum = cuda::std::fmax(maximum, __shfl_xor_sync(0xffffffffu, maximum, offset));
+    float sum = 0.0f;
+    for (int time = lane; time < length; time += kWarpSize)
+        sum += cuda::std::exp(static_cast<float>(scores[time]) - maximum);
+    for (int offset = kWarpSize / 2; offset > 0; offset /= 2)
+        sum += __shfl_xor_sync(0xffffffffu, sum, offset);
+    return {maximum, sum};
+}
+
+/// FP32 partial P*V of a K/V head's query heads over time steps
+/// [begin, begin + length), stored to partials[g * head_dim + i]. The
+/// probabilities [group][length] live in shared.vector, which the cross-warp
+/// reduction reuses after a block synchronization. Each head gets
+/// kWarpsPerBlock / group warps; a lane accumulates its vector's elements over
+/// its rows, then rows and warps are summed in a fixed order.
+template <typename Scalar, int Group, int Lanes>
+__device__ inline void value_rows(int kv_head, int begin, int length, const Scalar* probabilities,
+    const Layer<Scalar>& layer, const Shape& shape, float* partials, SharedStorage& shared)
+{
+    constexpr int kVector = kVectorElements<Scalar>;
+    const int group = group_size<Group>(shape);
+    const int warps_per_head = kWarpsPerBlock / group;
+    const RowLanes<Scalar, Lanes> lanes(shape);
+    const int dh = lanes.count * kVector;
+    const int warp = threadIdx.x / kWarpSize;
+    const int member = warp % warps_per_head;
+    const Scalar* own = probabilities + warp / warps_per_head * length;
+    float sums[kVector] = {};
+    const int rows = warps_per_head * lanes.rows * kRowsInFlight;
+    for (int first = 0; first < length; first += rows) {
+        uint4 raw[kRowsInFlight];
+#pragma unroll
+        for (int u = 0; u < kRowsInFlight; ++u) {
+            const int time = first + (u * warps_per_head + member) * lanes.rows + lanes.sub;
+            raw[u] = load_vector(layer.value_cache +
+                                     kv_row(begin + (time < length ? time : 0), kv_head, shape) +
+                                     lanes.vector * kVector,
+                time < length);
+        }
+#pragma unroll
+        for (int u = 0; u < kRowsInFlight; ++u) {
+            const int time = first + (u * warps_per_head + member) * lanes.rows + lanes.sub;
+            const float probability = time < length ? static_cast<float>(own[time]) : 0.0f;
+#pragma unroll
+            for (int j = 0; j < kVector; ++j)
+                sums[j] += probability * vector_element<Scalar>(raw[u], j);
+        }
+    }
+    // Lanes holding the same vector of different rows.
+#pragma unroll
+    for (int offset = lanes.count; offset < kWarpSize; offset *= 2)
+#pragma unroll
+        for (int j = 0; j < kVector; ++j)
+            sums[j] += __shfl_xor_sync(0xffffffffu, sums[j], offset);
+    __syncthreads(); // every warp is done with the probabilities
+    float* reduction = reinterpret_cast<float*>(shared.vector); // [warp][head_dim]
+    if (lanes.sub == 0)
+#pragma unroll
+        for (int j = 0; j < kVector; ++j)
+            reduction[warp * dh + lanes.vector * kVector + j] = sums[j];
+    __syncthreads();
+    for (int index = threadIdx.x; index < group * dh; index += blockDim.x) {
+        const int head = index / dh;
+        const int i = index - head * dh;
+        float total = 0.0f;
+        for (int m = 0; m < warps_per_head; ++m)
+            total += reduction[(head * warps_per_head + m) * dh + i];
+        partials[index] = total;
+    }
+}
+
+/// Scores task of one K/V head and context chunk. With several active chunks it
+/// stores the chunk's scores and each head's chunk statistics for the values
+/// task. With one active chunk it keeps scores and probabilities in shared
+/// memory and also computes the softmax and P*V, so the values wave has no work.
+template <typename Scalar, int Group, int Lanes>
+__device__ inline void attention_scores_group(
+    int kv_head, int chunk, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
+{
+    const int chunks = active_chunks(shape);
+    if (chunk >= chunks)
+        return;
+    int begin = 0, end = 0;
+    chunk_range(chunk, shape, begin, end);
+    const int group = group_size<Group>(shape);
+    const int first_head = kv_head * group;
+    const int warp = threadIdx.x / kWarpSize;
+    const int lane = threadIdx.x % kWarpSize;
+    if (chunks > 1) {
+        Scalar* scores = layer.scores + first_head * shape.max_context + begin;
+        score_rows<Scalar, Group, Lanes>(
+            kv_head, begin, end, layer, shape, scores, shape.max_context);
+        __syncthreads();
+        if (warp < group) {
+            const float2 statistics =
+                warp_softmax_statistics(scores + warp * shape.max_context, end - begin);
+            if (lane == 0) {
+                float* stats = layer.stats + (chunk * shape.query_heads + first_head + warp) * 2;
+                stats[0] = statistics.x;
+                stats[1] = statistics.y;
+            }
+        }
+        return;
+    }
+
+    const int length = end;
+    Scalar* scores = shared_vector<Scalar>(shared); // [group][length], then probabilities
+    score_rows<Scalar, Group, Lanes>(kv_head, 0, length, layer, shape, scores, length);
+    __syncthreads();
+    float* statistics = shared.norm_partials; // [0, group): maximum, [group, 2 group): sum
+    if (warp < group) {
+        const float2 own = warp_softmax_statistics(scores + warp * length, length);
+        if (lane == 0) {
+            statistics[warp] = own.x;
+            statistics[group + warp] = own.y;
+        }
+    }
+    __syncthreads();
+    for (int index = threadIdx.x; index < group * length; index += blockDim.x) {
+        const int g = index / length;
+        scores[index] =
+            static_cast<Scalar>(cuda::std::exp(static_cast<float>(scores[index]) - statistics[g]) /
+                                statistics[group + g]);
+    }
+    __syncthreads();
+    value_rows<Scalar, Group, Lanes>(kv_head, 0, length, scores, layer, shape,
+        layer.partials + first_head * shape.head_dim, shared);
+}
+
+/// Values task of one K/V head and chunk when several chunks are active:
+/// probabilities and partial P*V. The softmax maximum and denominator combine
+/// every active chunk's statistics in chunk order. Probabilities round once to
+/// Scalar before P*V, as eager attention does; output_projection combines the
+/// FP32 partials.
+template <typename Scalar, int Group, int Lanes>
+__device__ inline void attention_values_group(
+    int kv_head, int chunk, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
+{
+    const int chunks = active_chunks(shape);
+    if (chunks == 1 || chunk >= chunks)
+        return;
+    int begin = 0, end = 0;
+    chunk_range(chunk, shape, begin, end);
+    const int length = end - begin;
+    const int group = group_size<Group>(shape);
+    const int first_head = kv_head * group;
+    float* combined = shared.norm_partials; // [0, group): maximum, [group, 2 group): sum
+    if (threadIdx.x < group) {
+        const int head = first_head + threadIdx.x;
+        float maximum = -cuda::std::numeric_limits<float>::infinity();
+        for (int c = 0; c < chunks; ++c)
+            maximum = cuda::std::fmax(maximum, layer.stats[(c * shape.query_heads + head) * 2]);
+        float sum = 0.0f;
+        for (int c = 0; c < chunks; ++c) {
+            const float* stats = layer.stats + (c * shape.query_heads + head) * 2;
+            sum += stats[1] * cuda::std::exp(stats[0] - maximum);
+        }
+        combined[threadIdx.x] = maximum;
+        combined[group + threadIdx.x] = sum;
+    }
+    __syncthreads();
+    Scalar* probabilities = shared_vector<Scalar>(shared); // [group][length]
+    for (int index = threadIdx.x; index < group * length; index += blockDim.x) {
+        const int g = index / length;
+        const Scalar score =
+            layer.scores[(first_head + g) * shape.max_context + begin + index - g * length];
+        probabilities[index] = static_cast<Scalar>(
+            cuda::std::exp(static_cast<float>(score) - combined[g]) / combined[group + g]);
+    }
+    __syncthreads();
+    value_rows<Scalar, Group, Lanes>(kv_head, begin, length, probabilities, layer, shape,
+        layer.partials + (chunk * shape.query_heads + first_head) * shape.head_dim, shared);
+}
+
+/// The attention shape compiled with a fixed group and lane count: Llama 3.2
+/// 1B's four query heads per K/V head of width kFixedLaneHeadDim. Every other
+/// shape runs one instantiation that reads both at run time. One
+/// instantiation per group and lane count made the worker ten times larger
+/// and its GEMV tasks slower; one per group, four times and about 0.1 ms per
+/// token.
+inline constexpr int kFixedGroup = 4;
+
+__device__ inline bool fixed_attention_shape(const Shape& shape)
+{
+    return shape.query_heads / shape.kv_heads == kFixedGroup && shape.head_dim == kFixedLaneHeadDim;
+}
+
+/// Scores task: see attention_scores_group. The loader admits power-of-two
+/// groups up to kMaxGroup and head_dim a power-of-two multiple of one 16-byte
+/// vector, at most a warp of lanes per row.
 template <typename Scalar>
 __device__ inline void attention_scores(
     int kv_head, int chunk, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
 {
-    const int dh = shape.head_dim;
-    const int group = shape.query_heads / shape.kv_heads;
-    const int first_head = kv_head * group;
-    const int lane = threadIdx.x % kWarpSize;
-    const int warp = threadIdx.x / kWarpSize;
-    const float scale = 1.0f / cuda::std::sqrt(static_cast<float>(dh));
-    int begin = 0, end = 0;
-    chunk_range(chunk, shape, begin, end);
-
-    for (int time = begin + warp; time < end; time += kWarpsPerBlock) {
-        const Scalar* key = layer.key_cache + (time * shape.kv_heads + kv_head) * dh;
-        float dots[kMaxGroup] = {};
-        for (int i = lane; i < dh; i += kWarpSize) {
-            const float k = static_cast<float>(key[i]);
-#pragma unroll
-            for (int g = 0; g < kMaxGroup; ++g)
-                if (g < group)
-                    dots[g] += static_cast<float>(layer.q_rot[(first_head + g) * dh + i]) * k;
-        }
-        for (int g = 0; g < group; ++g) {
-            const float dot = WarpSum(shared.warp[warp]).Sum(dots[g]);
-            __syncwarp();
-            if (lane == 0)
-                layer.scores[(first_head + g) * shape.max_context + time] =
-                    static_cast<Scalar>(static_cast<float>(static_cast<Scalar>(dot)) * scale);
-        }
-    }
-    __syncthreads();
-
-    for (int g = 0; g < group; ++g) {
-        const Scalar* scores = layer.scores + (first_head + g) * shape.max_context;
-        float maximum = -cuda::std::numeric_limits<float>::infinity();
-        for (int time = begin + threadIdx.x; time < end; time += blockDim.x)
-            maximum = cuda::std::fmax(maximum, static_cast<float>(scores[time]));
-        maximum = BlockSum(shared.block).Reduce(maximum, FloatMax());
-        if (threadIdx.x == 0)
-            shared.softmax_max = maximum;
-        __syncthreads();
-        float sum = 0.0f;
-        for (int time = begin + threadIdx.x; time < end; time += blockDim.x)
-            sum += cuda::std::exp(static_cast<float>(scores[time]) - shared.softmax_max);
-        sum = BlockSum(shared.block).Sum(sum);
-        if (threadIdx.x == 0) {
-            float* stats = layer.stats + (chunk * shape.query_heads + first_head + g) * 2;
-            stats[0] = shared.softmax_max;
-            stats[1] = sum;
-        }
-        __syncthreads();
-    }
+    constexpr int kLanes = kFixedLaneHeadDim / kVectorElements<Scalar>;
+    if (fixed_attention_shape(shape))
+        return attention_scores_group<Scalar, kFixedGroup, kLanes>(
+            kv_head, chunk, layer, shape, shared);
+    attention_scores_group<Scalar, 0, 0>(kv_head, chunk, layer, shape, shared);
 }
 
-/// Probabilities and partial P*V of one K/V head's query heads over one chunk.
-/// The softmax maximum and denominator combine every chunk's statistics in
-/// chunk order. Probabilities round once to Scalar before P*V, as eager
-/// attention does; the FP32 partial sums are combined by output_projection.
+/// Values task: see attention_values_group.
 template <typename Scalar>
 __device__ inline void attention_values(
     int kv_head, int chunk, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
 {
-    const int dh = shape.head_dim;
-    const int group = shape.query_heads / shape.kv_heads;
-    int begin = 0, end = 0;
-    chunk_range(chunk, shape, begin, end);
-    // Threads split the chunk's time steps into slices for each output coordinate.
-    const int slices = kThreads / dh;
-    const int coordinate = threadIdx.x % dh;
-    const int slice = threadIdx.x / dh;
-
-    for (int g = 0; g < group; ++g) {
-        const int head = kv_head * group + g;
-        if (threadIdx.x == 0) {
-            float maximum = -cuda::std::numeric_limits<float>::infinity();
-            for (int c = 0; c < shape.attention_chunks; ++c)
-                maximum = cuda::std::fmax(maximum, layer.stats[(c * shape.query_heads + head) * 2]);
-            float sum = 0.0f;
-            for (int c = 0; c < shape.attention_chunks; ++c) {
-                const float* stats = layer.stats + (c * shape.query_heads + head) * 2;
-                sum += stats[1] * cuda::std::exp(stats[0] - maximum);
-            }
-            shared.softmax_max = maximum;
-            shared.softmax_sum = sum;
-        }
-        __syncthreads();
-        Scalar* probabilities = layer.scores + head * shape.max_context;
-        for (int time = begin + threadIdx.x; time < end; time += blockDim.x)
-            probabilities[time] = static_cast<Scalar>(
-                cuda::std::exp(static_cast<float>(probabilities[time]) - shared.softmax_max) /
-                shared.softmax_sum);
-        __syncthreads();
-
-        float sum = 0.0f;
-        if (slice < slices)
-            for (int time = begin + slice; time < end; time += slices)
-                sum += static_cast<float>(probabilities[time]) *
-                       static_cast<float>(
-                           layer.value_cache[(time * shape.kv_heads + kv_head) * dh + coordinate]);
-        shared.slices[threadIdx.x] = sum;
-        __syncthreads();
-        if (threadIdx.x < dh) {
-            float total = 0.0f;
-            for (int s = 0; s < slices; ++s)
-                total += shared.slices[s * dh + threadIdx.x];
-            layer.partials[(chunk * shape.query_heads + head) * dh + threadIdx.x] = total;
-        }
-        __syncthreads();
-    }
+    constexpr int kLanes = kFixedLaneHeadDim / kVectorElements<Scalar>;
+    if (fixed_attention_shape(shape))
+        return attention_values_group<Scalar, kFixedGroup, kLanes>(
+            kv_head, chunk, layer, shape, shared);
+    attention_values_group<Scalar, 0, 0>(kv_head, chunk, layer, shape, shared);
 }
 
-/// Output projection rows: sum each head's chunk partials into the attention
-/// vector (rounded once), project rows [begin,end), and add the layer input.
-/// The task owning row 0 also stores the attention vector for diagnostics.
+/// Output projection rows: sum each head's active-chunk partials into the
+/// attention vector (rounded once), project rows [begin,end), and add the layer
+/// input. The task owning row 0 also stores the attention vector for diagnostics.
 template <typename Scalar>
 __device__ inline void output_projection(
     int begin, int end, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
 {
     const int d = shape.hidden_size;
+    const int chunks = active_chunks(shape);
     Scalar* input = shared_vector<Scalar>(shared);
     for (int i = threadIdx.x; i < d; i += blockDim.x) {
         float total = 0.0f;
-        for (int c = 0; c < shape.attention_chunks; ++c)
+        for (int c = 0; c < chunks; ++c)
             total += layer.partials[c * d + i];
         input[i] = static_cast<Scalar>(total);
         if (begin == 0)

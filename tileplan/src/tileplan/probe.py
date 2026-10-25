@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-ABI = "tileinfer-decoder-v6"
+ABI = "tileinfer-decoder-v7"
 OPCODES = {
     "qkv_f32",
     "attention_scores_f32",
@@ -50,10 +50,13 @@ def normalize(raw: dict) -> dict:
             raise ValueError("executor lacks required decoder capabilities")
         if not isinstance(executor["fingerprint"], str) or not executor["fingerprint"]:
             raise ValueError("missing compiled-kernel fingerprint")
+        shared = executor["attention_shared_bytes"]
+        if type(shared) is not int or shared < 1:
+            raise ValueError("invalid attention shared-memory capacity")
     except (KeyError, TypeError) as exc:
         raise ValueError(f"incomplete target description: {exc}") from exc
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "device": device,
         "executor": executor,
         "launch": {
@@ -87,7 +90,7 @@ def probe(executable: Path, out: Path) -> dict:
 
 def read_target(path: Path) -> dict:
     target = json.loads(path.read_text())
-    if target.get("schema_version") != 2 or target != normalize(
+    if target.get("schema_version") != 3 or target != normalize(
         {"device": target["device"], "executor": target["executor"]}
     ):
         raise ValueError("target.json is invalid or has an inconsistent launch")

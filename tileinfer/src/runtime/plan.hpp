@@ -13,13 +13,16 @@ namespace tileinfer {
 using TokenId = std::int32_t;
 
 inline constexpr int kThreads = 1024;
-inline constexpr const char* kAbi = "tileinfer-decoder-v6";
-inline constexpr const char* kFingerprint = "decoder-fused-abi6-bf16-eager-simt-v1-sm86-b1024";
+inline constexpr const char* kAbi = "tileinfer-decoder-v7";
+inline constexpr const char* kFingerprint =
+    "decoder-fused-abi7-bf16-eager-simt-wide-attention-v1-sm86-b1024";
 
 // Shared-memory limits of the compiled worker; the loader rejects larger models.
 inline constexpr int kMaxHidden = 4096; // a task's input vector lives in shared memory
-inline constexpr int kMaxHeadDim = 256; // one projected head before RoPE
-inline constexpr int kMaxGroup = 8;     // query heads per K/V head
+inline constexpr int kMaxHeadDim = 128; // one projected head; one K/V row per warp at most
+inline constexpr int kMaxGroup = 8;     // query heads per K/V head, a power of two
+// Shared bytes for one attention task's scores or probabilities of all its query heads.
+inline constexpr int kAttentionSharedBytes = kMaxHidden * 4;
 
 // Storage precision for weights, activations and K/V; reductions use float32.
 enum class WeightDtype : std::uint32_t
@@ -31,7 +34,7 @@ enum class WeightDtype : std::uint32_t
 // Names one validated worker instruction; the worker's storage type selects precision.
 enum class Opcode : std::uint32_t
 {
-    barrier = 0,           // every worker reaches each grid barrier in the same order
+    barrier = 0,           // grid barrier at the same stream position in every worker
     qkv = 1,               // one head of [Q; K; V] rows: norm, project, RoPE, cache write
     attention_scores = 2,  // one K/V head x context chunk: scores and chunk softmax statistics
     attention_values = 3,  // one K/V head x context chunk: probabilities and partial P*V
@@ -101,7 +104,9 @@ constexpr std::uint32_t tensor_index(TensorId id)
 }
 
 // One worker instruction. Rows index the opcode's output: the concatenated
-// [Q; K; V] projection for qkv, the vocabulary for logits, and so on.
+// [Q; K; V] projection for qkv, the vocabulary for logits, and so on. A
+// barrier with begin > 0 is skipped while the visible prefix has at most
+// begin time steps; every worker sees the same position, so all skip it.
 struct TaskRecord
 {
     Opcode opcode;
@@ -208,7 +213,9 @@ struct LoadedPlan
     int kv_heads;
     int head_dim;
     int max_context;
-    int attention_chunks; // context chunks per K/V head in attention
+    int attention_chunks;      // chunk tasks per K/V head in attention
+    int attention_chunk_steps; // most time steps one chunk task covers
+    int attention_fused_steps; // longest prefix one fused task per K/V head handles
     int workers;
     NumericConfig numeric;
     StackConfig stack;

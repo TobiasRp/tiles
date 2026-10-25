@@ -54,6 +54,32 @@ def stale_scratch_read(plan: dict) -> None:
     plan["waves"][late["wave"]]["workers"][early["worker"]].append(early["id"])
 
 
+def conditional_wave(plan: dict) -> dict:
+    """The first scores wave, whose barrier fused prefixes skip."""
+    return next(wave for wave in plan["waves"] if "conditional_barrier" in wave)
+
+
+def move_condition(plan: dict) -> None:
+    """Skip the barrier after the Q/K/V wave instead, before attention reads K."""
+    wave = conditional_wave(plan)
+    plan["waves"][wave["id"] - 1]["conditional_barrier"] = wave.pop(
+        "conditional_barrier"
+    )
+
+
+def fuse_into_projection(plan: dict) -> None:
+    """Move layer 0's values tasks into the Wo wave, so a skipped barrier
+    would let a fused prefix's output projection race its scores tasks."""
+    wave = conditional_wave(plan)
+    values, projection = plan["waves"][wave["id"] + 1], plan["waves"][wave["id"] + 2]
+    for worker, lane in enumerate(values["workers"]):
+        for task_id in lane:
+            plan["tasks"][task_id]["wave"] += 1
+        projection["workers"][worker] = lane + projection["workers"][worker]
+        values["workers"][worker] = []
+    projection["conditional_barrier"] = wave.pop("conditional_barrier")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--loader", type=Path, required=True)
@@ -79,12 +105,15 @@ def main() -> None:
             source = fixture_root / fixture
             for dtype in ("float32", "bfloat16"):
                 package = root / f"{kind}-{dtype}"
+                # Two-step chunks: fused and split attention, a conditional barrier.
                 builder(
                     source / "model.json",
                     source / "weights.npz",
                     target,
                     package,
                     dtype,
+                    2,
+                    2,
                 )
                 path = package / "plan.json"
                 original = json.loads(path.read_text())
@@ -121,6 +150,11 @@ def main() -> None:
                     )
                     retired["model"]["dtype"] = "float32"
                     check(retired, False, f"retired version {version} package")
+                version6 = copy.deepcopy(original)
+                version6["header"].update(
+                    format_version=6, executor_abi="tileinfer-decoder-v6"
+                )
+                check(version6, False, "version 6 package")
                 mutations = {
                     "read before producer": delay_producer,
                     "mixed activation dtype": lambda p: p["model"].update(
@@ -178,6 +212,22 @@ def main() -> None:
                     "missing task": lambda p: p["waves"][0]["workers"].__setitem__(
                         0, []
                     ),
+                    "missing conditional barrier": lambda p: conditional_wave(p).pop(
+                        "conditional_barrier"
+                    ),
+                    "conditional barrier threshold": lambda p: conditional_wave(p)[
+                        "conditional_barrier"
+                    ].update(skip_up_to_length=3),
+                    "conditional barrier before attention": move_condition,
+                    "conditional barrier before a projection": fuse_into_projection,
+                    "chunk steps beyond shared memory": lambda p: p["model"].update(
+                        attention_chunk_steps=1 << 20
+                    ),
+                    "fused beyond chunk steps": lambda p: p["model"].update(
+                        attention_fused_steps=3
+                    ),
+                    "too few chunks": lambda p: p["model"].update(attention_chunks=1),
+                    "unaligned head": lambda p: p["model"].update(head_dim=6),
                 }
                 if kind == "stack":
                     layers = original["model"]["layers"]

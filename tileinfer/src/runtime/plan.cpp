@@ -179,7 +179,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
     const auto model_kind = header.at("model_kind").get<std::string>();
     const bool full_stack = model_kind == "llama_decoder_stack";
     const int version = positive(header.at("format_version"), "format_version");
-    require(version == 6 && header.at("executor_abi") == kAbi &&
+    require(version == 7 && header.at("executor_abi") == kAbi &&
                 model_kind == (full_stack ? "llama_decoder_stack" : "llama_decoder_block"),
         "unsupported decoder plan header; regenerate the package with the current planner");
     const auto& model = document.at("model");
@@ -201,7 +201,9 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
         positive(model.at("num_key_value_heads"), "num_key_value_heads"),
         positive(model.at("head_dim"), "head_dim"),
         positive(model.at("max_context"), "max_context"),
-        positive(model.at("attention_chunks"), "attention_chunks")};
+        positive(model.at("attention_chunks"), "attention_chunks"),
+        positive(model.at("attention_chunk_steps"), "attention_chunk_steps"),
+        positive(model.at("attention_fused_steps"), "attention_fused_steps")};
     const int layers = positive(model.at("layers"), "layers");
     const int vocab = full_stack ? positive(model.at("vocab_size"), "vocab_size") : 0;
     const bool tied = full_stack ? model.at("tie_word_embeddings").get<bool>() : false;
@@ -210,8 +212,25 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
         "unsupported decoder dimensions");
     require(s.d <= kMaxHidden && s.dh <= kMaxHeadDim && s.nq / s.nkv <= kMaxGroup,
         "decoder dimensions exceed the compiled worker's shared-memory limits");
-    // Chunks beyond a short prefix are empty and contribute nothing.
-    require(s.chunks <= 1024, "too many attention chunks");
+    // Attention lanes load K/V rows as 16-byte vectors, a power-of-two number
+    // of lanes per row, and give each query head of a group the same warps.
+    const int group = s.nq / s.nkv;
+    const int row_bytes = s.dh * weight_element_bytes;
+    const auto power_of_two = [](int value) { return (value & (value - 1)) == 0; };
+    require(power_of_two(group) && row_bytes % 16 == 0 && power_of_two(row_bytes / 16) &&
+                row_bytes / 16 <= 32,
+        "attention shape unsupported by the compiled worker");
+    // Every chunk task keeps its heads' probabilities in shared memory, and
+    // the program holds the chunk tasks of the longest prefix (see
+    // ops::active_chunks: one up to the fused length, then at least two).
+    const std::int64_t longest_chunks =
+        s.context <= s.fused ? 1
+                             : std::max<std::int64_t>(2,
+                                   (static_cast<std::int64_t>(s.context) + s.steps - 1) / s.steps);
+    require(static_cast<std::int64_t>(s.steps) * group * weight_element_bytes <=
+                    kAttentionSharedBytes &&
+                s.fused <= s.steps && s.chunks == longest_chunks,
+        "invalid attention chunking");
     for (std::size_t id = 0; id < kTensorCount; ++id) {
         std::uint64_t elements = 1;
         for (int dimension : shape(s, static_cast<Id>(id)))
@@ -245,6 +264,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
                 target.at("sm_count") == device.sm_count && workers == device.sm_count &&
                 target.at("cooperative_launch") == true && device.cooperative_launch &&
                 target.at("threads_per_block") == kThreads && fingerprint == kFingerprint &&
+                target.at("attention_shared_bytes") == kAttentionSharedBytes &&
                 workers <= static_cast<std::int64_t>(device.sm_count) * device.active_blocks_per_sm,
         "decoder plan target does not match compiled worker");
 
@@ -325,6 +345,8 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
     result.attention_bytes = attention_bytes;
     result.attention_partial_bytes = partial_bytes;
     result.attention_chunks = s.chunks;
+    result.attention_chunk_steps = s.steps;
+    result.attention_fused_steps = s.fused;
     result.weight_dtype = weight_dtype == "bfloat16" ? WeightDtype::bfloat16 : WeightDtype::float32;
     result.hidden_size = s.d;
     result.intermediate_size = s.f;

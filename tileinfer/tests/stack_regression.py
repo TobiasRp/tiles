@@ -228,11 +228,15 @@ def main() -> None:
             expected_v,
         )
         package = root / "package"
+        # Two-step chunks: positions 0-1 run fused attention, 2-4 split it.
         build_stack(
             fixture / "model.json",
             fixture / "weights.npz",
             root / "target.json",
             package,
+            "float32",
+            2,
+            2,
         )
         result = run(args.executor, "--inspect-plan", str(package))
         if result.returncode:
@@ -256,6 +260,8 @@ def main() -> None:
             root / "target.json",
             bf16_package,
             "bfloat16",
+            2,
+            2,
         )
         bf16_plan = json.loads((bf16_package / "plan.json").read_text())
         if bf16_plan["storage"]["stack"]["lm_head_offset"] != 0:

@@ -4,10 +4,12 @@ import copy
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
-from tileplan.decoder_block import build, validate
+from tileplan.decoder_block import build, read_model, validate
 from tileplan.package import read_package
+from tileplan.plan_core import attention_chunking, plan_target
 from tileplan.probe import ABI, normalize
 from tileplan.probe import OPCODES as PROBE_OPCODES
 
@@ -30,6 +32,7 @@ def target(workers: int = 4) -> dict:
                 "active_blocks_per_sm": 2,
                 "threads_per_block": 128,
                 "fingerprint": "fixture-decoder-kernel",
+                "attention_shared_bytes": 16384,
             },
         }
     )
@@ -42,25 +45,31 @@ class DecoderPlanningTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / "target.json").write_text(json.dumps(target()))
 
-    def package(self, name: str = "package") -> Path:
+    def package(self, name: str = "package", **chunking) -> Path:
         out = self.root / name
         build(
             FIXTURE / "model.json",
             FIXTURE / "weights.npz",
             self.root / "target.json",
             out,
+            **chunking,
         )
         return out
 
     def test_versioned_package_and_earliest_balanced_waves(self) -> None:
-        package = self.package()
+        package = self.package(chunk_steps=4, fused_steps=2)
         plan, weights, _ = read_package(package)
-        self.assertEqual(plan["header"]["format_version"], 6)
+        self.assertEqual(plan["header"]["format_version"], 7)
         self.assertEqual({task["layer"] for task in plan["tasks"]}, {0})
         self.assertEqual(plan["header"]["model_kind"], "llama_decoder_block")
         self.assertEqual(plan["model"]["weight_dtype"], "float32")
         # Q/K/V heads, attention scores, attention values, Wo, gate/up, down.
+        # The scores wave ends with the barrier skipped for fused prefixes.
         self.assertEqual(len(plan["waves"]), 6)
+        self.assertEqual(
+            [wave.get("conditional_barrier") for wave in plan["waves"]],
+            [None, {"skip_up_to_length": 2}, None, None, None, None],
+        )
         self.assertEqual(len(plan["model"]["tensors"]), 17)
         tensors = {item["id"]: item["name"] for item in plan["model"]["tensors"]}
         self.assertEqual(
@@ -93,7 +102,7 @@ class DecoderPlanningTest(unittest.TestCase):
                     default=0,
                 ),
             )
-        # Two K/V heads on four workers: two context chunks each.
+        # A 6-step context beyond the fused limit splits into two chunks.
         self.assertEqual(
             [
                 (task["operands"]["kv_head"], task["operands"]["chunk"])
@@ -111,10 +120,39 @@ class DecoderPlanningTest(unittest.TestCase):
             self.root / "target.json",
             self.root / "wide",
         )
-        # Ten chunks per K/V head give every one of the 20 workers attention work,
-        # and each projection splits its rows into one range per worker.
-        self.assertEqual(report["model"]["attention_chunks"], 10)
-        self.assertEqual(report["idle_workers"][1:], [0, 0, 0, 0, 0])
+        # The 6-step context runs as one fused attention task per K/V head, and
+        # each projection splits its rows into one range per worker.
+        self.assertEqual(report["model"]["attention_chunks"], 1)
+        self.assertEqual(report["idle_workers"][1:3], [18, 18])
+        self.assertEqual(report["idle_workers"][3:], [0, 0, 0])
+
+    def test_attention_chunking(self) -> None:
+        spec = read_model(FIXTURE / "model.json")
+        launch = plan_target(target())
+
+        def chunking(dtype="float32", context=6, **options):
+            return attention_chunking(
+                replace(spec, max_context=context), dtype, launch, *options.values()
+            )
+
+        # Two query heads per K/V head: 16 KB holds 2,048 FP32 or 4,096 BF16 steps.
+        self.assertEqual(
+            chunking(),
+            {
+                "attention_chunks": 1,
+                "attention_chunk_steps": 2048,
+                "attention_fused_steps": 384,
+            },
+        )
+        self.assertEqual(chunking("bfloat16")["attention_chunk_steps"], 4096)
+        # Beyond the fused limit: at least two chunks, more past the capacity.
+        self.assertEqual(chunking(context=385)["attention_chunks"], 2)
+        self.assertEqual(chunking(context=4096)["attention_chunks"], 2)
+        self.assertEqual(chunking(context=4097)["attention_chunks"], 3)
+        self.assertEqual(chunking(context=6, steps=4, fused=4)["attention_chunks"], 2)
+        for steps, fused in ((2049, None), (0, None), (8, 9), (8, 0)):
+            with self.assertRaises(ValueError):
+                chunking(steps=steps, fused=fused)
 
     def test_package_is_reproducible(self) -> None:
         first, second = self.package(), self.package("again")
@@ -185,6 +223,7 @@ class DecoderPlanningTest(unittest.TestCase):
                         "active_blocks_per_sm": 2,
                         "threads_per_block": 128,
                         "fingerprint": "old",
+                        "attention_shared_bytes": 16384,
                     },
                 }
             )

@@ -19,6 +19,19 @@ def _path(value: str) -> Path:
     return Path(value).expanduser().resolve()
 
 
+def _attention_options(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--attention-chunk-steps",
+        type=int,
+        help="most time steps per attention task (default: shared-memory capacity)",
+    )
+    parser.add_argument(
+        "--attention-fused-steps",
+        type=int,
+        help="longest prefix run as one fused attention task (default: 384)",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="tileplan")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -43,6 +56,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=("float32", "bfloat16"),
         default="float32",
     )
+    _attention_options(planner)
     stack_planner = commands.add_parser(
         "build-stack", help="write a decoder stack package"
     )
@@ -55,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=("float32", "bfloat16"),
         default="float32",
     )
+    _attention_options(stack_planner)
     importer = commands.add_parser(
         "import-llama32", help="pack the pinned Llama 3.2 1B base checkpoint"
     )
@@ -68,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=("float32", "bfloat16"),
         default="bfloat16",
     )
+    _attention_options(importer)
     for name in ("inspect", "verify"):
         command = commands.add_parser(name, help=f"{name} a decoder package")
         command.add_argument("package", type=_path)
@@ -92,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.target,
                 args.out,
                 args.weight_dtype,
+                args.attention_chunk_steps,
+                args.attention_fused_steps,
             )
         elif args.command == "build-stack":
             result = build_stack(
@@ -100,6 +118,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.target,
                 args.out,
                 args.weight_dtype,
+                args.attention_chunk_steps,
+                args.attention_fused_steps,
             )
         elif args.command == "import-llama32":
             result = import_llama32(
@@ -109,6 +129,8 @@ def main(argv: list[str] | None = None) -> int:
                 args.max_context,
                 args.revision,
                 args.weight_dtype,
+                args.attention_chunk_steps,
+                args.attention_fused_steps,
             )
         elif args.command in {"inspect", "verify"}:
             plan, _, digest = read_package(args.package)

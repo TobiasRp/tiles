@@ -179,13 +179,25 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
                     {**base, "begin": d + kv_width + kv_head * dh}, "value_cache", value
                 )
 
-        # Attention over the visible prefix, split into chunks, for every head.
-        for (length, dh), chunks in zip(
-            ((1, 10), (2, 64), (17, 64), (65, 160), (257, 10), (1025, 64)),
-            (3, 1, 5, 2, 4, 5),
-            strict=True,
+        # Attention over the visible prefix for every head, as one fused task
+        # per K/V head up to fused_steps, otherwise split into at least two
+        # chunks of at most chunk_steps: (length, head_dim, query heads, K/V
+        # heads, chunk_steps, fused_steps). Uneven splits, chunks of one step,
+        # both sides of the fused limit, groups of 1 to 8, and both the fixed
+        # Llama shape (four heads of 64 per K/V head) and the general path.
+        for length, dh, nq, nkv, chunk_steps, fused_steps in (
+            (1, 8, 4, 2, 4, 4),
+            (2, 64, 4, 4, 1, 1),
+            (17, 64, 4, 1, 8, 4),
+            (65, 128, 4, 2, 64, 64),
+            (257, 16, 4, 2, 300, 300),
+            (33, 32, 8, 1, 16, 8),
+            (384, 64, 4, 1, 1024, 384),
+            (385, 64, 4, 1, 1024, 384),
+            (1025, 64, 4, 1, 512, 384),
         ):
-            capacity, nq, nkv = length + 3, 4, 2
+            capacity = length + 3
+            fused = length <= fused_steps
             d = nq * dh
             for kind in ("random", "flat", "peaked"):
                 q = random(nq, dh, dtype=dtype)
@@ -201,7 +213,9 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
                 # Unused capacity must not participate in attention.
                 k[length:] = 1000
                 v[length:] = 1000
-                attended, probabilities = (
+                # Split chunks leave their BF16 scores in the workspace; a fused
+                # task keeps them in shared memory.
+                attended, scores = (
                     [],
                     torch.full((nq, capacity), SENTINEL, device="cuda", dtype=dtype),
                 )
@@ -209,7 +223,8 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
                     kv_head = head // (nq // nkv)
                     score = (q[head][None, :] @ k[:length, kv_head].T) * (dh**-0.5)
                     probs = torch.softmax(score, dim=-1, dtype=torch.float32).to(dtype)
-                    probabilities[head, :length] = probs[0]
+                    if not fused:
+                        scores[head, :length] = score[0]
                     attended.append((probs @ v[:length, kv_head])[0])
                 add(
                     {
@@ -221,7 +236,8 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
                         "head_dim": dh,
                         "position": length - 1,
                         "capacity": capacity,
-                        "chunks": chunks,
+                        "chunk_steps": chunk_steps,
+                        "fused_steps": fused_steps,
                         "q_rot": raw(q),
                         "key_cache": raw(k),
                         "value_cache": raw(v),
@@ -229,7 +245,7 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
                     },
                     "attention",
                     torch.cat(attended),
-                    {"buffer": "scores", "expected": probabilities.flatten()},
+                    {"buffer": "scores", "expected": scores.flatten()},
                 )
 
         # Gate and up rows of the normalized input, combined as SiLU(gate) * up.
@@ -376,7 +392,8 @@ def main() -> None:
             raise AssertionError(
                 f"operator case {index}: {case['op']} {case['dtype']} "
                 f"hidden={case.get('hidden')} position={case.get('position', 0)} "
-                f"chunks={case.get('chunks', 1)}"
+                f"chunk_steps={case.get('chunk_steps')} "
+                f"fused_steps={case.get('fused_steps')}"
             ) from error
     print(f"{len(cases)} isolated CUDA operator cases passed (FP32, BF16).")
 

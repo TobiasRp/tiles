@@ -211,6 +211,8 @@ def pack_safetensors(
     out: Path,
     revision: str | None = None,
     dtype: str = "bfloat16",
+    chunk_steps: int | None = None,
+    fused_steps: int | None = None,
 ) -> dict:
     """Stream HF BF16 tensors into the existing stack ABI."""
     resolved_revision, revision_evidence = _revision(checkpoint, revision)
@@ -224,7 +226,9 @@ def pack_safetensors(
                 f"checkpoint shard {path.name} has a different revision",
             )
     with new_package_dir(out) as temporary:
-        plan = make_stack_plan_metadata(spec, target, dtype, "0" * 64)
+        plan = make_stack_plan_metadata(
+            spec, target, dtype, "0" * 64, chunk_steps, fused_steps
+        )
         storage = plan["storage"]
         stack = storage["stack"]
         weight_regions = {entry["tensor"]: entry for entry in storage["weights"]}
@@ -306,6 +310,8 @@ def pack_safetensors(
             "vocab_size": spec.vocab_size,
             "max_context": spec.block.max_context,
             "attention_chunks": plan["model"]["attention_chunks"],
+            "attention_chunk_steps": plan["model"]["attention_chunk_steps"],
+            "attention_fused_steps": plan["model"]["attention_fused_steps"],
             "weight_bytes": storage["weight_bytes"],
             "kv_bytes": storage["kv_bytes"],
         }
@@ -320,7 +326,11 @@ def import_llama32(
     max_context: int = 4096,
     revision: str | None = None,
     dtype: str = "bfloat16",
+    chunk_steps: int | None = None,
+    fused_steps: int | None = None,
 ) -> dict:
     spec = read_llama32_config(checkpoint / "config.json", max_context)
     target = read_target(target_path)
-    return pack_safetensors(checkpoint, spec, target, out, revision, dtype)
+    return pack_safetensors(
+        checkpoint, spec, target, out, revision, dtype, chunk_steps, fused_steps
+    )

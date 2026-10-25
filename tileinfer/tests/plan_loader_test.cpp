@@ -22,11 +22,13 @@ int main(int argc, char** argv)
             // Synthetic capabilities for CPU loader tests; never a GPU planning probe.
             std::cout << json{{"device", {{"compute_capability", {8, 6}}, {"sm_count", 4},
                                              {"cooperative_launch", true}}},
-                             {"executor", {{"abi", tileinfer::kAbi},
-                                              {"fingerprint", tileinfer::kFingerprint},
-                                              {"threads_per_block", tileinfer::kThreads},
-                                              {"active_blocks_per_sm", 1},
-                                              {"opcodes", tileinfer::supported_opcodes()}}}}
+                             {"executor",
+                                 {{"abi", tileinfer::kAbi},
+                                     {"fingerprint", tileinfer::kFingerprint},
+                                     {"attention_shared_bytes", tileinfer::kAttentionSharedBytes},
+                                     {"threads_per_block", tileinfer::kThreads},
+                                     {"active_blocks_per_sm", 1},
+                                     {"opcodes", tileinfer::supported_opcodes()}}}}
                              .dump()
                       << '\n';
             return 0;

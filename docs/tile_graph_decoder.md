@@ -9,7 +9,13 @@ that arithmetic and stores the whole token as one flat task program:
 embedding, every layer, final normalization, and logits, scheduled into global
 waves. Version 6 (2026-10-23) fuses RMSNorm, RoPE, the cache write and
 SiLU·up into the projection tasks and splits attention by K/V head and
-context chunk; see [the S2 write-up](blog/s2-fused-tasks-2026-10.md). Older
+context chunk; see [the S2 write-up](blog/s2-fused-tasks-2026-10.md).
+Version 7 (2026-10-25) keeps that graph but chooses the active attention
+chunks per position: a prefix of at most `attention_fused_steps` runs as one
+fused task per K/V head, and the barrier before the values wave is a
+conditional barrier that every worker skips at those positions; a longer
+prefix splits into at least two chunks of at most `attention_chunk_steps`.
+See [the S2b milestone](megakernel_next_steps.md#s2b--attention-at-the-right-parallelism--done). Older
 package formats are no longer read and must be regenerated; see
 [the megakernel plan](megakernel_next_steps.md). The historical milestone
 results below describe version 3.

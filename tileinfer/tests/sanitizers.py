@@ -32,7 +32,7 @@ def main() -> None:
     fixture_root = Path(__file__).parents[2] / "tileplan/tests/fixtures"
     tail = root / "tail-fixture"
     generate_fixture(
-        tail, DecoderSpec(hidden_size=40, intermediate_size=93, head_dim=10)
+        tail, DecoderSpec(hidden_size=32, intermediate_size=93, head_dim=8)
     )
     with np.load(tail / "reference_cases.npz") as source:
         inputs = source["x"][:3].tolist()
@@ -47,12 +47,16 @@ def main() -> None:
     for dtype in ("float32", "bfloat16"):
         block = root / f"block-{dtype}"
         stack = root / f"stack-{dtype}"
+        # One-step chunks: position 0 runs fused attention and skips the
+        # conditional barrier, later positions split it into two or more chunks.
         build(
             tail / "model.json",
             tail / "weights.npz",
             root / "target.json",
             block,
             dtype,
+            1,
+            1,
         )
         source = fixture_root / "decoder_m4"
         build_stack(
@@ -61,6 +65,8 @@ def main() -> None:
             root / "target.json",
             stack,
             dtype,
+            1,
+            1,
         )
         generation = [
             str(executor),
@@ -91,15 +97,16 @@ def main() -> None:
             str(block),
             str(root / "block.json"),
         ]
-        cases[f"{dtype}-timeline"] = [
-            str(build_dir / "tile_runtime_test"),
-            "--timeline-stack",
-            str(stack),
-            "2",
-            "1",
-            "1",
-            "1",
-        ]
+        for position, regime in ((0, "fused"), (2, "split")):
+            cases[f"{dtype}-timeline-{regime}"] = [
+                str(build_dir / "tile_runtime_test"),
+                "--timeline-stack",
+                str(stack),
+                str(position),
+                "1",
+                "1",
+                "1",
+            ]
         cases[f"{dtype}-tickets"] = [
             str(build_dir / "sequence_context_smoke"),
             str(stack),

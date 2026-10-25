@@ -96,7 +96,8 @@ __global__ __launch_bounds__(kThreads, 1) void decoder_worker(Launch<Scalar> lau
         const int end = static_cast<int>(task.end);
         switch (task.opcode) {
         case Opcode::barrier:
-            cg::this_grid().sync();
+            if (shape.position + 1 > begin)
+                cg::this_grid().sync();
             break;
         case Opcode::qkv:
             ops::qkv(begin, launch.layer(task.layer), shape, shared);
@@ -150,7 +151,8 @@ void enqueue_worker_typed(cuda::stream& stream, const WorkerProgramView& program
     const Launch<Scalar> launch{program.instructions, program.streams, program.layout,
         {program.hidden_size, program.intermediate_size, program.query_heads, program.kv_heads,
             program.head_dim, position, program.max_context, program.attention_chunks,
-            program.numeric, program.rotary_frequencies},
+            program.attention_chunk_steps, program.attention_fused_steps, program.numeric,
+            program.rotary_frequencies},
         program.stack, token.immediate, token.ids, token.index, static_cast<Scalar*>(buffers.input),
         static_cast<Scalar*>(buffers.output), static_cast<Scalar*>(buffers.scratch),
         static_cast<Scalar*>(buffers.kv), static_cast<const Scalar*>(program.weights),
