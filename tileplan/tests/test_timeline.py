@@ -6,6 +6,7 @@ from xml.etree import ElementTree
 
 import numpy as np
 from test_decoder_planning import target
+
 from tileplan.decoder_stack import make_stack_plan, read_stack_model, read_stack_weights
 from tileplan.timeline import (
     align,
