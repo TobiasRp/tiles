@@ -80,8 +80,6 @@ float positive_float(const json& value, const char* name)
     return result;
 }
 
-using Spec = detail::PlanShape;
-
 constexpr std::array<const char*, kTensorCount> names{"x", "attn_norm", "Wq", "Wk", "Wv", "q", "k",
     "q_rot", "K", "V", "attention", "Wo", "r", "ffn_norm", "Wgate", "Wup", "product", "Wdown", "y"};
 using Id = TensorId;
@@ -90,32 +88,32 @@ constexpr std::array weight_ids{
 constexpr std::array scratch_ids{Id::q, Id::k, Id::q_rot, Id::attention, Id::r, Id::product};
 constexpr std::array kv_ids{Id::K, Id::V};
 
-std::vector<int> shape(const Spec& s, Id id)
+std::vector<int> shape(const ModelShape& s, Id id)
 {
-    const int kv_width = s.nkv * s.dh;
+    const int kv_width = s.kv_heads * s.head_dim;
     switch (id) {
     case Id::attn_norm:
     case Id::ffn_norm:
-        return {s.d};
+        return {s.hidden_size};
     case Id::Wq:
     case Id::Wo:
-        return {s.d, s.d};
+        return {s.hidden_size, s.hidden_size};
     case Id::Wk:
     case Id::Wv:
-        return {kv_width, s.d};
+        return {kv_width, s.hidden_size};
     case Id::k:
         return {kv_width};
     case Id::Wgate:
     case Id::Wup:
     case Id::Wdown: // stored transposed, so an FFN chunk's rows are contiguous
-        return {s.f, s.d};
+        return {s.intermediate_size, s.hidden_size};
     case Id::product:
-        return {s.f};
+        return {s.intermediate_size};
     case Id::K:
     case Id::V:
-        return {1, s.context, s.nkv, s.dh};
+        return {1, s.max_context, s.kv_heads, s.head_dim};
     default:
-        return {s.d};
+        return {s.hidden_size};
     }
 }
 
@@ -132,7 +130,7 @@ std::string storage_class(Id id)
     return "scratch";
 }
 
-json descriptors(const Spec& s, std::string_view weight_dtype)
+json descriptors(const ModelShape& s, std::string_view weight_dtype)
 {
     json result = json::array();
     for (int id = 0; id < static_cast<int>(names.size()); ++id) {
@@ -148,7 +146,7 @@ json descriptors(const Spec& s, std::string_view weight_dtype)
 
 template <std::size_t N>
 std::pair<json, std::uint64_t> regions(
-    const Spec& s, const std::array<Id, N>& ids, int alignment, int element_bytes = 4)
+    const ModelShape& s, const std::array<Id, N>& ids, int alignment, int element_bytes = 4)
 {
     json result = json::array();
     std::uint64_t cursor = 0;
@@ -196,7 +194,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
                 model.at("api_output_dtype") == "float32" &&
                 model.at("numeric_policy") == (bf16 ? "hf-llama-eager-bf16-v1" : "decoder-f32-v1"),
         "inconsistent numeric policy");
-    Spec s{positive(model.at("hidden_size"), "hidden_size"),
+    ModelShape s{positive(model.at("hidden_size"), "hidden_size"),
         positive(model.at("intermediate_size"), "intermediate_size"),
         positive(model.at("num_attention_heads"), "num_attention_heads"),
         positive(model.at("num_key_value_heads"), "num_key_value_heads"),
@@ -209,15 +207,17 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
     const int layers = positive(model.at("layers"), "layers");
     const int vocab = full_stack ? positive(model.at("vocab_size"), "vocab_size") : 0;
     const bool tied = full_stack ? model.at("tie_word_embeddings").get<bool>() : false;
-    require(s.d == static_cast<std::int64_t>(s.nq) * s.dh && s.nq % s.nkv == 0 && s.dh % 2 == 0 &&
+    require(s.hidden_size == static_cast<std::int64_t>(s.query_heads) * s.head_dim &&
+                s.query_heads % s.kv_heads == 0 && s.head_dim % 2 == 0 &&
                 (full_stack || layers == 1),
         "unsupported decoder dimensions");
-    require(s.d <= kMaxHidden && s.dh <= kMaxHeadDim && s.nq / s.nkv <= kMaxGroup,
+    require(s.hidden_size <= kMaxHidden && s.head_dim <= kMaxHeadDim &&
+                s.query_heads / s.kv_heads <= kMaxGroup,
         "decoder dimensions exceed the compiled worker's shared-memory limits");
     // Attention lanes load K/V rows as 16-byte vectors, a power-of-two number
     // of lanes per row, and give each query head of a group the same warps.
-    const int group = s.nq / s.nkv;
-    const int row_bytes = s.dh * weight_element_bytes;
+    const int group = s.query_heads / s.kv_heads;
+    const int row_bytes = s.head_dim * weight_element_bytes;
     const auto power_of_two = [](int value) { return (value & (value - 1)) == 0; };
     require(power_of_two(group) && row_bytes % 16 == 0 && power_of_two(row_bytes / 16) &&
                 row_bytes / 16 <= 32,
@@ -226,16 +226,20 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
     // the program holds the chunk tasks of the longest prefix (see
     // ops::active_chunks: one up to the fused length, then at least two).
     const std::int64_t longest_chunks =
-        s.context <= s.fused ? 1
-                             : std::max<std::int64_t>(2,
-                                   (static_cast<std::int64_t>(s.context) + s.steps - 1) / s.steps);
-    require(static_cast<std::int64_t>(s.steps) * group * weight_element_bytes <=
+        s.max_context <= s.attention_fused_steps
+            ? 1
+            : std::max<std::int64_t>(
+                  2, (static_cast<std::int64_t>(s.max_context) + s.attention_chunk_steps - 1) /
+                         s.attention_chunk_steps);
+    require(static_cast<std::int64_t>(s.attention_chunk_steps) * group * weight_element_bytes <=
                     kAttentionSharedBytes &&
-                s.fused <= s.steps && s.chunks == longest_chunks &&
-                static_cast<std::int64_t>(s.context) * s.chunks <= std::numeric_limits<int>::max(),
+                s.attention_fused_steps <= s.attention_chunk_steps &&
+                s.attention_chunks == longest_chunks &&
+                static_cast<std::int64_t>(s.max_context) * s.attention_chunks <=
+                    std::numeric_limits<int>::max(),
         "invalid attention chunking");
     // One FFN chunk per task, at most one per product row.
-    require(s.ffn <= s.f, "invalid FFN chunking");
+    require(s.ffn_chunks <= s.intermediate_size, "invalid FFN chunking");
     for (std::size_t id = 0; id < kTensorCount; ++id) {
         std::uint64_t elements = 1;
         for (int dimension : shape(s, static_cast<Id>(id)))
@@ -256,8 +260,8 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
     require(numeric.rope_high_freq_factor > numeric.rope_low_freq_factor,
         "unsupported decoder numeric semantics");
     json head_map = json::array();
-    for (int head = 0; head < s.nq; ++head)
-        head_map.push_back(head / (s.nq / s.nkv));
+    for (int head = 0; head < s.query_heads; ++head)
+        head_map.push_back(head / (s.query_heads / s.kv_heads));
     require(
         model.at("head_to_kv") == head_map && model.at("tensors") == descriptors(s, weight_dtype),
         "invalid tensor descriptors or GQA mapping");
@@ -288,13 +292,13 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
         "invalid decoder tensor storage");
     if (full_stack) {
         const std::uint64_t embedding_bytes =
-            static_cast<std::uint64_t>(vocab) * s.d * weight_element_bytes;
+            static_cast<std::uint64_t>(vocab) * s.hidden_size * weight_element_bytes;
         const auto layer_offset = align64(embedding_bytes);
         const auto layer_stride = align64(weight_bytes);
         const auto norm_offset = align64(add(layer_offset, multiply(layers, layer_stride)));
         const auto lm_offset =
-            tied ? 0 : align64(add(norm_offset, multiply(s.d, weight_element_bytes)));
-        const auto total = tied ? add(norm_offset, multiply(s.d, weight_element_bytes))
+            tied ? 0 : align64(add(norm_offset, multiply(s.hidden_size, weight_element_bytes)));
+        const auto total = tied ? add(norm_offset, multiply(s.hidden_size, weight_element_bytes))
                                 : add(lm_offset, embedding_bytes);
         require(
             total <= static_cast<std::uint64_t>(std::numeric_limits<int>::max()) *
@@ -305,7 +309,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
         const json expected_stack = {{"embedding_offset", 0}, {"embedding_bytes", embedding_bytes},
             {"layer_weights_offset", layer_offset}, {"layer_weight_stride", layer_stride},
             {"layer_weight_bytes", weight_bytes}, {"final_norm_offset", norm_offset},
-            {"final_norm_bytes", static_cast<std::uint64_t>(s.d) * weight_element_bytes},
+            {"final_norm_bytes", static_cast<std::uint64_t>(s.hidden_size) * weight_element_bytes},
             {"lm_head_offset", lm_offset}, {"lm_head_alias", tied}, {"layer_kv_stride", kv_bytes}};
         require(storage.at("input_bytes") == 4 &&
                     storage.at("output_bytes") == static_cast<std::uint64_t>(vocab) * 4 &&
@@ -329,12 +333,12 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
         stack.lm_head_offset = static_cast<int>(lm_offset / weight_element_bytes);
         stack.layer_kv_stride = static_cast<int>(kv_bytes / weight_element_bytes);
     } else {
-        require(
-            storage.at("input_bytes") == static_cast<std::uint64_t>(s.d) * weight_element_bytes &&
-                storage.at("output_bytes") ==
-                    static_cast<std::uint64_t>(s.d) * weight_element_bytes &&
-                storage.at("weight_bytes") == weight_bytes && weight_bytes == weights.size() &&
-                !storage.contains("selection_bytes"),
+        require(storage.at("input_bytes") ==
+                        static_cast<std::uint64_t>(s.hidden_size) * weight_element_bytes &&
+                    storage.at("output_bytes") ==
+                        static_cast<std::uint64_t>(s.hidden_size) * weight_element_bytes &&
+                    storage.at("weight_bytes") == weight_bytes && weight_bytes == weights.size() &&
+                    !storage.contains("selection_bytes"),
             "invalid decoder block storage");
     }
     require(weight_bytes / weight_element_bytes <=
@@ -352,9 +356,11 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
     require(integrity.at("weights_sha256") == weights_sha256, "decoder weight checksum mismatch");
 
     LoadedPlan result{};
-    const auto attention_bytes = multiply(multiply(s.nq, s.context), weight_element_bytes);
-    const auto partial_bytes = multiply(multiply(multiply(s.chunks, s.nq), s.dh + 2), 4);
-    const auto ffn_partial_bytes = multiply(multiply(s.ffn, s.d), 4);
+    const auto attention_bytes =
+        multiply(multiply(s.query_heads, s.max_context), weight_element_bytes);
+    const auto partial_bytes =
+        multiply(multiply(multiply(s.attention_chunks, s.query_heads), s.head_dim + 2), 4);
+    const auto ffn_partial_bytes = multiply(multiply(s.ffn_chunks, s.hidden_size), 4);
     require(storage.at("attention_bytes") == attention_bytes &&
                 storage.at("attention_partial_bytes") == partial_bytes &&
                 storage.at("ffn_partial_bytes") == ffn_partial_bytes,
@@ -368,18 +374,9 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
     result.attention_bytes = attention_bytes;
     result.attention_partial_bytes = partial_bytes;
     result.ffn_partial_bytes = ffn_partial_bytes;
-    result.ffn_chunks = s.ffn;
     result.selection_slots = selection_slots;
-    result.attention_chunks = s.chunks;
-    result.attention_chunk_steps = s.steps;
-    result.attention_fused_steps = s.fused;
     result.weight_dtype = weight_dtype == "bfloat16" ? WeightDtype::bfloat16 : WeightDtype::float32;
-    result.hidden_size = s.d;
-    result.intermediate_size = s.f;
-    result.query_heads = s.nq;
-    result.kv_heads = s.nkv;
-    result.head_dim = s.dh;
-    result.max_context = s.context;
+    result.shape = s;
     result.workers = workers;
     result.stack = stack;
     result.numeric = numeric;
@@ -406,8 +403,8 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
         offset(Id::r), offset(Id::product), offset(Id::K), offset(Id::V), offset(Id::attn_norm),
         offset(Id::Wq), offset(Id::Wk), offset(Id::Wv), offset(Id::Wo), offset(Id::ffn_norm),
         offset(Id::Wgate), offset(Id::Wup), offset(Id::Wdown)};
-    for (int pair = 0; pair < s.dh / 2; ++pair) {
-        const float inverse = 1.0f / std::pow(numeric.rope_theta, 2.0f * pair / s.dh);
+    for (int pair = 0; pair < s.head_dim / 2; ++pair) {
+        const float inverse = 1.0f / std::pow(numeric.rope_theta, 2.0f * pair / s.head_dim);
         const float wavelength = 2.0f * std::numbers::pi_v<float> / inverse;
         const float low = numeric.rope_original_context / numeric.rope_low_freq_factor;
         const float high = numeric.rope_original_context / numeric.rope_high_freq_factor;

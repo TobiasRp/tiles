@@ -63,7 +63,8 @@ int main(int argc, char** argv)
         const bool non_finite = argc == 3 && std::string_view(argv[2]) == "--non-finite";
         require(argc == 2 || non_finite, "expected a stack package path [--non-finite]");
         const auto plan = tileinfer::load_plan(argv[1], tileinfer::describe_target());
-        require(plan.stack.full_stack && plan.max_context >= 5, "expected a small stack package");
+        require(
+            plan.stack.full_stack && plan.shape.max_context >= 5, "expected a small stack package");
         tileinfer::DecoderModel model(plan);
         if (non_finite) {
             check_non_finite(model);

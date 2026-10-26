@@ -387,8 +387,8 @@ json run(const std::string& package, std::vector<int> positions)
         return cuda::device_buffer<Bf16>(
             stream, pool, std::max<std::size_t>(count, 1), cuda::no_init);
     };
-    auto input = bf16(plan.hidden_size);
-    auto output = bf16(plan.hidden_size);
+    auto input = bf16(plan.shape.hidden_size);
+    auto output = bf16(plan.shape.hidden_size);
     auto scratch = bf16(plan.scratch_bytes / 2);
     auto kv = bf16(plan.kv_bytes / 2);
     auto scores = bf16(plan.attention_bytes / 2);
@@ -405,12 +405,9 @@ json run(const std::string& package, std::vector<int> positions)
     std::uint32_t generation = 0;
 
     Buffers buffers{view.layout, view.stack,
-        {view.hidden_size, view.intermediate_size, view.query_heads, view.kv_heads, view.head_dim,
-            view.max_context, view.attention_chunks, view.attention_chunk_steps,
-            view.attention_fused_steps, view.ffn_chunks, view.numeric, view.rotary_frequencies},
-        1, 0, input.data(), output.data(), scratch.data(), kv.data(),
-        static_cast<const Bf16*>(view.weights), scores.data(), partials.data(), logits.data(),
-        candidates.data()};
+        ops::make_shape(view.shape, view.numeric, view.rotary_frequencies), 1, 0, input.data(),
+        output.data(), scratch.data(), kv.data(), static_cast<const Bf16*>(view.weights),
+        scores.data(), partials.data(), logits.data(), candidates.data()};
     const auto config = cuda::make_config(
         cuda::block_dims<kThreads>(), cuda::grid_dims(view.workers), cuda::cooperative_launch{});
     auto launch = [&](DeviceSchedule& schedule, std::uint32_t jitter) {
@@ -438,7 +435,7 @@ json run(const std::string& package, std::vector<int> positions)
     constexpr int kWarmup = 3, kLaunches = 20, kRounds = 7, kJitterRuns = 3;
     json runs = json::array();
     for (const int position : positions) {
-        if (position < 0 || position >= plan.max_context)
+        if (position < 0 || position >= plan.shape.max_context)
             throw std::runtime_error("position outside the package context");
         buffers.position = position;
         // Bit identity: every mode, with and without delays, against barriers.

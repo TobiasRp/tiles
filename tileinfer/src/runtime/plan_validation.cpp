@@ -128,7 +128,7 @@ constexpr int kLayerKeys = kFfnKey + 1;
 
 struct Program
 {
-    const PlanShape& s;
+    const ModelShape& s;
     int layers;
     int vocab;
     int slots; // greedy candidate slots
@@ -138,8 +138,8 @@ struct Program
     [[nodiscard]] int width(Id tensor) const
     {
         if (tensor == Id::K || tensor == Id::V || tensor == Id::k)
-            return s.nkv * s.dh;
-        return tensor == Id::product ? s.f : s.d;
+            return s.kv_heads * s.head_dim;
+        return tensor == Id::product ? s.intermediate_size : s.hidden_size;
     }
 
     [[nodiscard]] int stage_key(Stage stage) const
@@ -151,7 +151,7 @@ struct Program
     {
         if (stage == Stage::selection)
             return slots;
-        return stage == Stage::logits ? vocab : s.d;
+        return stage == Stage::logits ? vocab : s.hidden_size;
     }
 
     CheckedTask check(const json& task, int workers, int waves) const;
@@ -181,9 +181,11 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
     const int input_hidden = Buffers::hidden + layer % 2;
     const int output_hidden = Buffers::hidden + (layer + 1) % 2;
     const int produced = layer + 1;
-    const int kv_width = s.nkv * s.dh;
-    const int group = s.nq / s.nkv;
-    const int lanes = s.chunks * s.nq; // workspace elements: chunk * nq + head
+    const int d = s.hidden_size;
+    const int dh = s.head_dim;
+    const int kv_width = s.kv_heads * dh;
+    const int group = s.query_heads / s.kv_heads;
+    const int lanes = s.attention_chunks * s.query_heads; // workspace elements: chunk * nq + head
 
     json expected;
     json outputs = json::array();
@@ -228,12 +230,12 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
     };
     // Attention tasks name one K/V head and context chunk; return its query heads.
     auto attention_chunk = [&](Workspace kind, const char* name) {
-        const int kv_head = index(op.at("kv_head"), s.nkv);
-        const int chunk = index(op.at("chunk"), s.chunks);
+        const int kv_head = index(op.at("kv_head"), s.kv_heads);
+        const int chunk = index(op.at("chunk"), s.attention_chunks);
         expected = {{"kv_head", kv_head}, {"chunk", chunk}};
         result.record.kv_head = kv_head;
         result.record.chunk = chunk;
-        const int first = chunk * s.nq + kv_head * group;
+        const int first = chunk * s.query_heads + kv_head * group;
         result.owned.push_back(
             {layer * kLayerKeys + static_cast<int>(kTensorCount) + static_cast<int>(kind), first,
                 first + group});
@@ -244,17 +246,17 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
 
     if (code == "embedding") {
         result.record.opcode = Opcode::embedding;
-        const auto [begin, end] = rows(s.d);
+        const auto [begin, end] = rows(d);
         result.writes.push_back({Buffers::hidden, begin, end, 0});
         stage_output(Stage::embedding, "embedding", begin, end);
         result.work = end - begin;
     } else if (code == "final_rms_norm") {
         result.record.opcode = Opcode::final_rms_norm;
-        const auto [begin, end] = rows(s.d);
-        result.reads.push_back({Buffers::hidden + layers % 2, 0, s.d, layers});
+        const auto [begin, end] = rows(d);
+        result.reads.push_back({Buffers::hidden + layers % 2, 0, d, layers});
         result.writes.push_back({Buffers::hidden + (layers + 1) % 2, begin, end, layers + 1});
         stage_output(Stage::final_norm, "final_norm", begin, end);
-        result.work = s.d + end - begin;
+        result.work = d + end - begin;
     } else if (code == "logits") {
         // Vocabulary rows, then their greedy candidate. The worker combines
         // every slot before the next token's embedding, after a grid barrier.
@@ -263,44 +265,44 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
         const int slot = index(op.at("chunk"), slots);
         expected["chunk"] = slot;
         result.record.chunk = slot;
-        result.reads.push_back({Buffers::hidden + (layers + 1) % 2, 0, s.d, layers + 1});
+        result.reads.push_back({Buffers::hidden + (layers + 1) % 2, 0, d, layers + 1});
         result.writes.push_back({Buffers::logits, begin, end, 1});
         result.writes.push_back({Buffers::selection, slot, slot + 1, 1});
         stage_output(Stage::logits, "logits", begin, end);
         result.owned.push_back({stage_key(Stage::selection), slot, slot + 1});
         outputs.push_back({{"workspace", "selection"}, {"chunk", slot}});
-        result.work = static_cast<std::int64_t>(end - begin) * s.d;
+        result.work = static_cast<std::int64_t>(end - begin) * d;
     } else if (code == "qkv") {
         // Rows of the concatenated [Q; K; V] projection: Q and K unrotated
         // into scratch, V into the cache row of the current position.
         result.record.opcode = Opcode::qkv;
-        const auto [begin, end] = rows(s.d + 2 * kv_width);
-        read(Id::x, 0, s.d);
-        if (begin < s.d)
-            write(Id::q, begin, std::min(end, s.d));
-        if (begin < s.d + kv_width && end > s.d)
-            write(Id::k, std::max(begin, s.d) - s.d, std::min(end, s.d + kv_width) - s.d);
-        if (end > s.d + kv_width) {
-            const int first = std::max(begin, s.d + kv_width) - s.d - kv_width;
-            const int last = end - s.d - kv_width;
+        const auto [begin, end] = rows(d + 2 * kv_width);
+        read(Id::x, 0, d);
+        if (begin < d)
+            write(Id::q, begin, std::min(end, d));
+        if (begin < d + kv_width && end > d)
+            write(Id::k, std::max(begin, d) - d, std::min(end, d + kv_width) - d);
+        if (end > d + kv_width) {
+            const int first = std::max(begin, d + kv_width) - d - kv_width;
+            const int last = end - d - kv_width;
             write(Id::V, first, last, false);
             outputs.push_back({{"tensor", tensor_index(Id::V)}, {"position", "current"},
                 {"rows", {first, last}}});
         }
-        result.work = static_cast<std::int64_t>(end - begin) * s.d;
+        result.work = static_cast<std::int64_t>(end - begin) * d;
     } else if (code == "attention_scores") {
         result.record.opcode = Opcode::attention_scores;
         const auto [kv_head, chunk, first] = attention_chunk(Workspace::scores, "scores");
-        read(Id::q, kv_head * group * s.dh, (kv_head + 1) * group * s.dh);
-        read(Id::k, kv_head * s.dh, (kv_head + 1) * s.dh);
+        read(Id::q, kv_head * group * dh, (kv_head + 1) * group * dh);
+        read(Id::k, kv_head * dh, (kv_head + 1) * dh);
         for (Workspace kind : {Workspace::scores, Workspace::stats})
             result.writes.push_back({workspace(kind), first, first + group, produced});
         // Every task rotates its heads; chunk 0 stores rotated Q and the rotated
         // K row. The task whose chunk ends at the current position takes that
         // row from scratch, so no task reads the cache row during the token.
         if (chunk == 0) {
-            write(Id::q_rot, kv_head * group * s.dh, (kv_head + 1) * group * s.dh);
-            write(Id::K, kv_head * s.dh, (kv_head + 1) * s.dh, false);
+            write(Id::q_rot, kv_head * group * dh, (kv_head + 1) * group * dh);
+            write(Id::K, kv_head * dh, (kv_head + 1) * dh, false);
             outputs.push_back(
                 {{"tensor", tensor_index(Id::K)}, {"position", "current"}, {"head", kv_head}});
         }
@@ -308,67 +310,66 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
         if (chunk == 0) {
             result.fused_reads = result.reads;
             result.fused_reads.push_back(
-                {buffer(Id::V), kv_head * s.dh, (kv_head + 1) * s.dh, version(Id::V)});
+                {buffer(Id::V), kv_head * dh, (kv_head + 1) * dh, version(Id::V)});
             result.fused_writes.assign(result.writes.end() - 2, result.writes.end());
             result.fused_writes.push_back(
                 {workspace(Workspace::partials), first, first + group, produced});
         }
-        result.work = 2LL * std::min(s.steps, s.context) * s.dh * group;
+        result.work = 2LL * std::min(s.attention_chunk_steps, s.max_context) * dh * group;
     } else if (code == "attention_values") {
         result.record.opcode = Opcode::attention_values;
         const auto [kv_head, chunk, first] = attention_chunk(Workspace::partials, "partials");
         // The softmax combines every chunk's statistics for these heads.
-        for (int c = 0; c < s.chunks; ++c) {
-            const int heads = c * s.nq + kv_head * group;
+        for (int c = 0; c < s.attention_chunks; ++c) {
+            const int heads = c * s.query_heads + kv_head * group;
             result.reads.push_back({workspace(Workspace::stats), heads, heads + group, produced});
         }
         result.reads.push_back({workspace(Workspace::scores), first, first + group, produced});
-        read(Id::V, kv_head * s.dh, (kv_head + 1) * s.dh);
+        read(Id::V, kv_head * dh, (kv_head + 1) * dh);
         result.writes.push_back({workspace(Workspace::scores), first, first + group, produced});
         result.writes.push_back({workspace(Workspace::partials), first, first + group, produced});
         result.fused_differs = true; // nothing to do
-        result.work = 2LL * std::min(s.steps, s.context) * s.dh * group;
+        result.work = 2LL * std::min(s.attention_chunk_steps, s.max_context) * dh * group;
     } else if (code == "output_projection") {
         result.record.opcode = Opcode::output_projection;
-        const auto [begin, end] = rows(s.d);
+        const auto [begin, end] = rows(d);
         result.reads.push_back({workspace(Workspace::partials), 0, lanes, produced});
         read(Id::x, begin, end);
         write(Id::r, begin, end);
         // The task owning row 0 also stores the combined attention vector.
         if (begin == 0)
-            write(Id::attention, 0, s.d);
+            write(Id::attention, 0, d);
         result.fused_differs = true;
         result.fused_reads = result.reads;
-        result.fused_reads.front().end = s.nq; // chunk 0 only
+        result.fused_reads.front().end = s.query_heads; // chunk 0 only
         result.fused_writes = result.writes;
-        result.work = static_cast<std::int64_t>(end - begin) * s.d;
+        result.work = static_cast<std::int64_t>(end - begin) * d;
     } else if (code == "ffn") {
         // A product chunk's gate/up rows, then their FP32 down partial over
         // every output. The task reads back only its own product rows, which
         // ops::down_partial stages in the shared vector.
         result.record.opcode = Opcode::ffn;
-        const auto [begin, end] = rows(s.f);
-        const int chunk = index(op.at("chunk"), s.ffn);
+        const auto [begin, end] = rows(s.intermediate_size);
+        const int chunk = index(op.at("chunk"), s.ffn_chunks);
         expected["chunk"] = chunk;
         result.record.chunk = chunk;
         require(static_cast<std::int64_t>(end - begin) * (bf16 ? 2 : 4) <= kAttentionSharedBytes,
             "FFN chunk exceeds the compiled worker's shared memory");
-        read(Id::r, 0, s.d);
+        read(Id::r, 0, d);
         write(Id::product, begin, end);
-        result.writes.push_back({Buffers::ffn, chunk * s.d, (chunk + 1) * s.d, produced});
-        result.owned.push_back({layer * kLayerKeys + kFfnKey, chunk * s.d, (chunk + 1) * s.d});
+        result.writes.push_back({Buffers::ffn, chunk * d, (chunk + 1) * d, produced});
+        result.owned.push_back({layer * kLayerKeys + kFfnKey, chunk * d, (chunk + 1) * d});
         outputs.push_back({{"workspace", "ffn_partials"}, {"chunk", chunk}});
-        result.work = 3LL * (end - begin) * s.d;
+        result.work = 3LL * (end - begin) * d;
     } else if (code == "ffn_reduce") {
         // Rows of y: every chunk's partial for these rows, in chunk order.
         result.record.opcode = Opcode::ffn_reduce;
-        const auto [begin, end] = rows(s.d);
-        for (int chunk = 0; chunk < s.ffn; ++chunk)
-            result.reads.push_back(
-                {Buffers::ffn, chunk * s.d + begin, chunk * s.d + end, produced});
+        const auto [begin, end] = rows(d);
+        for (int chunk = 0; chunk < s.ffn_chunks; ++chunk)
+            result.reads.push_back({Buffers::ffn, chunk * d + begin, chunk * d + end, produced});
         read(Id::r, begin, end);
         write(Id::y, begin, end);
-        result.work = static_cast<std::int64_t>(end - begin) * s.ffn;
+        result.work = static_cast<std::int64_t>(end - begin) * s.ffn_chunks;
     } else {
         throw std::runtime_error("unsupported decoder opcode");
     }
@@ -400,7 +401,7 @@ void check_ownership(const Program& program, const std::vector<CheckedTask>& tas
     };
     constexpr std::array produced{
         Id::q, Id::k, Id::q_rot, Id::K, Id::V, Id::attention, Id::r, Id::product, Id::y};
-    const int lanes = program.s.chunks * program.s.nq;
+    const int lanes = program.s.attention_chunks * program.s.query_heads;
     for (int layer = 0; layer < program.layers; ++layer) {
         for (Id tensor : produced)
             covered(
@@ -408,7 +409,7 @@ void check_ownership(const Program& program, const std::vector<CheckedTask>& tas
         for (Workspace kind : {Workspace::scores, Workspace::partials})
             covered(layer * kLayerKeys + static_cast<int>(kTensorCount) + static_cast<int>(kind),
                 lanes);
-        covered(layer * kLayerKeys + kFfnKey, program.s.ffn * program.s.d);
+        covered(layer * kLayerKeys + kFfnKey, program.s.ffn_chunks * program.s.hidden_size);
     }
     for (Stage stage : {Stage::embedding, Stage::final_norm, Stage::logits, Stage::selection}) {
         if (program.full_stack)
@@ -431,18 +432,18 @@ class Dataflow
         const auto& s = program.s;
         cells_.resize(Buffers::kv + 2 * static_cast<std::size_t>(program.layers));
         // A block package receives h_0 as input; a stack writes it by embedding.
-        cells_[Buffers::hidden].assign(s.d, {program.full_stack ? -1 : 0});
-        cells_[Buffers::hidden + 1].assign(s.d, {-1});
+        cells_[Buffers::hidden].assign(s.hidden_size, {program.full_stack ? -1 : 0});
+        cells_[Buffers::hidden + 1].assign(s.hidden_size, {-1});
         for (std::size_t id = 0; id < kTensorCount; ++id)
             cells_[Buffers::scratch + id].assign(program.width(static_cast<Id>(id)), {});
         for (int kind = 0; kind < kWorkspaceCount; ++kind)
-            cells_[Buffers::workspace + kind].assign(s.chunks * s.nq, {});
-        cells_[Buffers::ffn].assign(static_cast<std::size_t>(s.ffn) * s.d, {});
+            cells_[Buffers::workspace + kind].assign(s.attention_chunks * s.query_heads, {});
+        cells_[Buffers::ffn].assign(static_cast<std::size_t>(s.ffn_chunks) * s.hidden_size, {});
         cells_[Buffers::logits].assign(program.vocab, {});
         cells_[Buffers::selection].assign(program.slots, {});
         for (int layer = 0; layer < program.layers; ++layer)
             for (int value = 0; value < 2; ++value)
-                cells_[Buffers::kv + 2 * layer + value].assign(s.nkv * s.dh, {});
+                cells_[Buffers::kv + 2 * layer + value].assign(s.kv_heads * s.head_dim, {});
     }
 
     void run_wave(
@@ -493,7 +494,7 @@ class Dataflow
 };
 } // namespace
 
-void validate_program(const json& document, const PlanShape& s, int workers, LoadedPlan& result)
+void validate_program(const json& document, const ModelShape& s, int workers, LoadedPlan& result)
 {
     const Program program{s, result.stack.layers, result.stack.vocab_size, result.selection_slots,
         result.stack.full_stack, result.weight_dtype == WeightDtype::bfloat16};
@@ -547,7 +548,7 @@ void validate_program(const json& document, const PlanShape& s, int workers, Loa
                     entry.at("workers").is_array() &&
                     entry.at("workers").size() == static_cast<std::size_t>(workers),
             "invalid wave workers");
-        const json expected_condition = {{"skip_up_to_length", s.fused}};
+        const json expected_condition = {{"skip_up_to_length", s.attention_fused_steps}};
         require(conditional(wave) ? entry.contains("conditional_barrier") &&
                                         entry.at("conditional_barrier") == expected_condition
                                   : !entry.contains("conditional_barrier"),
@@ -555,7 +556,7 @@ void validate_program(const json& document, const PlanShape& s, int workers, Loa
         TaskRecord barrier{};
         barrier.opcode = Opcode::barrier;
         barrier.layer = kNoLayer;
-        barrier.begin = conditional(wave) ? s.fused : 0;
+        barrier.begin = conditional(wave) ? s.attention_fused_steps : 0;
         std::vector<std::int64_t> loads(workers);
         std::vector<int> members;
         for (int worker = 0; worker < workers; ++worker) {

@@ -149,6 +149,22 @@ struct LayerLayout
     std::uint32_t Wdown;
 };
 
+// Model dimensions and the program's attention and FFN chunking, validated
+// by the loader and the same for every step of every launch.
+struct ModelShape
+{
+    int hidden_size;
+    int intermediate_size;
+    int query_heads;
+    int kv_heads;
+    int head_dim;
+    int max_context;
+    int attention_chunks;      // chunk tasks per K/V head in the program
+    int attention_chunk_steps; // most time steps one chunk task covers
+    int attention_fused_steps; // longest prefix that one fused task per K/V head handles
+    int ffn_chunks;            // FFN product chunks, each with one FP32 down partial
+};
+
 // Carries the model's normalization and rotary-position constants.
 struct NumericConfig
 {
@@ -220,16 +236,7 @@ struct Target
 struct LoadedPlan
 {
     WeightDtype weight_dtype;
-    int hidden_size;
-    int intermediate_size;
-    int query_heads;
-    int kv_heads;
-    int head_dim;
-    int max_context;
-    int attention_chunks;      // chunk tasks per K/V head in attention
-    int attention_chunk_steps; // most time steps one chunk task covers
-    int attention_fused_steps; // longest prefix one fused task per K/V head handles
-    int ffn_chunks;            // FFN tasks per layer, each with one FP32 down partial
+    ModelShape shape;
     int workers;
     NumericConfig numeric;
     StackConfig stack;

@@ -17,17 +17,8 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
     , streams(stream, pool, plan.streams.size(), cuda::no_init)
     , rotary_frequencies(stream, pool, plan.rotary_frequencies.size(), cuda::no_init)
     , layout(plan.layout)
-    , hidden_size(plan.hidden_size)
-    , intermediate_size(plan.intermediate_size)
-    , query_heads(plan.query_heads)
-    , kv_heads(plan.kv_heads)
-    , head_dim(plan.head_dim)
+    , shape(plan.shape)
     , workers(plan.workers)
-    , max_context(plan.max_context)
-    , attention_chunks(plan.attention_chunks)
-    , attention_chunk_steps(plan.attention_chunk_steps)
-    , attention_fused_steps(plan.attention_fused_steps)
-    , ffn_chunks(plan.ffn_chunks)
     , selection_slots(plan.selection_slots)
     , scratch_count(plan.scratch_bytes / element_bytes(plan.weight_dtype))
     , kv_count(plan.kv_bytes / element_bytes(plan.weight_dtype))
@@ -39,9 +30,9 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
 {
     for (const auto id : {TensorId::q, TensorId::k, TensorId::q_rot, TensorId::attention,
              TensorId::r, TensorId::product}) {
-        const std::size_t count = id == TensorId::product ? intermediate_size
-                                  : id == TensorId::k     ? kv_heads * head_dim
-                                                          : hidden_size;
+        const std::size_t count = id == TensorId::product ? shape.intermediate_size
+                                  : id == TensorId::k     ? shape.kv_heads * shape.head_dim
+                                                          : shape.hidden_size;
         scratch_regions.emplace_back(plan.tensors[tensor_index(id)].offset, count);
     }
     try {
@@ -59,9 +50,7 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
 WorkerProgramView UploadedPlan::view() const
 {
     return {instructions.data(), streams.data(), layout, weights.data(), rotary_frequencies.data(),
-        workers, hidden_size, intermediate_size, query_heads, kv_heads, head_dim, max_context,
-        attention_chunks, attention_chunk_steps, attention_fused_steps, ffn_chunks, selection_slots,
-        numeric, stack, weight_dtype};
+        shape, workers, selection_slots, numeric, stack, weight_dtype};
 }
 
 } // namespace tileinfer::detail

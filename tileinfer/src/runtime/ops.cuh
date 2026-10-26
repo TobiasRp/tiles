@@ -20,6 +20,7 @@
 
 #include <cub/warp/warp_reduce.cuh>
 
+#include <cstddef>
 #include <cuda/std/cmath>
 #include <cuda/std/cstdint>
 #include <cuda/std/limits>
@@ -56,7 +57,10 @@ __device__ inline Scalar* shared_vector(SharedStorage& shared)
 
 /// Model dimensions and FP32 constants, the same for every step of a launch.
 /// The position of the current step travels in Layer: a Shape copied per step
-/// lived in local memory, and every task read its fields from there.
+/// lived in local memory, and every task read its fields from there. The
+/// fields repeat ModelShape's flat: a nested ModelShape, as a base or a
+/// member, compiled to different worker code that was 3 to 10 us per token
+/// slower (exploratory). Build it with make_shape.
 struct Shape
 {
     int hidden_size;
@@ -65,13 +69,22 @@ struct Shape
     int kv_heads;
     int head_dim;
     int max_context;
-    int attention_chunks;      // chunk tasks per K/V head in the program
-    int attention_chunk_steps; // most time steps one chunk task covers
-    int attention_fused_steps; // longest prefix that one fused task per K/V head handles
-    int ffn_chunks;            // FFN product chunks, each with one FP32 down partial
+    int attention_chunks;
+    int attention_chunk_steps;
+    int attention_fused_steps;
+    int ffn_chunks;
     NumericConfig numeric;
     const float* rotary_frequencies;
 };
+static_assert(offsetof(Shape, numeric) == sizeof(ModelShape));
+
+inline Shape make_shape(
+    const ModelShape& model, const NumericConfig& numeric, const float* rotary_frequencies)
+{
+    return {model.hidden_size, model.intermediate_size, model.query_heads, model.kv_heads,
+        model.head_dim, model.max_context, model.attention_chunks, model.attention_chunk_steps,
+        model.attention_fused_steps, model.ffn_chunks, numeric, rotary_frequencies};
+}
 
 /// One layer's buffers, already offset to that layer, and the current position.
 template <typename Scalar>

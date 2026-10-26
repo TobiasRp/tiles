@@ -1,5 +1,5 @@
-#include "detail/activation_buffer.cuh"
 #include "detail/cleanup.hpp"
+#include "detail/context_buffers.cuh"
 #include "detail/cuda_check.hpp"
 #include "detail/uploaded_plan.cuh"
 #include "diagnostic.hpp"
@@ -48,15 +48,7 @@ struct DiagnosticContext::Impl
     detail::UploadedPlan model;
     cuda::stream stream{model.device};
     cuda::device_memory_pool_ref& pool = cuda::device_default_memory_pool(model.device);
-    detail::ActivationBuffer input;
-    detail::ActivationBuffer output;
-    detail::ActivationBuffer scratch;
-    detail::ActivationBuffer kv;
-    detail::ActivationBuffer attention_scores;
-    cuda::device_buffer<float> attention_partials;
-    cuda::device_buffer<float> logits;
-    cuda::device_buffer<Candidate> candidates;
-    std::optional<cuda::device_buffer<float>> block_trace;
+    detail::ContextBuffers buffers;
     cuda::device_buffer<float> ffn_trace;
     int position = 0;
     bool valid = true;
@@ -70,15 +62,8 @@ struct DiagnosticContext::Impl
 
     explicit Impl(const LoadedPlan& plan)
         : model(plan)
-        , input(stream, pool, model.hidden_size, model.weight_dtype)
-        , output(stream, pool, model.hidden_size, model.weight_dtype)
-        , scratch(stream, pool, model.scratch_count, model.weight_dtype)
-        , kv(stream, pool, model.kv_count, model.weight_dtype)
-        , attention_scores(stream, pool, model.attention_count, model.weight_dtype)
-        , attention_partials(stream, pool, model.partial_count, cuda::no_init)
-        , logits(stream, pool, std::max(1, model.stack.vocab_size), cuda::no_init)
-        , candidates(stream, pool, std::max(1, model.selection_slots), cuda::no_init)
-        , ffn_trace(stream, pool, model.hidden_size, cuda::no_init)
+        , buffers(stream, pool, model)
+        , ffn_trace(stream, pool, model.shape.hidden_size, cuda::no_init)
     {
         stream.sync();
     }
@@ -90,10 +75,10 @@ struct DiagnosticContext::Impl
 
     void launch(int position, TokenId token_id, std::uint64_t* timeline = nullptr)
     {
-        const detail::WorkerBuffers buffers{input.data(), output.data(), scratch.data(), kv.data(),
-            logits.data(), capture_blocks ? block_trace->data() : nullptr, attention_scores.data(),
-            attention_partials.data(), candidates.data(), ffn_trace.data(), timeline};
-        detail::enqueue_worker(stream, model.view(), buffers, position, {token_id, nullptr, 1});
+        detail::WorkerBuffers worker = buffers.worker_buffers(capture_blocks);
+        worker.ffn_trace = ffn_trace.data();
+        worker.timeline = timeline;
+        detail::enqueue_worker(stream, model.view(), worker, position, {token_id, nullptr, 1});
     }
 
     // Fills the visible prefix and warms up outside any timed region. Repeated
@@ -105,7 +90,7 @@ struct DiagnosticContext::Impl
     {
         if (!model.stack.full_stack)
             throw std::runtime_error("benchmark requires a decoder stack package");
-        if (position < 0 || position >= model.max_context || token_id < 0 ||
+        if (position < 0 || position >= model.shape.max_context || token_id < 0 ||
             token_id >= model.stack.vocab_size || warmup < 0)
             throw std::runtime_error("invalid benchmark arguments");
         if (this->position != 0 || !valid || in_flight)
@@ -117,11 +102,11 @@ struct DiagnosticContext::Impl
             const auto config = cuda::make_config(cuda::block_dims<256>(), cuda::grid_dims(1024));
             if (model.weight_dtype == WeightDtype::bfloat16)
                 cuda::launch(stream, config, fill_synthetic<__nv_bfloat16>,
-                    static_cast<__nv_bfloat16*>(kv.data()), kv.size());
+                    static_cast<__nv_bfloat16*>(buffers.kv.data()), buffers.kv.size());
             else
-                cuda::launch(stream, config, fill_synthetic<float>, static_cast<float*>(kv.data()),
-                    kv.size());
-            prefix = model.max_context;
+                cuda::launch(stream, config, fill_synthetic<float>,
+                    static_cast<float*>(buffers.kv.data()), buffers.kv.size());
+            prefix = model.shape.max_context;
         }
         for (int p = prefix; p < position; ++p)
             launch(p, token_id);
@@ -146,7 +131,7 @@ int DiagnosticContext::begin_token()
         throw std::runtime_error("sequence context is invalid; reset required");
     if (impl_->in_flight)
         throw std::runtime_error("sequence context already has an in-flight token");
-    if (impl_->position >= impl_->model.max_context)
+    if (impl_->position >= impl_->model.shape.max_context)
         throw std::runtime_error("sequence context capacity reached");
     impl_->in_flight = true;
     return impl_->position;
@@ -192,15 +177,15 @@ std::vector<float> DiagnosticContext::run_hidden(const std::vector<float>& hidde
 {
     if (impl_->model.stack.full_stack)
         throw std::runtime_error("stack package requires a token ID");
-    if (hidden.size() != static_cast<size_t>(impl_->model.hidden_size))
+    if (hidden.size() != static_cast<size_t>(impl_->model.shape.hidden_size))
         throw std::runtime_error("hidden input has wrong size");
-    std::vector<float> result(impl_->model.hidden_size);
+    std::vector<float> result(impl_->model.shape.hidden_size);
     const int p = begin_token();
     try {
-        impl_->input.upload(hidden);
+        impl_->buffers.input.upload(hidden);
         impl_->launch(p, -1);
         impl_->stream.sync();
-        impl_->output.copy_to(impl_->stream, result);
+        impl_->buffers.output.copy_to(impl_->stream, result);
         impl_->stream.sync();
         complete_token(true);
         return result;
@@ -222,7 +207,7 @@ std::vector<float> DiagnosticContext::run_token(TokenId token_id)
     try {
         impl_->launch(p, token_id);
         impl_->stream.sync();
-        cuda::copy_bytes(impl_->stream, impl_->logits, result);
+        cuda::copy_bytes(impl_->stream, impl_->buffers.logits, result);
         impl_->stream.sync();
         complete_token(true);
         return result;
@@ -259,7 +244,7 @@ BenchmarkResult DiagnosticContext::benchmark_token(
         if (profile)
             check(cudaProfilerStop(), "stop profiler");
         std::vector<float> logits(impl_->model.stack.vocab_size);
-        cuda::copy_bytes(impl_->stream, impl_->logits, logits);
+        cuda::copy_bytes(impl_->stream, impl_->buffers.logits, logits);
         impl_->stream.sync();
         const auto top = std::max_element(logits.begin(), logits.end());
         return {std::move(samples), static_cast<int>(top - logits.begin()), *top};
@@ -301,10 +286,7 @@ TimelineResult DiagnosticContext::timeline_token(
 
 void DiagnosticContext::enable_block_trace()
 {
-    if (!impl_->block_trace)
-        impl_->block_trace.emplace(impl_->stream, impl_->pool,
-            static_cast<std::size_t>(impl_->model.stack.layers) * impl_->model.hidden_size,
-            cuda::no_init);
+    impl_->buffers.enable_block_trace();
     impl_->capture_blocks = true;
 }
 
@@ -313,8 +295,8 @@ std::vector<float> DiagnosticContext::block_trace_snapshot() const
     if (!impl_->capture_blocks)
         throw std::runtime_error("block trace is not enabled");
     impl_->stream.sync();
-    std::vector<float> result(impl_->block_trace->size());
-    cuda::copy_bytes(impl_->stream, *impl_->block_trace, result);
+    std::vector<float> result(impl_->buffers.block_trace->size());
+    cuda::copy_bytes(impl_->stream, *impl_->buffers.block_trace, result);
     impl_->stream.sync();
     return result;
 }
@@ -322,13 +304,13 @@ std::vector<float> DiagnosticContext::block_trace_snapshot() const
 std::vector<float> DiagnosticContext::scratch_snapshot() const
 {
     impl_->stream.sync();
-    std::vector<float> result(impl_->scratch.size());
+    std::vector<float> result(impl_->buffers.scratch.size());
     // Copy only tensor payloads; alignment padding has no producer.
     const auto& model = impl_->model;
     // The validated scratch layout is retained on the host for exact slices.
     for (const auto& [offset, count] : model.scratch_regions) {
         cuda::device_buffer<float> widened(impl_->stream, impl_->pool, count, cuda::no_init);
-        const auto* source = static_cast<const std::uint8_t*>(impl_->scratch.data()) +
+        const auto* source = static_cast<const std::uint8_t*>(impl_->buffers.scratch.data()) +
                              offset * element_bytes(model.weight_dtype);
         detail::enqueue_widen(impl_->stream, source, widened.data(), count, model.weight_dtype);
         cuda::copy_bytes(
@@ -341,7 +323,7 @@ std::vector<float> DiagnosticContext::scratch_snapshot() const
 std::vector<float> DiagnosticContext::ffn_snapshot() const
 {
     impl_->stream.sync();
-    std::vector<float> result(impl_->model.hidden_size);
+    std::vector<float> result(impl_->model.shape.hidden_size);
     cuda::copy_bytes(impl_->stream, impl_->ffn_trace, result);
     impl_->stream.sync();
     return result;
@@ -350,12 +332,13 @@ std::vector<float> DiagnosticContext::ffn_snapshot() const
 std::vector<float> DiagnosticContext::kv_snapshot() const
 {
     impl_->stream.sync();
-    std::vector<float> result(impl_->kv.size());
-    detail::enqueue_zero_unused_kv(impl_->stream, impl_->kv.data(), impl_->model.weight_dtype,
-        impl_->model.kv_count, impl_->model.stack.layers, impl_->model.stack.layer_kv_stride,
-        impl_->model.kv_heads * impl_->model.head_dim, impl_->model.max_context, impl_->position,
-        nullptr);
-    impl_->kv.copy_to(impl_->stream, result);
+    std::vector<float> result(impl_->buffers.kv.size());
+    detail::enqueue_zero_unused_kv(impl_->stream, impl_->buffers.kv.data(),
+        impl_->model.weight_dtype, impl_->model.kv_count, impl_->model.stack.layers,
+        impl_->model.stack.layer_kv_stride,
+        impl_->model.shape.kv_heads * impl_->model.shape.head_dim, impl_->model.shape.max_context,
+        impl_->position, nullptr);
+    impl_->buffers.kv.copy_to(impl_->stream, result);
     impl_->stream.sync();
     return result;
 }

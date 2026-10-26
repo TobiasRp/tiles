@@ -21,7 +21,6 @@ struct Ticket::State
     enum class Kind
     {
         prefill,
-        decode,
         generate,
         reset,
     };

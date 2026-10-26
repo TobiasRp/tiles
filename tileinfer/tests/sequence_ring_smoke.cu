@@ -79,7 +79,7 @@ int main(int argc, char** argv)
         require(argc == 2, "expected stack package");
         const auto loaded = tileinfer::load_plan(argv[1], tileinfer::describe_target());
         const auto& plan = loaded;
-        require(plan.max_context >= 5, "ring test requires five-token capacity");
+        require(plan.shape.max_context >= 5, "ring test requires five-token capacity");
         tileinfer::DecoderModel model(loaded);
         auto queued = model.create_context();
         auto reference = model.create_context();
@@ -89,7 +89,8 @@ int main(int argc, char** argv)
         std::size_t remaining = capacity - 2;
         tileinfer::Ticket prefix;
         while (remaining != 0) {
-            const auto count = std::min(remaining, static_cast<std::size_t>(plan.max_context));
+            const auto count =
+                std::min(remaining, static_cast<std::size_t>(plan.shape.max_context));
             queued.enqueue_reset();
             const std::vector<tileinfer::TokenId> prompt(count, 0);
             prefix = queued.enqueue_prefill(prompt);

@@ -223,12 +223,9 @@ void enqueue_worker_typed(cuda::stream& stream, const WorkerProgramView& program
     const WorkerBuffers& buffers, int position, TokenInput token, Selection selection)
 {
     const Launch<Scalar> launch{program.instructions, program.streams, program.layout,
-        {program.hidden_size, program.intermediate_size, program.query_heads, program.kv_heads,
-            program.head_dim, program.max_context, program.attention_chunks,
-            program.attention_chunk_steps, program.attention_fused_steps, program.ffn_chunks,
-            program.numeric, program.rotary_frequencies},
-        program.stack, position, token.steps, token.immediate, token.ids, selection,
-        buffers.selection, program.selection_slots, static_cast<Scalar*>(buffers.input),
+        ops::make_shape(program.shape, program.numeric, program.rotary_frequencies), program.stack,
+        position, token.steps, token.immediate, token.ids, selection, buffers.selection,
+        program.selection_slots, static_cast<Scalar*>(buffers.input),
         static_cast<Scalar*>(buffers.output), static_cast<Scalar*>(buffers.scratch),
         static_cast<Scalar*>(buffers.kv), static_cast<const Scalar*>(program.weights),
         static_cast<Scalar*>(buffers.attention_scores), buffers.attention_partials, buffers.logits,

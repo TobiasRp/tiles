@@ -1,5 +1,5 @@
-#include "detail/activation_buffer.cuh"
 #include "detail/cleanup.hpp"
+#include "detail/context_buffers.cuh"
 #include "detail/cuda_check.hpp"
 #include "detail/input_ring_cursor.hpp"
 #include "detail/sequence_test_access.cuh"
@@ -44,15 +44,7 @@ struct SequenceContext::Impl
     std::shared_ptr<detail::UploadedPlan> model;
     cuda::stream stream;
     cuda::device_memory_pool_ref& pool;
-    detail::ActivationBuffer input;
-    detail::ActivationBuffer output;
-    detail::ActivationBuffer scratch;
-    detail::ActivationBuffer kv;
-    detail::ActivationBuffer attention_scores;
-    cuda::device_buffer<float> attention_partials;
-    cuda::device_buffer<float> logits;
-    cuda::device_buffer<Candidate> candidates; // the last token's greedy candidates
-    std::optional<cuda::device_buffer<float>> block_trace;
+    detail::ContextBuffers buffers;
     cuda::device_buffer<TokenId> tokens;
     cuda::device_buffer<TokenId> generated;
     cuda::device_buffer<int> status;
@@ -67,19 +59,12 @@ struct SequenceContext::Impl
         : model(std::move(value))
         , stream(model->device)
         , pool(cuda::device_default_memory_pool(model->device))
-        , input(stream, pool, model->hidden_size, model->weight_dtype)
-        , output(stream, pool, model->hidden_size, model->weight_dtype)
-        , scratch(stream, pool, model->scratch_count, model->weight_dtype)
-        , kv(stream, pool, model->kv_count, model->weight_dtype)
-        , attention_scores(stream, pool, model->attention_count, model->weight_dtype)
-        , attention_partials(stream, pool, model->partial_count, cuda::no_init)
-        , logits(stream, pool, model->stack.vocab_size, cuda::no_init)
-        , candidates(stream, pool, model->selection_slots, cuda::no_init)
-        , tokens(stream, pool, model->max_context, cuda::no_init)
-        , generated(stream, pool, model->max_context, cuda::no_init)
+        , buffers(stream, pool, *model)
+        , tokens(stream, pool, model->shape.max_context, cuda::no_init)
+        , generated(stream, pool, model->shape.max_context, cuda::no_init)
         , status(stream, pool, detail::kStatusWords, cuda::no_init)
         , input_ring(stream, cuda::pinned_default_memory_pool(),
-              input_ring_size(model->max_context), cuda::no_init)
+              input_ring_size(model->shape.max_context), cuda::no_init)
         , ring_cursor(input_ring.size())
     {
     }
@@ -143,7 +128,7 @@ struct SequenceContext::Impl
 
     void validate_capacity(int count) const
     {
-        if (count < 0 || count > model->max_context - queued_position)
+        if (count < 0 || count > model->shape.max_context - queued_position)
             throw std::runtime_error("sequence context capacity reached");
     }
 
@@ -153,16 +138,13 @@ struct SequenceContext::Impl
     void launch(int position, const TokenId* token_ids, int steps, bool trace,
         detail::Selection selection = {})
     {
-        if (trace && !block_trace)
-            block_trace.emplace(stream, pool,
-                static_cast<std::size_t>(model->stack.layers) * model->hidden_size, cuda::no_init);
-        const detail::WorkerBuffers buffers{input.data(), output.data(), scratch.data(), kv.data(),
-            logits.data(), trace ? block_trace->data() : nullptr, attention_scores.data(),
-            attention_partials.data(), candidates.data()};
+        if (trace)
+            buffers.enable_block_trace();
+        const detail::WorkerBuffers worker = buffers.worker_buffers(trace);
         for (int first = 0; first < steps; first += detail::kMaxLaunchSteps) {
             const int count = std::min(detail::kMaxLaunchSteps, steps - first);
             selection.first = first;
-            detail::enqueue_worker(stream, model->view(), buffers, position + first,
+            detail::enqueue_worker(stream, model->view(), worker, position + first,
                 {-1, token_ids == nullptr ? nullptr : token_ids + first, count}, selection);
         }
     }
@@ -227,24 +209,24 @@ struct SequenceContext::Impl
         if (request.logits) {
             auto& host = ticket->diagnostic->logits.emplace(
                 stream, cuda::pinned_default_memory_pool(), model->stack.vocab_size, cuda::no_init);
-            cuda::copy_bytes(stream, logits, host);
+            cuda::copy_bytes(stream, buffers.logits, host);
         }
         if (request.kv) {
             auto& host = ticket->diagnostic->kv.emplace(
                 stream, cuda::pinned_default_memory_pool(), model->kv_count, cuda::no_init);
             const auto& generation = ticket->generation;
-            detail::enqueue_zero_unused_kv(stream, kv.data(), model->weight_dtype, model->kv_count,
-                model->stack.layers, model->stack.layer_kv_stride,
-                model->kv_heads * model->head_dim, model->max_context,
+            detail::enqueue_zero_unused_kv(stream, buffers.kv.data(), model->weight_dtype,
+                model->kv_count, model->stack.layers, model->stack.layer_kv_stride,
+                model->shape.kv_heads * model->shape.head_dim, model->shape.max_context,
                 generation ? generation->start_position : ticket->end_position,
                 generation ? status.data() : nullptr);
-            kv.copy_to(stream, host);
+            buffers.kv.copy_to(stream, host);
         }
         if (request.block_outputs) {
             auto& host =
                 ticket->diagnostic->blocks.emplace(stream, cuda::pinned_default_memory_pool(),
-                    model->stack.layers * model->hidden_size, cuda::no_init);
-            cuda::copy_bytes(stream, *block_trace, host);
+                    model->stack.layers * model->shape.hidden_size, cuda::no_init);
+            cuda::copy_bytes(stream, *buffers.block_trace, host);
         }
         check(cudaEventRecord(ticket->event, stream.get()), "record ticket");
         ticket->recorded = true;
@@ -276,7 +258,8 @@ Ticket SequenceContext::enqueue_prefill(
     impl_->require_ready();
     if (token_ids.empty())
         throw std::runtime_error("prefill requires at least one token");
-    if (token_ids.size() > static_cast<std::size_t>(impl_->model->max_context))
+    // Guards the int conversion below; validate_capacity checks the free space.
+    if (token_ids.size() > static_cast<std::size_t>(impl_->model->shape.max_context))
         throw std::runtime_error("sequence context capacity reached");
     impl_->validate_capacity(static_cast<int>(token_ids.size()));
     for (const TokenId id : token_ids)
@@ -306,25 +289,7 @@ Ticket SequenceContext::enqueue_prefill(
 
 Ticket SequenceContext::enqueue_decode(TokenId token_id, DiagnosticRequest diagnostics)
 {
-    impl_->require_ready();
-    impl_->validate_token(token_id);
-    impl_->validate_capacity(1);
-    auto ticket = impl_->new_ticket(Ticket::State::Kind::decode);
-    const int start_position = impl_->queued_position;
-    ticket->end_position = start_position + 1;
-    const std::size_t begin = impl_->reserve_input(ticket, 1);
-    try {
-        impl_->input_ring.data()[begin] = token_id;
-        impl_->copy_input(begin, 1);
-        impl_->launch(start_position, impl_->tokens.data(), 1, diagnostics.block_outputs);
-        impl_->finish_ticket(ticket, diagnostics);
-        impl_->queued_position = ticket->end_position;
-    } catch (...) {
-        impl_->valid = false;
-        detail::cleanup_noexcept([&] { impl_->failed_input_enqueue(ticket); });
-        throw;
-    }
-    return Ticket(std::move(ticket));
+    return enqueue_prefill(std::span(&token_id, 1), diagnostics);
 }
 
 Ticket SequenceContext::enqueue_generate(GenerateOptions options, DiagnosticRequest diagnostics)

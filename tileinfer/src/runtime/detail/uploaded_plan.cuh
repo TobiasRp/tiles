@@ -29,17 +29,8 @@ class UploadedPlan
     cuda::device_buffer<WorkerTaskRange> streams;
     cuda::device_buffer<float> rotary_frequencies;
     LayerLayout layout;
-    int hidden_size;
-    int intermediate_size;
-    int query_heads;
-    int kv_heads;
-    int head_dim;
+    ModelShape shape;
     int workers;
-    int max_context;
-    int attention_chunks;
-    int attention_chunk_steps;
-    int attention_fused_steps;
-    int ffn_chunks;
     int selection_slots;
     std::size_t scratch_count;
     std::size_t kv_count;

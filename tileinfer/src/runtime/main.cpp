@@ -61,8 +61,9 @@ json precision(const tileinfer::LoadedPlan& plan)
 
 json inspect(const tileinfer::LoadedPlan& plan)
 {
+    const auto& shape = plan.shape;
     const std::uint64_t hidden_buffers =
-        2ull * plan.hidden_size * tileinfer::element_bytes(plan.weight_dtype);
+        2ull * shape.hidden_size * tileinfer::element_bytes(plan.weight_dtype);
     const std::uint64_t logits_bytes =
         static_cast<std::uint64_t>(plan.stack.vocab_size) * sizeof(float);
     const std::uint64_t program_bytes = plan.instructions.size() * sizeof(tileinfer::TaskRecord) +
@@ -70,7 +71,7 @@ json inspect(const tileinfer::LoadedPlan& plan)
                                         plan.rotary_frequencies.size() * sizeof(float);
     const std::uint64_t token_bytes =
         plan.stack.full_stack
-            ? 2ull * plan.max_context * sizeof(tileinfer::TokenId) + 2 * sizeof(int)
+            ? 2ull * shape.max_context * sizeof(tileinfer::TokenId) + 2 * sizeof(int)
             : 0;
     const json memory = {{"hidden_buffers_bytes", hidden_buffers},
         {"logits_buffer_bytes", logits_bytes}, {"program_bytes", program_bytes},
@@ -86,13 +87,13 @@ json inspect(const tileinfer::LoadedPlan& plan)
     return {{"plan_sha256", plan.plan_sha256}, {"weights_sha256", plan.weights_sha256},
         {"memory", memory},
         {"model",
-            {{"hidden_size", plan.hidden_size}, {"intermediate_size", plan.intermediate_size},
-                {"num_attention_heads", plan.query_heads}, {"num_key_value_heads", plan.kv_heads},
-                {"head_dim", plan.head_dim}, {"max_context", plan.max_context},
-                {"attention_chunks", plan.attention_chunks},
-                {"attention_chunk_steps", plan.attention_chunk_steps},
-                {"attention_fused_steps", plan.attention_fused_steps},
-                {"ffn_chunks", plan.ffn_chunks}}},
+            {{"hidden_size", shape.hidden_size}, {"intermediate_size", shape.intermediate_size},
+                {"num_attention_heads", shape.query_heads}, {"num_key_value_heads", shape.kv_heads},
+                {"head_dim", shape.head_dim}, {"max_context", shape.max_context},
+                {"attention_chunks", shape.attention_chunks},
+                {"attention_chunk_steps", shape.attention_chunk_steps},
+                {"attention_fused_steps", shape.attention_fused_steps},
+                {"ffn_chunks", shape.ffn_chunks}}},
         {"workers", plan.workers}, {"wave_count", plan.wave_count}, {"task_count", plan.task_count},
         {"instruction_count", plan.instructions.size()}, {"worker_loads", plan.worker_loads},
         {"scratch_bytes", plan.scratch_bytes}, {"attention_bytes", plan.attention_bytes},
@@ -147,18 +148,19 @@ json run_block(const tileinfer::LoadedPlan& plan, const std::string& input_path)
             return std::vector<float>(scratch.begin() + offset, scratch.begin() + offset + count);
         };
         using tileinfer::TensorId;
-        const int kv_width = plan.kv_heads * plan.head_dim;
+        const int kv_width = plan.shape.kv_heads * plan.shape.head_dim;
         const int p = context.position() - 1;
         const auto key_offset = plan.layout.key + p * kv_width;
         const auto value_offset = plan.layout.value + p * kv_width;
         const std::vector<float> key(kv.begin() + key_offset, kv.begin() + key_offset + kv_width);
         const std::vector<float> value(
             kv.begin() + value_offset, kv.begin() + value_offset + kv_width);
-        auto residual = segment(TensorId::r, plan.hidden_size);
+        auto residual = segment(TensorId::r, plan.shape.hidden_size);
         const auto ffn = context.ffn_snapshot();
-        steps.push_back({{"position", p}, {"q", segment(TensorId::q_rot, plan.hidden_size)},
-            {"k", key}, {"v", value}, {"attention", segment(TensorId::attention, plan.hidden_size)},
-            {"attn_residual", residual}, {"ffn", ffn}, {"y", output}});
+        steps.push_back(
+            {{"position", p}, {"q", segment(TensorId::q_rot, plan.shape.hidden_size)}, {"k", key},
+                {"v", value}, {"attention", segment(TensorId::attention, plan.shape.hidden_size)},
+                {"attn_residual", residual}, {"ffn", ffn}, {"y", output}});
     }
     return {{"steps", steps}, {"position", context.position()}, {"valid", context.valid()}};
 }
@@ -177,7 +179,7 @@ json run_stack(
     auto context = model.create_context();
     const bool trace_blocks = trace_override || request.value("trace_blocks", false);
     json steps = json::array();
-    const int width = plan.kv_heads * plan.head_dim;
+    const int width = plan.shape.kv_heads * plan.shape.head_dim;
     int final_position = 0;
     for (const auto& item : request.at("tokens")) {
         if (item.is_object() && item.value("reset", false)) {
@@ -209,8 +211,8 @@ json run_stack(
             const auto& hidden = snapshot.block_outputs;
             json blocks = json::array();
             for (int layer = 0; layer < plan.stack.layers; ++layer) {
-                const auto begin = hidden.begin() + layer * plan.hidden_size;
-                blocks.push_back(std::vector<float>(begin, begin + plan.hidden_size));
+                const auto begin = hidden.begin() + layer * plan.shape.hidden_size;
+                blocks.push_back(std::vector<float>(begin, begin + plan.shape.hidden_size));
             }
             step["blocks"] = std::move(blocks);
         }
@@ -225,7 +227,7 @@ void state_smoke(const tileinfer::LoadedPlan& plan)
     tileinfer::DiagnosticContext context(plan);
     if (context.position() != 0 || !context.valid())
         throw std::runtime_error("bad new context state");
-    for (int position = 0; position < plan.max_context; ++position) {
+    for (int position = 0; position < plan.shape.max_context; ++position) {
         if (context.begin_token() != position)
             throw std::runtime_error("bad token position");
         context.complete_token(true);
@@ -411,8 +413,8 @@ json generate(const tileinfer::LoadedPlan& plan, const std::string& input_path, 
     std::optional<tileinfer::TokenId> eos_id)
 {
     const auto prompt = read_prompt(input_path);
-    if (prompt.size() > static_cast<std::size_t>(plan.max_context) || max_new_tokens <= 0 ||
-        max_new_tokens > plan.max_context - static_cast<int>(prompt.size()))
+    if (prompt.size() > static_cast<std::size_t>(plan.shape.max_context) || max_new_tokens <= 0 ||
+        max_new_tokens > plan.shape.max_context - static_cast<int>(prompt.size()))
         throw std::runtime_error("generation exceeds context capacity");
     tileinfer::DecoderModel model(plan);
     auto context = model.create_context();
@@ -432,8 +434,8 @@ json bench(const tileinfer::LoadedPlan& plan, const std::string& input_path, int
     if (warmup < 0 || rounds <= 0)
         throw std::runtime_error("invalid benchmark rounds");
     const auto prompt = read_prompt(input_path);
-    if (prompt.size() > static_cast<std::size_t>(plan.max_context) || new_tokens <= 0 ||
-        new_tokens > plan.max_context - static_cast<int>(prompt.size()))
+    if (prompt.size() > static_cast<std::size_t>(plan.shape.max_context) || new_tokens <= 0 ||
+        new_tokens > plan.shape.max_context - static_cast<int>(prompt.size()))
         throw std::runtime_error("benchmark exceeds context capacity");
     tileinfer::DecoderModel model(plan);
     auto context = model.create_context();
