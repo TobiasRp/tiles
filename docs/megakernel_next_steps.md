@@ -102,6 +102,17 @@ both sides of each barrier are already balanced, so a wait only replaces a
 barrier's latency with a counter's. Phases 2 to 4 (counters, Wo split by
 K/V group) are not built ([Section 18](#18-s4-phase-0b-probe-counters-around-attention)).
 
+**Progress, 2026-10-26: S4 is closed.** It delivered the fused FFN (−70 µs
+per token, controlled) and two probes; the optional items (a probe of the
+FFN reduction wave, Wo prefetch during fused attention, the `lm_head` ring,
+16-byte loads, the dynamic-queue ablation, a locked-clock rerun) are not
+done. TileInfer stands at 12.114 ms at context 1, 0.50 ms above the
+11.61 ms floor, 5.7% faster than CUDA Graph replay (12.840 ms) and 11% faster
+than llama.cpp (13.68 ms); 12.979 ms at 4K. Review findings 3 and 4 are
+closed ([Section 3](#3-is-a-codearchitecture-cleanup-needed)). S5 and S6
+remain. [The S2b-to-S4 post](blog/s2b-to-s4-2026-10.md) summarizes the four
+milestones.
+
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
 measured, explained advantage over PyTorch CUDA Graph replay on the same
@@ -304,7 +315,11 @@ matters is the cleanup that unblocks scheduling work.
   moves into the worker in S5. Design the device error status then.
 - Review finding 3 (throwing destructors). This is a small fix. Do it before
   adding spin-wait code, because a hung or failed kernel must produce a
-  clean error.
+  clean error. *Closed (checked 2026-10-26): every runtime destructor is
+  non-throwing. The context destructors synchronize through
+  `cleanup_noexcept`, the ticket state calls only the CUDA C API, and the
+  CCCL streams and buffers the members hold destroy and deallocate without
+  throwing (the CCCL 13.4 headers ignore those errors by design).*
 - Rename `Range` to `WorkerTaskRange`, or retire it with the v5 program.
 
 ### Defer (not on the per-token critical path)
@@ -314,7 +329,12 @@ matters is the cleanup that unblocks scheduling work.
   request with no per-token host work, so host enqueue cost cannot affect
   ms/token. Do it when serving or streaming becomes a goal.
 - Review finding 4 (dropped EOS ticket). This is an API lifecycle issue,
-  unrelated to the megakernel claim.
+  unrelated to the megakernel claim. *Fixed 2026-10-26: a generation with
+  EOS left its final position unknown until its ticket was waited on, and
+  every later request, reset included, threw until then, so a dropped ticket
+  made the context unusable. A later request now waits for that generation
+  and continues at the position it stopped at; a reset discards it.
+  `sequence_context_smoke` covers both.*
 
 ## 4. Scheduling direction
 
@@ -417,7 +437,8 @@ re-planned instead of built.
 Order after the re-plan of 2026-10-25: S0, S1, S2 (done) → S3 (probed, not
 built) → S2b attention at the right parallelism (done) → S6a controlled
 measurement protocol (done) → S2c balanced QKV (done first, 2026-10-26) →
-**S4** fewer wave boundaries → S5 one launch per request → S6 showcase.
+S4 fewer wave boundaries (closed: fused FFN built, counters probed and not
+built) → **S5** one launch per request → S6 showcase.
 
 ### S0 — Baseline and instruments (no kernel behavior change) — done
 
@@ -655,7 +676,16 @@ once more. Moving the work out of the head task removes both.
 the 138 µs of waiting for the last worker, minus what the attention task
 gains.
 
-### S4 — Fewer wave boundaries: fused FFN, split-K, dataflow counters
+### S4 — Fewer wave boundaries: fused FFN, split-K, dataflow counters — closed
+
+*Closed 2026-10-26.* The fused FFN with split-K down partials is built
+(format 9, −70 µs per token under the S6a protocol;
+[Section 17](#17-s4-phase-1-results-the-fused-ffn)). Counter waits around
+attention failed their probe gate, so the counter executor and the Wo
+split by K/V group are not built
+([Section 18](#18-s4-phase-0b-probe-counters-around-attention)). The
+optional items below were skipped. The plan as written follows.
+
 
 *Re-scoped 2026-10-25* ([Section 13](#13-the-re-plan-after-s2b)). The S3
 probe split S2's 0.72 ms of GEMV excess at context 1 into about 0.32 ms of
@@ -1802,8 +1832,14 @@ runs are usable on this machine if the first blocks are warm.
 
 ### Open
 
-- The spawn-order bias (1 to 8 µs) is not explained.
-- The PCIe 2.0 ×1 link is worth checking in hardware (slot or riser).
+- The spawn-order bias (1 to 8 µs) is not explained. Every comparison since
+  runs both spawn orders, which cancels it; it is left as a property of the
+  protocol.
+- The PCIe link negotiates Gen 2 ×1 (`nvidia-smi`, 2026-10-26: current and
+  maximum Gen 2, width 1 of 16), while the GPU supports Gen 4 and the host
+  Gen 3. A width of 1 points to a ×1-wired slot or a riser; moving the card
+  to the CPU's ×16 slot is a hardware change. Decode does not depend on it,
+  only package uploads (6.5 s per process).
 
 
 ## 16. S4 probe: the fused FFN
@@ -2029,7 +2065,9 @@ decoder's own trace for the same phase, not from a reimplementation.
 - The reduction wave (52 µs per token) is the next FFN target: a counter
   wait could replace its barrier (Phase 2), or the next QKV could take the
   partials directly, which the probe priced at 4.6 µs per layer and is worse.
-- Run the comparison with locked clocks when `sudo` is available.
+  Not pursued: S4 closed without it.
+- Run the comparison with locked clocks when `sudo` is available. Not done;
+  Section 15 found warm unlocked runs within the protocol's resolution.
 
 ## 18. S4 Phase 0b probe: counters around attention
 
