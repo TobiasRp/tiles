@@ -74,7 +74,7 @@ struct DiagnosticContext::Impl
         , scratch(stream, pool, model.scratch_count, model.weight_dtype)
         , kv(stream, pool, model.kv_count, model.weight_dtype)
         , attention_scores(stream, pool, model.attention_count, model.weight_dtype)
-        , attention_partials(stream, pool, model.attention_partial_count, cuda::no_init)
+        , attention_partials(stream, pool, model.partial_count, cuda::no_init)
         , logits(stream, pool, std::max(1, model.stack.vocab_size), cuda::no_init)
         , ffn_trace(stream, pool, model.hidden_size, cuda::no_init)
     {

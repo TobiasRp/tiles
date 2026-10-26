@@ -39,10 +39,11 @@ class UploadedPlan
     int attention_chunks;
     int attention_chunk_steps;
     int attention_fused_steps;
+    int ffn_chunks;
     std::size_t scratch_count;
     std::size_t kv_count;
-    std::size_t attention_count;         // scores workspace elements
-    std::size_t attention_partial_count; // FP32 partials and statistics
+    std::size_t attention_count; // scores workspace elements
+    std::size_t partial_count;   // FP32 attention partials and statistics, then FFN down partials
     std::vector<std::pair<std::size_t, std::size_t>> scratch_regions;
     NumericConfig numeric;
     StackConfig stack;

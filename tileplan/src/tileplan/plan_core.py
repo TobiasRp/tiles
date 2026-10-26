@@ -24,8 +24,8 @@ import torch
 from .decoder_reference import WEIGHT_SHAPES, DecoderSpec
 from .probe import ABI
 
-FORMAT = 8
-GENERATOR = "tileplan-decoder-0.8"
+FORMAT = 9
+GENERATOR = "tileplan-decoder-0.9"
 WEIGHT_DTYPES = {"float32": 4, "bfloat16": 2}
 # Weights keep this order inside each layer's block of weights.bin.
 TENSOR_NAMES = (
@@ -162,6 +162,10 @@ def _strides(shape: tuple[int, ...]) -> list[int]:
 
 
 def tensor_shape(spec: DecoderSpec, name: str) -> tuple[int, ...]:
+    """A tensor's shape in the package. Wdown is stored transposed, [f, d], so
+    the FFN task of a product chunk reads that chunk's columns contiguously."""
+    if name == "Wdown":
+        return (spec.intermediate_size, spec.hidden_size)
     if name in WEIGHT_SHAPES:
         return WEIGHT_SHAPES[name](spec)
     if name in ("x", "q", "q_rot", "attention", "r", "y"):
@@ -173,6 +177,11 @@ def tensor_shape(spec: DecoderSpec, name: str) -> tuple[int, ...]:
     if name in ("K", "V"):
         return (1, spec.max_context, spec.num_key_value_heads, spec.head_dim)
     raise ValueError(f"unknown tensor {name}")
+
+
+def source_shape(spec: DecoderSpec, name: str) -> tuple[int, ...]:
+    """A weight's shape as the reference and checkpoints hold it."""
+    return WEIGHT_SHAPES[name](spec)
 
 
 def _storage_class(name: str) -> str:
@@ -247,11 +256,13 @@ def pack_array(value: np.ndarray, dtype: str) -> bytes:
 def pack_weights(
     spec: DecoderSpec, weights: dict[str, np.ndarray], dtype: str
 ) -> bytes:
-    """One layer's weights, laid out as ``regions(spec, WEIGHTS, 64, ...)``."""
+    """One layer's weights in ``source_shape``, laid out as
+    ``regions(spec, WEIGHTS, 64, ...)``; Wdown is stored transposed."""
     entries, size = regions(spec, WEIGHTS, 64, weight_size(dtype))
     packed = bytearray(size)
     for entry, name in zip(entries, WEIGHTS, strict=True):
-        raw = pack_array(weights[name], dtype)
+        value = weights[name].T if name == "Wdown" else weights[name]
+        raw = pack_array(value, dtype)
         packed[entry["offset"] : entry["offset"] + entry["bytes"]] = raw
     return bytes(packed)
 
@@ -269,6 +280,11 @@ def _split(rows: int, parts: int) -> list[tuple[int, int]]:
     return [(i * rows // count, (i + 1) * rows // count) for i in range(count)]
 
 
+def ffn_chunks(spec: DecoderSpec, workers: int) -> int:
+    """FFN tasks per layer, one product chunk each: one per worker."""
+    return len(_split(spec.intermediate_size, workers))
+
+
 def _graph(spec: DecoderSpec, workers: int, chunking: dict, dtype: str) -> list[dict]:
     """One layer's tasks with their minimal data dependencies.
 
@@ -277,7 +293,9 @@ def _graph(spec: DecoderSpec, workers: int, chunking: dict, dtype: str) -> list[
     store Q and K unrotated; the attention task of each K/V head applies RoPE,
     and its chunk-0 task stores rotated Q and the rotated K cache row.
     Attention splits every K/V head's context into chunks of at most
-    ``attention_chunk_steps`` time steps.
+    ``attention_chunk_steps`` time steps. Each FFN task computes one product
+    chunk and that chunk's FP32 down partial over all outputs; after a
+    barrier, reduce tasks sum the partials in chunk order into rows of ``y``.
     """
     d, f, dh = spec.hidden_size, spec.intermediate_size, spec.head_dim
     nq, nkv = spec.num_attention_heads, spec.num_key_value_heads
@@ -379,21 +397,24 @@ def _graph(spec: DecoderSpec, workers: int, chunking: dict, dtype: str) -> list[
     ]
     product = [
         add(
-            "gate_up",
-            {"rows": [begin, end]},
-            [rows("product", begin, end)],
+            "ffn",
+            {"rows": [begin, end], "chunk": chunk},
+            [
+                rows("product", begin, end),
+                {"workspace": "ffn_partials", "chunk": chunk},
+            ],
             attention,
-            2 * (end - begin) * d,
+            3 * (end - begin) * d,
         )
-        for begin, end in _split(f, workers)
+        for chunk, (begin, end) in enumerate(_split(f, workers))
     ]
     for begin, end in _split(d, workers):
         add(
-            "down",
+            "ffn_reduce",
             {"rows": [begin, end]},
             [rows("y", begin, end)],
             product,
-            (end - begin) * f,
+            (end - begin) * len(product),
         )
     return tasks
 
@@ -456,7 +477,9 @@ def _program(
             )
             tasks.append(repeated)
         previous = [
-            task["id"] for task in tasks[offset:] if task["opcode"].startswith("down")
+            task["id"]
+            for task in tasks[offset:]
+            if task["opcode"].startswith("ffn_reduce")
         ]
     if vocab_size is not None:
         normalized = stage(
@@ -605,14 +628,15 @@ def validate_target(target: dict) -> None:
 
 
 def model_section(
-    model_fields: dict, block: DecoderSpec, dtype: str, chunking: dict
+    model_fields: dict, block: DecoderSpec, dtype: str, chunking: dict, workers: int
 ) -> dict:
     """Model fields (without the reference dtype) plus policy, attention
-    chunking, and tensors."""
+    chunking, FFN chunks, and tensors."""
     return {
         **{key: value for key, value in model_fields.items() if key != "dtype"},
         **numeric_policy(dtype),
         **chunking,
+        "ffn_chunks": ffn_chunks(block, workers),
         "tensors": descriptors(block, dtype),
     }
 
@@ -621,6 +645,7 @@ def storage_section(
     block: DecoderSpec,
     dtype: str,
     chunks: int,
+    workers: int,
     layers: int,
     input_bytes: int,
     output_bytes: int,
@@ -642,6 +667,8 @@ def storage_section(
         * block.num_attention_heads
         * (block.head_dim + 2)
         * 4,
+        # FP32 down partials of every FFN chunk, [ffn_chunks, hidden].
+        "ffn_partial_bytes": ffn_chunks(block, workers) * block.hidden_size * 4,
         "scratch": scratch,
         "kv_bytes": layer_kv_bytes * layers,
         "kv": kv,

@@ -57,22 +57,26 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
     for dtype in (torch.float32, torch.bfloat16):
         label = "bfloat16" if dtype == torch.bfloat16 else "float32"
 
-        # Down projection: rows of W @ product plus the residual, with row and K tails.
+        # Down projection: rows of W @ product plus the residual, with row and K
+        # tails, through the FFN's split-K path (ops_unit.cu split_down). A
+        # thread owns two adjacent rows, so the hidden size is even, as the
+        # loader requires.
         for rows, width in (
-            (1, 1),
-            (7, 15),
-            (17, 33),
-            (65, 93),
-            (41, 320),
-            (35, 2048),
-            (19, 8192),
+            (2, 1),
+            (8, 15),
+            (18, 33),
+            (66, 93),
+            (42, 320),
+            (36, 2048),
+            (20, 8192),
         ):
             product, w, residual = (
                 random(width, dtype=dtype),
                 random(rows, width, dtype=dtype),
                 random(rows, dtype=dtype),
             )
-            for with_residual in (False, True):
+            # Two chunks keep the widest FP32 chunk within the shared vector.
+            for with_residual, ffn_chunks in ((False, 2), (True, 3), (True, 20)):
                 r = residual if with_residual else torch.zeros_like(residual)
                 begin, end = (1, rows - 1) if rows > 2 else (0, rows)
                 add(
@@ -81,6 +85,7 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
                         "dtype": label,
                         "hidden": rows,
                         "intermediate": width,
+                        "ffn_chunks": ffn_chunks,
                         "product": raw(product),
                         "Wdown": raw(w),
                         "r": raw(r),
@@ -300,6 +305,46 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
                 owned(f, begin, end, product, dtype),
             )
 
+        # Whole FFN tasks: each chunk's gate/up rows and down partial, then the
+        # reduction plus the residual.
+        for d, f, ffn_chunks in (
+            (10, 7, 3),
+            (64, 93, 5),
+            (64, 2048, 20),
+            (2048, 64, 20),
+        ):
+            r, scale = random(d, dtype=dtype), random(d, dtype=dtype)
+            gate, up = random(f, d, dtype=dtype) / 8, random(f, d, dtype=dtype) / 8
+            down = random(d, f, dtype=dtype) / 8
+            z = norm(r, scale)
+            product = F.silu(F.linear(z, gate)) * F.linear(z, up)
+            begin, end = (1, d - 1) if d > 2 else (0, d)
+            add(
+                {
+                    "op": "ffn",
+                    "dtype": label,
+                    "hidden": d,
+                    "intermediate": f,
+                    "ffn_chunks": ffn_chunks,
+                    "r": raw(r),
+                    "ffn_norm": raw(scale),
+                    "Wgate": raw(gate),
+                    "Wup": raw(up),
+                    "Wdown": raw(down),
+                    "begin": begin,
+                    "end": end,
+                },
+                "y",
+                owned(d, begin, end, F.linear(product, down) + r, dtype),
+                # The product buffer holds max(d, f) elements; the rest keep the sentinel.
+                {
+                    "buffer": "product",
+                    "expected": owned(
+                        max(d, f), 0, f, F.pad(product, (0, max(d - f, 0))), dtype
+                    ),
+                },
+            )
+
         if dtype == torch.bfloat16:
             # Sixteen 2048-wide norms must match PyTorch bit for bit.
             for _ in range(16):
@@ -322,15 +367,15 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
                     {
                         "op": "down",
                         "dtype": label,
-                        "hidden": 1,
+                        "hidden": 2,
                         "intermediate": 2,
                         "product": [1.0, 1.0],
-                        "Wdown": [sign, sign / 256],
-                        "r": [sign / 256],
+                        "Wdown": [sign, sign / 256] * 2,
+                        "r": [sign / 256] * 2,
                         "exact": True,
                     },
                     "y",
-                    torch.tensor([sign]),
+                    torch.tensor([sign] * 2),
                 )
         add(
             {

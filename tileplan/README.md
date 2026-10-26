@@ -7,10 +7,13 @@ schedule over logical workers, tensor layout, and packed float32 or BF16
 weights. Each layer has six task waves: the [Q; K; V] projection (with its
 RMSNorm fused in; Q and K stay unrotated, V goes to the cache); attention
 scores and attention values per K/V head and context chunk, where the scores
-task applies RoPE and chunk 0 writes the rotated K cache row; and the output,
-gate/up (with SiLU·up) and down projections. Every projection splits its rows
-into one range per worker. `visualize` draws one layer of that program.
-Version-8 packages
+task applies RoPE and chunk 0 writes the rotated K cache row; the output
+projection; one FFN task per product chunk, which computes its gate/up rows
+(with SiLU·up) and that chunk's FP32 down partial; and the FFN reduction,
+which sums the partials in chunk order into rows of the layer output. Every
+projection splits its rows into one range per worker, and `Wdown` is stored
+transposed so a chunk's rows are contiguous. `visualize` draws one layer of
+that program. Version-9 packages
 use the same storage dtype for weights, activations, and K/V, with float32
 accumulation and selected float32 internal math. Python validates graph
 dependencies and planning metadata; [TileInfer](../tileinfer/README.md) checks

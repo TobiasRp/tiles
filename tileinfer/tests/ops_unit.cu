@@ -4,7 +4,8 @@
 //
 // Each case names an operator, its dimensions and any input buffers. Missing
 // inputs are zero; outputs start at -123 so writes outside a task's rows show
-// up. The result lists every buffer after the operator ran.
+// up. The result lists every buffer after the operator ran. Cases give Wdown
+// as [hidden, intermediate]; it is stored transposed, as in a package.
 
 #include "ops.cuh"
 
@@ -35,10 +36,31 @@ enum Operator
     attention,
     gate_up,
     down,
+    ffn,
     embedding,
     final_norm,
     logits,
 };
+
+// Down projection rows [begin,end) through the FFN's split-K path: the down
+// partial of each of shape.ffn_chunks even product chunks, then the
+// reduction. With gate_up set, each chunk runs the whole FFN task.
+template <typename Scalar>
+__device__ void split_down(int begin, int end, bool with_gate_up, const ops::Layer<Scalar>& layer,
+    const ops::Shape& shape, ops::SharedStorage& shared)
+{
+    const int f = shape.intermediate_size;
+    for (int chunk = 0; chunk < shape.ffn_chunks; ++chunk) {
+        const int first = f * chunk / shape.ffn_chunks;
+        const int last = f * (chunk + 1) / shape.ffn_chunks;
+        if (with_gate_up)
+            ops::ffn(first, last, chunk, layer, shape, shared);
+        else
+            ops::down_partial(first, last, chunk, layer, shape, shared);
+        __syncthreads();
+    }
+    ops::ffn_reduce(begin, end, layer, shape);
+}
 
 template <typename Scalar>
 __global__ __launch_bounds__(kThreads, 1) void run_operator(int op, int begin, int end,
@@ -70,7 +92,10 @@ __global__ __launch_bounds__(kThreads, 1) void run_operator(int op, int begin, i
         ops::gate_up(begin, end, layer, shape, shared);
         break;
     case down:
-        ops::down(begin, end, layer, shape, shared);
+        split_down(begin, end, false, layer, shape, shared);
+        break;
+    case ffn:
+        split_down(begin, end, true, layer, shape, shared);
         break;
     case embedding:
         ops::embedding_lookup(0, begin, end, shape.hidden_size, weights, layer.y);
@@ -89,8 +114,8 @@ template <typename Scalar>
 json evaluate(const json& item)
 {
     const std::map<std::string, Operator> operators{{"qkv", qkv}, {"attention", attention},
-        {"gate_up", gate_up}, {"down", down}, {"embedding", embedding}, {"final_norm", final_norm},
-        {"logits", logits}};
+        {"gate_up", gate_up}, {"down", down}, {"ffn", ffn}, {"embedding", embedding},
+        {"final_norm", final_norm}, {"logits", logits}};
     const Operator op = operators.at(item.at("op").get<std::string>());
     const int d = item.value("hidden", 1);
     const int f = item.value("intermediate", 1);
@@ -106,6 +131,7 @@ json evaluate(const json& item)
         capacity <= fused_steps ? 1 : std::max(2, (capacity + chunk_steps - 1) / chunk_steps);
     const int rows = item.value("rows", d);
     const int kv_width = nkv * dh;
+    const int ffn_chunks = std::min(f, item.value("ffn_chunks", 3));
 
     // Inputs default to zero, outputs to the sentinel; the case may supply either.
     std::map<std::string, std::vector<Scalar>> host;
@@ -130,13 +156,23 @@ json evaluate(const json& item)
     buffer("Wgate", static_cast<std::size_t>(f) * d, 0.0f);
     buffer("Wup", static_cast<std::size_t>(f) * d, 0.0f);
     buffer("Wdown", static_cast<std::size_t>(d) * f, 0.0f);
+    {
+        // The package layout: [f, d].
+        auto& down = host["Wdown"];
+        std::vector<Scalar> transposed(down.size());
+        for (int row = 0; row < d; ++row)
+            for (int column = 0; column < f; ++column)
+                transposed[static_cast<std::size_t>(column) * d + row] =
+                    down[static_cast<std::size_t>(row) * f + column];
+        down = std::move(transposed);
+    }
     buffer("weights", static_cast<std::size_t>(rows) * d, 0.0f);
     buffer("y", rows, -123.0f);
     buffer("attention", d, -123.0f);
     buffer("scores", static_cast<std::size_t>(nq) * capacity, -123.0f);
     // An operator's own output starts at the sentinel unless the case supplies it.
     const std::map<Operator, std::vector<const char*>> outputs{
-        {qkv, {"q", "k"}}, {attention, {"r", "q_rot"}}, {gate_up, {"product"}}};
+        {qkv, {"q", "k"}}, {attention, {"r", "q_rot"}}, {gate_up, {"product"}}, {ffn, {"product"}}};
     if (outputs.contains(op))
         for (const char* name : outputs.at(op))
             if (!item.contains(name))
@@ -158,7 +194,10 @@ json evaluate(const json& item)
                            .first->second;
         cuda::copy_bytes(stream, values, target);
     }
-    const std::vector<float> zero_partials(static_cast<std::size_t>(chunks) * nq * (dh + 2), 0.0f);
+    // Attention partials and statistics, then the FFN partials, as in a context.
+    const std::size_t attention_partials = static_cast<std::size_t>(chunks) * nq * (dh + 2);
+    const std::vector<float> zero_partials(
+        attention_partials + static_cast<std::size_t>(ffn_chunks) * d, 0.0f);
     cuda::device_buffer<float> partials(stream, pool, zero_partials.size(), cuda::no_init);
     cuda::copy_bytes(stream, zero_partials, partials);
     const std::vector<float> sentinel(rows, -123.0f);
@@ -171,13 +210,13 @@ json evaluate(const json& item)
     auto at = [&](const char* name) { return buffers.at(name).data(); };
     const ops::Layer<Scalar> layer{at("x"), at("y"), at("q"), at("k"), at("q_rot"), at("attention"),
         at("r"), at("product"), at("key_cache"), at("value_cache"), at("scores"), partials.data(),
-        partials.data() + static_cast<std::size_t>(chunks) * nq * dh, at("attn_norm"), at("Wq"),
-        at("Wk"), at("Wv"), at("Wo"), at("ffn_norm"), at("Wgate"), at("Wup"), at("Wdown"), nullptr,
-        nullptr};
+        partials.data() + static_cast<std::size_t>(chunks) * nq * dh,
+        partials.data() + attention_partials, at("attn_norm"), at("Wq"), at("Wk"), at("Wv"),
+        at("Wo"), at("ffn_norm"), at("Wgate"), at("Wup"), at("Wdown"), nullptr, nullptr};
     NumericConfig numeric{};
     numeric.rms_norm_eps = item.value("epsilon", 1e-5f);
     const ops::Shape shape{d, f, nq, nkv, dh, position, capacity, chunks, chunk_steps, fused_steps,
-        numeric, d_frequencies.data()};
+        ffn_chunks, numeric, d_frequencies.data()};
     const int begin = item.value("begin", 0);
     const int end = item.value("end", rows);
     const auto config = cuda::make_config(cuda::block_dims<kThreads>(), cuda::grid_dims(1));

@@ -19,8 +19,8 @@ from .plan_core import (
     plan_target,
     require,
     scheduled_program,
+    source_shape,
     storage_section,
-    tensor_shape,
     validate_header,
     validate_plan,
     validate_target,
@@ -63,8 +63,8 @@ def block_plan(
     return assemble_plan(
         MODEL_KIND,
         target,
-        model_section({**spec.as_dict(), "layers": 1}, spec, dtype, chunking),
-        storage_section(spec, dtype, chunks, 1, io_bytes, io_bytes),
+        model_section({**spec.as_dict(), "layers": 1}, spec, dtype, chunking, workers),
+        storage_section(spec, dtype, chunks, workers, 1, io_bytes, io_bytes),
         scheduled_program(spec, dtype, workers, chunking),
         weights_sha256,
     )
@@ -80,7 +80,7 @@ def make_plan(
 ) -> tuple[dict, bytes]:
     require(set(weights) == set(WEIGHTS), "weight names mismatch")
     for name, value in weights.items():
-        check_weight(value, tensor_shape(spec, name), name)
+        check_weight(value, source_shape(spec, name), name)
     packed = pack_weights(spec, weights, weight_dtype)
     plan = block_plan(
         spec,
@@ -144,6 +144,7 @@ def block_summary(plan: dict, digest: str) -> dict:
         "weight_bytes": storage["weight_bytes"],
         "peak_bytes": storage["attention_bytes"]
         + storage["attention_partial_bytes"]
+        + storage["ffn_partial_bytes"]
         + sum(
             storage[name]
             for name in (

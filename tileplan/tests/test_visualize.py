@@ -60,7 +60,7 @@ class VisualizationTest(unittest.TestCase):
             for wave in range(len(plan["waves"])):
                 self.assertIn(f"Wave {wave}", svg)
             self.assertIn("Full decoder: 3 layers", svg)
-            for opcode in ("qkv_f32", "attention_scores_f32", "gate_up_f32"):
+            for opcode in ("qkv_f32", "attention_scores_f32", "ffn_f32"):
                 self.assertIn(opcode, svg)
 
             block_fixture = FIXTURES / "decoder_m1"

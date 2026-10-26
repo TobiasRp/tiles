@@ -1008,7 +1008,8 @@ json attention_sweep(
                 program.stats = stats.data();
                 program.shape = ops::Shape{2048, 8192, kQueryHeads, kKvHeads, kHeadDim, position,
                     kMaxContext, program_chunks, worker ? kWorkerChunkSteps : kMaxContext,
-                    worker ? kWorkerFusedSteps : kMaxContext, NumericConfig{}, frequencies.data()};
+                    worker ? kWorkerFusedSteps : kMaxContext, 0, NumericConfig{},
+                    frequencies.data()};
                 program.layers = kLayers;
                 program.variant = variant;
                 program.cycles = cycles.data();

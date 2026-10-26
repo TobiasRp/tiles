@@ -56,12 +56,14 @@ struct Launch
         Scalar* cache = kv + index * stack.layer_kv_stride;
         float* partials = attention_partials;
         float* stats = partials + shape.attention_chunks * shape.hidden_size;
+        float* ffn_partials = stats + shape.attention_chunks * shape.query_heads * 2;
         return {hidden(index), hidden(index + 1), scratch + layout.q, scratch + layout.k,
             scratch + layout.q_rot, scratch + layout.attention, scratch + layout.r,
             scratch + layout.product, cache + layout.key, cache + layout.value, attention_scores,
-            partials, stats, w + layout.attn_norm, w + layout.Wq, w + layout.Wk, w + layout.Wv,
-            w + layout.Wo, w + layout.ffn_norm, w + layout.Wgate, w + layout.Wup, w + layout.Wdown,
-            ffn_trace, block_trace == nullptr ? nullptr : block_trace + index * shape.hidden_size};
+            partials, stats, ffn_partials, w + layout.attn_norm, w + layout.Wq, w + layout.Wk,
+            w + layout.Wv, w + layout.Wo, w + layout.ffn_norm, w + layout.Wgate, w + layout.Wup,
+            w + layout.Wdown, ffn_trace,
+            block_trace == nullptr ? nullptr : block_trace + index * shape.hidden_size};
     }
 };
 
@@ -113,11 +115,11 @@ __global__ __launch_bounds__(kThreads, 1) void decoder_worker(Launch<Scalar> lau
         case Opcode::output_projection:
             ops::output_projection(begin, end, launch.layer(task.layer), shape, shared);
             break;
-        case Opcode::gate_up:
-            ops::gate_up(begin, end, launch.layer(task.layer), shape, shared);
+        case Opcode::ffn:
+            ops::ffn(begin, end, task.chunk, launch.layer(task.layer), shape, shared);
             break;
-        case Opcode::down:
-            ops::down(begin, end, launch.layer(task.layer), shape, shared);
+        case Opcode::ffn_reduce:
+            ops::ffn_reduce(begin, end, launch.layer(task.layer), shape);
             break;
         case Opcode::embedding:
             ops::embedding_lookup(token, begin, end, shape.hidden_size,
@@ -151,8 +153,8 @@ void enqueue_worker_typed(cuda::stream& stream, const WorkerProgramView& program
     const Launch<Scalar> launch{program.instructions, program.streams, program.layout,
         {program.hidden_size, program.intermediate_size, program.query_heads, program.kv_heads,
             program.head_dim, position, program.max_context, program.attention_chunks,
-            program.attention_chunk_steps, program.attention_fused_steps, program.numeric,
-            program.rotary_frequencies},
+            program.attention_chunk_steps, program.attention_fused_steps, program.ffn_chunks,
+            program.numeric, program.rotary_frequencies},
         program.stack, token.immediate, token.ids, token.index, static_cast<Scalar*>(buffers.input),
         static_cast<Scalar*>(buffers.output), static_cast<Scalar*>(buffers.scratch),
         static_cast<Scalar*>(buffers.kv), static_cast<const Scalar*>(program.weights),

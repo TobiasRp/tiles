@@ -13,9 +13,9 @@ namespace tileinfer {
 using TokenId = std::int32_t;
 
 inline constexpr int kThreads = 1024;
-inline constexpr const char* kAbi = "tileinfer-decoder-v8";
+inline constexpr const char* kAbi = "tileinfer-decoder-v9";
 inline constexpr const char* kFingerprint =
-    "decoder-fused-abi8-bf16-eager-simt-wide-attention-v2-sm86-b1024";
+    "decoder-fused-abi9-bf16-eager-simt-wide-attention-v2-split-ffn-sm86-b1024";
 
 // Shared-memory limits of the compiled worker; the loader rejects larger models.
 inline constexpr int kMaxHidden = 4096; // a task's input vector lives in shared memory
@@ -39,8 +39,8 @@ enum class Opcode : std::uint32_t
     attention_scores = 2,  // one K/V head x context chunk: RoPE, scores, chunk softmax statistics
     attention_values = 3,  // one K/V head x context chunk: probabilities and partial P*V
     output_projection = 4, // Wo rows: combine attention partials, project, add the residual
-    gate_up = 5,           // gate and up rows: norm, project both, SiLU(gate) * up
-    down = 6,              // Wdown rows: project, add the residual
+    ffn = 5,               // product chunk: norm, gate and up rows, SiLU(gate) * up, down partial
+    ffn_reduce = 6,        // y rows: sum the FFN chunks' down partials, add the residual
     embedding = 7,         // copies [begin,end) of the token's embedding row into hidden state
     final_rms_norm = 8,    // normalizes [begin,end) of the last layer's output
     logits = 9,            // projects vocabulary rows [begin,end)
@@ -48,7 +48,7 @@ enum class Opcode : std::uint32_t
 
 // Package opcode names, without the _f32/_bf16 precision suffix.
 inline constexpr std::array<const char*, 9> kOpcodeNames{"qkv", "attention_scores",
-    "attention_values", "output_projection", "gate_up", "down", "embedding", "final_rms_norm",
+    "attention_values", "output_projection", "ffn", "ffn_reduce", "embedding", "final_rms_norm",
     "logits"};
 
 // Every package opcode name the compiled worker accepts, for the target probe.
@@ -116,7 +116,7 @@ struct TaskRecord
     std::uint32_t begin;
     std::uint32_t end;
     std::uint32_t kv_head; // attention tasks
-    std::uint32_t chunk;   // attention tasks: context chunk
+    std::uint32_t chunk;   // attention tasks: context chunk; ffn tasks: product chunk
 };
 
 // Resolves one tensor ID to a storage buffer and element offset.
@@ -220,6 +220,7 @@ struct LoadedPlan
     int attention_chunks;      // chunk tasks per K/V head in attention
     int attention_chunk_steps; // most time steps one chunk task covers
     int attention_fused_steps; // longest prefix one fused task per K/V head handles
+    int ffn_chunks;            // FFN tasks per layer, each with one FP32 down partial
     int workers;
     NumericConfig numeric;
     StackConfig stack;
@@ -232,6 +233,7 @@ struct LoadedPlan
     std::uint64_t kv_bytes;
     std::uint64_t attention_bytes;         // scores workspace, [query_heads, max_context]
     std::uint64_t attention_partial_bytes; // FP32 statistics and partial P*V per head and chunk
+    std::uint64_t ffn_partial_bytes;       // FP32 down partials, [ffn_chunks, hidden_size]
     std::vector<std::uint8_t> weights;
     // Worker streams, concatenated; one barrier separates consecutive waves in every stream.
     std::vector<TaskRecord> instructions;

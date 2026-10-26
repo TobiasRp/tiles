@@ -11,8 +11,8 @@ COLORS = {
     "attention_scores_f32": "#fce7f3",
     "attention_values_f32": "#fbcfe8",
     "output_projection_f32": "#bbf7d0",
-    "gate_up_f32": "#dbeafe",
-    "down_f32": "#bfdbfe",
+    "ffn_f32": "#dbeafe",
+    "ffn_reduce_f32": "#bfdbfe",
 }
 
 COLORS.update(
@@ -23,7 +23,8 @@ COLORS.update(
 def _describe(plan: dict, part: dict) -> str:
     """Short text for one output region of a task."""
     if "workspace" in part:
-        return f"{part['workspace']} heads {part['heads']} chunk {part['chunk']}"
+        heads = f" heads {part['heads']}" if "heads" in part else ""
+        return f"{part['workspace']}{heads} chunk {part['chunk']}"
     name = plan["model"]["tensors"][part["tensor"]]["name"]
     return (
         f"{name} {part['rows']}" if "rows" in part else f"{name} p/head {part['head']}"

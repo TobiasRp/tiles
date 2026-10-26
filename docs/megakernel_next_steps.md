@@ -85,6 +85,14 @@ itself, and every worker repeating the 20-partial reduction costs 4.6 µs per
 layer, so one reduction of each worker's own slice followed by a barrier
 is cheaper ([Section 16](#16-s4-probe-the-fused-ffn)).
 
+**Progress, 2026-10-26: S4 phase 1, the fused FFN, is in the decoder**
+(format 9, ABI v9). Under the S6a protocol it is 70 to 75 µs per token
+faster than S2c at every context (±2 µs, both spawn orders): 12.114 ms at
+context 1 and 12.979 ms at 4K. That is a third of the probe's 0.22 ms; the
+probe's split baseline streamed worse than the decoder's FFN does, and the
+reduction wave costs more in the decoder. Every calibrated tolerance passes
+([Section 17](#17-s4-phase-1-results-the-fused-ffn)).
+
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
 measured, explained advantage over PyTorch CUDA Graph replay on the same
@@ -674,7 +682,8 @@ of pipeline ramp per boundary, that is at most about 0.15 ms per token.
   `Wdown` stored transposed (`[f × d]`, so a worker's column chunk is
   contiguous for any worker count) and with each worker reducing only its
   own slice of `y` before one barrier. Every worker repeating the full
-  reduction costs 4.6 µs per layer, 2.6 µs more.*
+  reduction costs 4.6 µs per layer, 2.6 µs more.* *Built (Section 17):
+  −70 µs per token, controlled.*
 - **Wo split-K by K/V group (second).** A Wo task for group *g* needs only
   that group's four query heads, so it can start as soon as group *g*'s
   attention is done.
@@ -1887,3 +1896,125 @@ was 1.2 µs *slower* and was reverted.
 - `fused_chunks` could also stage the transposed chunk through the S3
   ring; without the reduction it already streams at 98% of ideal, so this
   is low priority.
+
+## 17. S4 phase 1 results: the fused FFN
+
+Implemented and checked on `tux`, 2026-10-26, starting from `3d8d043`.
+Clocks unlocked (no passwordless `sudo`); the controlled sessions ran at
+1,905 to 1,972 MHz SM and 6,801 MHz memory with no clock-event reason.
+Artifacts, scripts and the S2c baseline binaries are in
+`runs/s4-impl-2026-10-26/` on tux.
+
+### What changed
+
+- **Two FFN tasks per layer (format 9, ABI v9).** `ffn` replaces `gate_up`
+  (opcode 5): worker *k* normalizes `r`, computes the gate/up rows of product
+  chunk *k* (SiLU·up, rounded as before) and that chunk's FP32 down partial
+  over all 2,048 outputs into `ffn_partials[k]`. `ffn_reduce` replaces `down`
+  (opcode 6): after a barrier, each worker sums the 20 partials for its rows
+  of `y` in chunk order, rounds, adds `r` and rounds again, as `project_rows`
+  did. The layer still has six waves and the same barriers; the FFN no
+  longer waits for the last gate/up worker before down starts.
+- **`Wdown` stored transposed, `[f, d]`.** The planner and the checkpoint
+  importer write it that way (`tensor_shape`, `source_shape` for inputs); a
+  chunk's rows are contiguous for any worker count. `down_partial` gives each
+  thread two adjacent outputs and sums its chunk's rows in order, with paired
+  loads and no warp reductions; the product chunk sits in the shared vector.
+- **Workspace.** `ffn_partial_bytes` (`ffn_chunks × d × 4`, 160 KB) follows the
+  attention partials in the same FP32 context buffer. `ffn_chunks` is a model
+  field; the validator checks the storage, that FFN tasks own every partial
+  slot once, that a chunk fits the shared vector, and the partials' dataflow
+  between the two waves. New loader cases: partial slots out of row order
+  (legal), a slot out of range, a shared slot, the reduction in the FFN wave,
+  a wrong workspace size, a declared chunk without a task, and version-8
+  packages (192 cases, from 164).
+- **Worker resources.** 64 registers, one block per SM, 23,088 bytes of
+  static shared memory, as in S2c. The BF16 worker has a 32-byte stack frame
+  and no spills; the FP32 reference worker spills 4 bytes.
+- **Elsewhere.** `timeline.py` knows the `ffn` phases (the reduction counts
+  as streaming excess, as S2c's down wave did) and still reads format-8
+  traces; `bandwidth_probe ffn` keeps S2c's down as its split reference;
+  `generate.py` accepted only format 6 since S2 and now names format 9.
+
+### Correctness
+
+- **Operator tests.** `ops_unit` runs the down cases through the split-K
+  path with 2, 3 and 20 chunks and adds whole-FFN cases with 3 to 20 chunks
+  (476 cases). The down cases moved to even widths: a thread owns two
+  adjacent outputs, and the loader already requires an even `head_dim`.
+- CTest 13/13 (release) and 4/4 (`cpu-debug`); 28 Python tests; Ruff and ty
+  report nothing beyond the 19 pre-existing findings; Compute Sanitizer: all
+  64 checks pass.
+- **Checkpoint.** Every calibrated tolerance passes for the default and the
+  split (C = 4, F = 2) package. The FFN change moves the result slightly
+  toward PyTorch: logits RMS error 0.0274 against S2c's 0.0298, exact BF16
+  logits 37.7% against 35.1%, minimum top-5 overlap 1.0 against 0.8. The
+  default package keeps S2b's one near-tie (26 of 27 greedy steps, margin
+  0.125); the split package matches greedy selection.
+- **Against S2c.** Not bit-identical, by design: on the 6-token prompt 58%
+  of logits differ, by at most 0.125, with the same argmax at every step. 32
+  tokens after a 450-token prompt are identical; 64 tokens after the 6-token
+  prompt diverge at token 31, a one-unit tie (S2c 25.5 against 25.375, S4
+  25.5 against 25.5, where the lower ID wins).
+
+### Controlled comparison
+
+S2c (`3d8d043` binary, its format-8 package) against S4, decoded prefixes,
+10 blocks × 3 rounds, both spawn orders. µs per decoder call, kernel only;
+differences are paired means with bootstrap 95% intervals:
+
+| Context | S2c, µs | S4, µs | S4 − S2c, S2c first | S4 first | Mean |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 12,184 | 12,114 | −71.5 [−73.7, −69.7] | −67.4 [−69.3, −65.5] | **−69.5** |
+| 256 | 12,265 | 12,194 | −71.2 [−73.8, −68.8] | −70.1 [−72.7, −67.6] | −70.7 |
+| 384 | 12,324 | 12,248 | −76.4 [−78.2, −74.6] | −73.2 [−75.4, −71.3] | −74.8 |
+| 385 | 12,335 | 12,262 | −73.6 [−76.4, −70.6] | −69.0 [−70.6, −67.1] | −71.3 |
+| 1024 | 12,448 | 12,375 | −72.4 [−74.1, −70.7] | −70.8 [−73.3, −69.0] | −71.6 |
+| 2048 | 12,645 | 12,573 | −71.8 [−74.3, −69.5] | −67.5 [−69.1, −65.4] | −69.6 |
+| 2049 | 12,656 | 12,583 | −72.4 [−74.5, −70.0] | −68.7 [−71.3, −66.0] | −70.6 |
+| 4096 | 13,051 | 12,979 | −71.3 [−73.9, −68.6] | −69.7 [−72.1, −67.2] | **−70.5** |
+
+The saving is the same at every context, as expected of a change that does
+not touch attention. Both arms pick the same next token everywhere. At
+context 1 TileInfer is now 0.50 ms above the 11.61 ms floor.
+
+### Bubble budget per token (µs)
+
+One traced pass of each binary, same session:
+
+| Context | S2c traced | S4 traced | Change | Barrier sync | Streaming excess | FFN excess | FFN tail | FFN sync |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 12,189 | 12,114 | −74 | 114 → 92 | 365 → 314 | 200 → 134 | 76 → 56 | 56 → 35 |
+| 256 | 12,264 | 12,193 | −71 | 116 → 92 | 362 → 316 | 194 → 134 | 75 → 54 | 54 → 33 |
+| 1024 | 12,446 | 12,371 | −75 | 137 → 116 | 375 → 324 | 198 → 132 | 76 → 53 | 55 → 37 |
+| 4096 | 13,049 | 12,972 | −77 | 131 → 111 | 378 → 321 | 196 → 137 | 76 → 50 | 52 → 33 |
+
+At context 1 the fused `ffn` waves take 7,681 µs against 7,564 µs ideal
+(209.7 GB/s, `lm_head`'s rate) with 97 µs of excess, where S2c's gate/up
+and down waves had 199. The reduction waves add 52 µs (37 µs of excess,
+14 µs of barrier latency), 3.2 µs per layer.
+
+### Against the probe
+
+The probe projected 0.22 ms; the decoder gives 0.07 ms.
+
+- **The probe's baseline was worse than the decoder's.** Its split FFN ran
+  24.7 µs per layer above ideal, the decoder's 12.5 µs plus 3.5 µs of
+  barrier latency. The decoder's gate/up and down already streamed at 207
+  and 203 GB/s; the probe's hashed weights and inputs, and its consumer norm
+  in place of a QKV wave, cost the split form more than the fused one.
+- **The reduction costs more in the decoder**: 3.2 µs per layer against the
+  probe's 1.9 to 2.0 µs, mostly the barrier and the wave's ramp.
+- The fused wave itself does what the probe showed: it streams at 209.7
+  GB/s, and the gate/up tail and barrier are gone.
+
+The S4 gate rule held (above 0.06 ms), but the probe overstated the gain by
+a factor of three. Later probes should take their baseline from the
+decoder's own trace for the same phase, not from a reimplementation.
+
+### Open
+
+- The reduction wave (52 µs per token) is the next FFN target: a counter
+  wait could replace its barrier (Phase 2), or the next QKV could take the
+  partials directly, which the probe priced at 4.6 µs per layer and is worse.
+- Run the comparison with locked clocks when `sudo` is available.

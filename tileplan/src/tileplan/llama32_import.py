@@ -13,7 +13,7 @@ from safetensors import safe_open
 
 from .decoder_reference import DecoderSpec
 from .decoder_stack import StackSpec, make_stack_plan_metadata, validate_stack
-from .plan_core import WEIGHTS, json_bytes, new_package_dir, require, tensor_shape
+from .plan_core import WEIGHTS, json_bytes, new_package_dir, require, source_shape
 from .probe import read_target
 
 MODEL_ID = "meta-llama/Llama-3.2-1B"
@@ -188,7 +188,9 @@ def _copy_tensor(
     mapping: mmap.mmap,
     offset: int,
     dtype: str = "bfloat16",
+    transpose: bool = False,
 ) -> None:
+    """Copy one BF16 tensor of ``shape``, transposed when the package says so."""
     tensor_slice = source.get_slice(name)
     require(
         tuple(tensor_slice.get_shape()) == shape and tensor_slice.get_dtype() == "BF16",
@@ -196,6 +198,8 @@ def _copy_tensor(
     )
     tensor = source.get_tensor(name)
     require(bool(torch.isfinite(tensor).all()), f"non-finite tensor {name}")
+    if transpose:
+        tensor = tensor.T
     raw = (
         tensor.contiguous().view(torch.uint16).numpy().tobytes()
         if dtype == "bfloat16"
@@ -245,7 +249,12 @@ def pack_safetensors(
                     for path in set(manifest.values())
                 }
 
-                def copy(internal: str, shape: tuple[int, ...], offset: int) -> None:
+                def copy(
+                    internal: str,
+                    shape: tuple[int, ...],
+                    offset: int,
+                    transpose: bool = False,
+                ) -> None:
                     hf_name = names[internal]
                     _copy_tensor(
                         sources[manifest[hf_name]],
@@ -254,6 +263,7 @@ def pack_safetensors(
                         mapping,
                         offset,
                         dtype,
+                        transpose,
                     )
 
                 d = spec.block.hidden_size
@@ -265,10 +275,12 @@ def pack_safetensors(
                     )
                     for internal in WEIGHTS:
                         offset = base + weight_regions[descriptors[internal]]["offset"]
+                        # Wdown is stored transposed (plan_core.tensor_shape).
                         copy(
                             f"L{layer}.{internal}",
-                            tensor_shape(spec.block, internal),
+                            source_shape(spec.block, internal),
                             offset,
+                            internal == "Wdown",
                         )
                 copy("final_norm", (d,), stack["final_norm_offset"])
                 if spec.tie_word_embeddings and "lm_head.weight" in manifest:

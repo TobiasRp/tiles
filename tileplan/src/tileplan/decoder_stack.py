@@ -34,8 +34,8 @@ from .plan_core import (
     regions,
     require,
     scheduled_program,
+    source_shape,
     storage_section,
-    tensor_shape,
     validate_header,
     validate_plan,
     validate_target,
@@ -215,7 +215,7 @@ def _check_weights(spec: StackSpec, weights: dict[str, np.ndarray]) -> None:
         elif name == "final_norm":
             shape = (d,)
         else:
-            shape = tensor_shape(spec.block, name.split(".", 1)[1])
+            shape = source_shape(spec.block, name.split(".", 1)[1])
         check_weight(value, shape, name)
 
 
@@ -268,6 +268,7 @@ def stack_plan(
         block,
         dtype,
         chunking["attention_chunks"],
+        workers,
         spec.layers,
         4,
         spec.vocab_size * 4,
@@ -276,7 +277,7 @@ def stack_plan(
     return assemble_plan(
         MODEL_KIND,
         target,
-        model_section(spec.as_dict(), block, dtype, chunking),
+        model_section(spec.as_dict(), block, dtype, chunking, workers),
         {**storage, "stack": stack},
         scheduled_program(
             block, dtype, workers, chunking, spec.layers, spec.vocab_size

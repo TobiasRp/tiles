@@ -65,6 +65,7 @@ struct Shape
     int attention_chunks;      // chunk tasks per K/V head in the program
     int attention_chunk_steps; // most time steps one chunk task covers
     int attention_fused_steps; // longest prefix that one fused task per K/V head handles
+    int ffn_chunks;            // FFN product chunks, each with one FP32 down partial
     NumericConfig numeric;
     const float* rotary_frequencies;
 };
@@ -86,6 +87,7 @@ struct Layer
     Scalar* scores;      // [query_heads, max_context]: scores, then probabilities
     float* partials;     // [chunks, query_heads, head_dim]: partial P*V
     float* stats;        // [chunks, query_heads, 2]: chunk maximum and sum of exp
+    float* ffn_partials; // [ffn_chunks, hidden_size]: FP32 down partial of each product chunk
     const Scalar* attn_norm;
     const Scalar* Wq;
     const Scalar* Wk;
@@ -94,9 +96,9 @@ struct Layer
     const Scalar* ffn_norm;
     const Scalar* Wgate;
     const Scalar* Wup;
-    const Scalar* Wdown;
-    float* ffn_trace;   // optional: Wdown projection before the residual
-    float* block_trace; // optional: this layer's output
+    const Scalar* Wdown; // stored transposed, [intermediate_size, hidden_size]
+    float* ffn_trace;    // optional: Wdown projection before the residual
+    float* block_trace;  // optional: this layer's output
 };
 
 /// Rotate one split-half pair; BF16 coefficients and products round before the sum.
@@ -734,13 +736,85 @@ __device__ inline void gate_up(
     }
 }
 
-/// Down projection rows [begin,end) plus the attention block output as residual.
+/// Two adjacent elements of a row, widened to FP32.
+/// @pre The address is aligned to two elements.
 template <typename Scalar>
-__device__ inline void down(
-    int begin, int end, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
+__device__ inline float2 load_pair(const Scalar* address)
 {
-    project_rows(begin, end, layer.Wdown, layer.product, shape.intermediate_size, layer.r, layer.y,
-        layer.ffn_trace, layer.block_trace, shared);
+    if constexpr (cuda::std::is_same_v<Scalar, __nv_bfloat16>)
+        return __bfloat1622float2(*reinterpret_cast<const __nv_bfloat162*>(address));
+    else
+        return *reinterpret_cast<const float2*>(address);
+}
+
+/// The FP32 down partial of product rows [begin,end) over all outputs, into
+/// ffn_partials[chunk]. Wdown is stored transposed, so the chunk's rows are
+/// contiguous: a thread owns two adjacent outputs and sums the chunk's rows in
+/// order, with no warp reductions.
+/// @pre product[begin,end) was written by this block, end - begin fits the
+/// shared vector, and hidden_size is even (the loader requires an even head_dim).
+template <typename Scalar>
+__device__ inline void down_partial(int begin, int end, int chunk, const Layer<Scalar>& layer,
+    const Shape& shape, SharedStorage& shared)
+{
+    const int d = shape.hidden_size;
+    const int rows = end - begin;
+    Scalar* product = shared_vector<Scalar>(shared);
+    for (int j = threadIdx.x; j < rows; j += blockDim.x)
+        product[j] = layer.product[begin + j];
+    __syncthreads();
+    const Scalar* weights = layer.Wdown + static_cast<cuda::std::size_t>(begin) * d;
+    float* output = layer.ffn_partials + static_cast<cuda::std::size_t>(chunk) * d;
+    for (int pair = threadIdx.x; pair < d / 2; pair += blockDim.x) {
+        float low = 0.0f;
+        float high = 0.0f;
+#pragma unroll 8
+        for (int j = 0; j < rows; ++j) {
+            const float2 w = load_pair(weights + static_cast<cuda::std::size_t>(j) * d + 2 * pair);
+            const float p = static_cast<float>(product[j]);
+            low += w.x * p;
+            high += w.y * p;
+        }
+        output[2 * pair] = low;
+        output[2 * pair + 1] = high;
+    }
+}
+
+/// One FFN chunk: the gate/up rows [begin,end) of the product, then their
+/// down partial. A worker reads only its own product, so no barrier separates
+/// the two; ffn_reduce combines the chunks after the next one.
+template <typename Scalar>
+__device__ inline void ffn(int begin, int end, int chunk, const Layer<Scalar>& layer,
+    const Shape& shape, SharedStorage& shared)
+{
+    gate_up(begin, end, layer, shape, shared);
+    __syncthreads();
+    down_partial(begin, end, chunk, layer, shape, shared);
+}
+
+/// Down projection rows [begin,end) plus the attention block output as
+/// residual: the chunks' FP32 partials summed in chunk order, rounded before
+/// the residual as in project_rows. Optional traces record the rounded
+/// projection and the output.
+template <typename Scalar>
+__device__ inline void ffn_reduce(
+    int begin, int end, const Layer<Scalar>& layer, const Shape& shape)
+{
+    const int d = shape.hidden_size;
+    for (int row = begin + threadIdx.x; row < end; row += blockDim.x) {
+        float total = 0.0f;
+#pragma unroll 4
+        for (int chunk = 0; chunk < shape.ffn_chunks; ++chunk)
+            total += layer.ffn_partials[static_cast<cuda::std::size_t>(chunk) * d + row];
+        const Scalar projected = static_cast<Scalar>(total);
+        const Scalar sum =
+            static_cast<Scalar>(static_cast<float>(projected) + static_cast<float>(layer.r[row]));
+        layer.y[row] = sum;
+        if (layer.ffn_trace)
+            layer.ffn_trace[row] = static_cast<float>(projected);
+        if (layer.block_trace)
+            layer.block_trace[row] = static_cast<float>(sum);
+    }
 }
 
 /// Copy elements [begin,end) of a token's embedding row; the token is host-validated.

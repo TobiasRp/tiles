@@ -24,6 +24,7 @@ struct WorkerProgramView
     int attention_chunks;
     int attention_chunk_steps;
     int attention_fused_steps;
+    int ffn_chunks;
     NumericConfig numeric;
     StackConfig stack;
     WeightDtype weight_dtype;
@@ -44,7 +45,7 @@ struct WorkerBuffers
     float* logits;
     float* block_trace;
     void* attention_scores;
-    float* attention_partials; // FP32 partial P*V, then chunk statistics
+    float* attention_partials; // FP32 partial P*V, chunk statistics, then FFN down partials
     float* ffn_trace = nullptr;
     // Optional timeline of kTimelineFields words per encoded instruction.
     std::uint64_t* timeline = nullptr;

@@ -28,6 +28,8 @@ PHASES = (
     "wo",
     "gate_up",
     "down",
+    "ffn",
+    "ffn_reduce",
     "final_norm",
     "lm_head",
 )
@@ -38,12 +40,17 @@ COLORS = {
     "wo": "#16a34a",
     "gate_up": "#15803d",
     "down": "#166534",
+    "ffn": "#15803d",
+    "ffn_reduce": "#166534",
     "final_norm": "#1d4ed8",
     "lm_head": "#0f766e",
     "barrier": "#e2e8f0",
 }
 # Phases whose time is dominated by streaming weights or the K/V cache.
-STREAMING = ("qkv", "wo", "gate_up", "down", "lm_head")
+# gate_up and down are the FFN phases of format-8 (S2c) packages. The FFN
+# reduction streams nothing, but it finishes the down projection that S2c's
+# down wave held, so its excess counts here too.
+STREAMING = ("qkv", "wo", "gate_up", "down", "ffn", "ffn_reduce", "lm_head")
 
 
 @dataclass(frozen=True)
@@ -80,6 +87,8 @@ def phase(task: dict) -> str:
         "output_projection": "wo",
         "gate_up": "gate_up",
         "down": "down",
+        "ffn": "ffn",
+        "ffn_reduce": "ffn_reduce",
         "embedding": "embedding",
         "final_rms_norm": "final_norm",
         "logits": "lm_head",
@@ -117,8 +126,10 @@ def streamed_bytes(task: dict, model: dict, position: int) -> int:
         steps = length * (chunk + 1) // chunks - length * chunk // chunks
         return (2 if chunks == 1 else 1) * steps * model["head_dim"] * element
     begin, end = task["operands"]["rows"]
-    width = {"embedding": 1, "gate_up": 2 * d, "down": f}.get(opcode, d)
-    return 0 if opcode == "final_rms_norm" else (end - begin) * width * element
+    width = {"embedding": 1, "gate_up": 2 * d, "down": f, "ffn": 3 * d}.get(opcode, d)
+    if opcode in ("final_rms_norm", "ffn_reduce"):
+        return 0
+    return (end - begin) * width * element
 
 
 def align(trace: dict, sample: int = 0) -> tuple[list[Event], dict]:

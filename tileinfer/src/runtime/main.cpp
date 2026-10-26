@@ -75,9 +75,9 @@ json inspect(const tileinfer::LoadedPlan& plan)
     const json memory = {{"hidden_buffers_bytes", hidden_buffers},
         {"logits_buffer_bytes", logits_bytes}, {"program_bytes", program_bytes},
         {"token_status_bytes", token_bytes},
-        {"context_device_payload_bytes", hidden_buffers + logits_bytes + token_bytes +
-                                             plan.scratch_bytes + plan.kv_bytes +
-                                             plan.attention_bytes + plan.attention_partial_bytes},
+        {"context_device_payload_bytes",
+            hidden_buffers + logits_bytes + token_bytes + plan.scratch_bytes + plan.kv_bytes +
+                plan.attention_bytes + plan.attention_partial_bytes + plan.ffn_partial_bytes},
         {"model_device_payload_bytes", plan.weights.size() + program_bytes},
         {"allocator_runtime_overhead_bytes", nullptr},
         {"scope",
@@ -91,11 +91,13 @@ json inspect(const tileinfer::LoadedPlan& plan)
                 {"head_dim", plan.head_dim}, {"max_context", plan.max_context},
                 {"attention_chunks", plan.attention_chunks},
                 {"attention_chunk_steps", plan.attention_chunk_steps},
-                {"attention_fused_steps", plan.attention_fused_steps}}},
+                {"attention_fused_steps", plan.attention_fused_steps},
+                {"ffn_chunks", plan.ffn_chunks}}},
         {"workers", plan.workers}, {"wave_count", plan.wave_count}, {"task_count", plan.task_count},
         {"instruction_count", plan.instructions.size()}, {"worker_loads", plan.worker_loads},
         {"scratch_bytes", plan.scratch_bytes}, {"attention_bytes", plan.attention_bytes},
-        {"attention_partial_bytes", plan.attention_partial_bytes}, {"kv_bytes", plan.kv_bytes},
+        {"attention_partial_bytes", plan.attention_partial_bytes},
+        {"ffn_partial_bytes", plan.ffn_partial_bytes}, {"kv_bytes", plan.kv_bytes},
         {"weight_bytes", plan.weights.size()},
         {"weight_dtype",
             plan.weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},

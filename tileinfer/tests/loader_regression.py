@@ -107,6 +107,44 @@ def rotate_in_later_chunk(plan: dict) -> None:
     del first["output"][1:]
 
 
+def ffn_tasks(plan: dict, opcode: str = "ffn") -> list[dict]:
+    """The first layer's FFN chunk tasks (or reduction tasks) in plan order."""
+    return [
+        t
+        for t in plan["tasks"]
+        if t["layer"] == 0 and t["opcode"].rsplit("_", 1)[0] == opcode
+    ]
+
+
+def renumber_chunks(plan: dict) -> None:
+    """Swap two FFN chunks' partial slots: a legal plan with another sum order."""
+    first, second = ffn_tasks(plan)[:2]
+    for task, chunk in ((first, 1), (second, 0)):
+        task["operands"]["chunk"] = chunk
+        task["output"][1]["chunk"] = chunk
+
+
+def duplicate_partial(plan: dict) -> None:
+    """Give two FFN chunks the same partial slot."""
+    task = ffn_tasks(plan)[1]
+    task["operands"]["chunk"] = 0
+    task["output"][1]["chunk"] = 0
+
+
+def extra_chunk(plan: dict) -> None:
+    """Declare one more FFN chunk, with its workspace, than any task writes."""
+    plan["model"]["ffn_chunks"] += 1
+    plan["storage"]["ffn_partial_bytes"] += plan["model"]["hidden_size"] * 4
+
+
+def reduce_in_ffn_wave(plan: dict) -> None:
+    """Run the first layer's reduction in the FFN wave, before the partials exist."""
+    for task in ffn_tasks(plan, "ffn_reduce"):
+        plan["waves"][task["wave"]]["workers"][task["worker"]].remove(task["id"])
+        task["wave"] -= 1
+        plan["waves"][task["wave"]]["workers"][task["worker"]].append(task["id"])
+
+
 def conditional_wave(plan: dict) -> dict:
     """The first scores wave, whose barrier fused prefixes skip."""
     return next(wave for wave in plan["waves"] if "conditional_barrier" in wave)
@@ -197,6 +235,9 @@ def main() -> None:
                 crossing = copy.deepcopy(original)
                 cross_qk_boundary(crossing)
                 check(crossing, True, "Q/K/V rows across the Q/K boundary")
+                renumbered = copy.deepcopy(original)
+                renumber_chunks(renumbered)
+                check(renumbered, True, "FFN partial slots out of row order")
                 for version in (2, 3):
                     retired = copy.deepcopy(original)
                     retired["header"].update(
@@ -206,7 +247,7 @@ def main() -> None:
                     )
                     retired["model"]["dtype"] = "float32"
                     check(retired, False, f"retired version {version} package")
-                for version in (6, 7):
+                for version in (6, 7, 8):
                     previous = copy.deepcopy(original)
                     previous["header"].update(
                         format_version=version,
@@ -287,6 +328,15 @@ def main() -> None:
                     "too few chunks": lambda p: p["model"].update(attention_chunks=1),
                     "unaligned head": lambda p: p["model"].update(head_dim=6),
                     "undeclared K rows": drop_k_output,
+                    "FFN chunk outside range": lambda p: ffn_tasks(p)[0][
+                        "operands"
+                    ].update(chunk=p["model"]["ffn_chunks"]),
+                    "FFN partial slot shared": duplicate_partial,
+                    "FFN reduction before its partials": reduce_in_ffn_wave,
+                    "FFN workspace": lambda p: p["storage"].update(
+                        ffn_partial_bytes=p["storage"]["ffn_partial_bytes"] + 4
+                    ),
+                    "FFN chunks without tasks": extra_chunk,
                     "rotation in a later chunk": rotate_in_later_chunk,
                 }
                 if kind == "stack":

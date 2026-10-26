@@ -452,7 +452,7 @@ __global__ __launch_bounds__(kThreads, 1) void qkv_waves(
             program.weights + static_cast<std::size_t>(wave % program.layers) * rows * d;
         const ops::Layer<Bf16> layer{program.x, nullptr, program.q, program.k, program.q_rot,
             nullptr, nullptr, nullptr, program.key_cache, program.value_cache, nullptr, nullptr,
-            nullptr, program.norm, weights, weights + static_cast<std::size_t>(d) * d,
+            nullptr, nullptr, program.norm, weights, weights + static_cast<std::size_t>(d) * d,
             weights + static_cast<std::size_t>(d + kv_width) * d, nullptr, nullptr, nullptr,
             nullptr, nullptr, nullptr, nullptr};
         const int begin =
@@ -836,7 +836,7 @@ json qkv_sweep(int sm_count)
 
     QkvProgram program{weights.data(), x.data(), norm.data(), q.data(), k.data(), q_rot.data(),
         key_cache.data(), value_cache.data(),
-        {d, 8192, d / head_dim, kv_heads, head_dim, 0, context, 2, 2048, 384,
+        {d, 8192, d / head_dim, kv_heads, head_dim, 0, context, 2, 2048, 384, sm_count,
             {1e-5f, 500000.0f, 32.0f, 1.0f, 4.0f, 8192.0f}, frequencies.data()},
         layers, 8};
     const auto config = cuda::make_config(
@@ -942,7 +942,7 @@ __device__ inline int worker_end(int rows)
 }
 
 // The next consumer's y: the worker partials summed in worker order, rounded,
-// plus the residual, rounded, as ops::down rounds the unsplit projection.
+// plus the residual, rounded, as ops::ffn_reduce rounds the projection.
 // With `local` set, every worker reduces all of y into shared memory and
 // stores its own slice; without it, a worker reduces only its slice.
 __device__ inline void reduce_partials(
@@ -1049,13 +1049,15 @@ __global__ __launch_bounds__(kThreads, 1) void ffn_waves(__grid_constant__ const
         const Bf16* weights = program.weights + (wave % program.layers) * 3 * matrix;
         const ops::Layer<Bf16> layer{nullptr, program.y, nullptr, nullptr, nullptr, nullptr,
             const_cast<Bf16*>(program.r), program.product, nullptr, nullptr, nullptr, nullptr,
-            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, program.ffn_norm, weights,
-            weights + matrix, weights + 2 * matrix, nullptr, nullptr};
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, program.ffn_norm,
+            weights, weights + matrix, weights + 2 * matrix, nullptr, nullptr};
         if constexpr (Mode == FfnMode::split) {
             ops::gate_up(worker_begin(f), worker_end(f), layer, shape, shared);
             __syncthreads();
             cg::this_grid().sync();
-            ops::down(worker_begin(d), worker_end(d), layer, shape, shared);
+            // S2c's down task, on this probe's row-major Wdown.
+            ops::project_rows(worker_begin(d), worker_end(d), layer.Wdown, layer.product, f,
+                layer.r, layer.y, nullptr, nullptr, shared);
             __syncthreads();
         } else if constexpr (Mode == FfnMode::barriers_split) {
             cg::this_grid().sync();
@@ -1114,8 +1116,8 @@ json ffn_sweep(int sm_count)
 
     FfnProgram program{weights.data(), chunks.data(), r.data(), ffn_norm.data(), attn_norm.data(),
         product.data(), y.data(), partials.data(),
-        {d, f, 32, 8, 64, 0, 4096, 2, 2048, 384, {1e-5f, 500000.0f, 32.0f, 1.0f, 4.0f, 8192.0f},
-            nullptr},
+        {d, f, 32, 8, 64, 0, 4096, 2, 2048, 384, sm_count,
+            {1e-5f, 500000.0f, 32.0f, 1.0f, 4.0f, 8192.0f}, nullptr},
         layers, 4};
     const auto config = cuda::make_config(
         cuda::block_dims<kThreads>(), cuda::grid_dims(sm_count), cuda::cooperative_launch{});

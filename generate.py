@@ -17,8 +17,9 @@ INFER = ROOT / "tileinfer"
 CHECKPOINT = ROOT / "checkpoints" / "Llama-3.2-1B"
 EXECUTOR = INFER / "build" / "release" / "tile_runtime"
 VENV = PLAN / ".venv"
-# Package format accepted by the runtime built from this checkout.
-FORMAT = 6
+# Package format accepted by the runtime built from this checkout; keep it
+# equal to tileplan.plan_core.FORMAT.
+FORMAT = 9
 
 
 def run(command, *, cwd):

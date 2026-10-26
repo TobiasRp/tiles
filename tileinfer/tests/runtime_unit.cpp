@@ -9,7 +9,7 @@
 
 static_assert(static_cast<std::uint32_t>(tileinfer::Opcode::barrier) == 0);
 static_assert(static_cast<std::uint32_t>(tileinfer::Opcode::qkv) == 1);
-static_assert(static_cast<std::uint32_t>(tileinfer::Opcode::down) == 6);
+static_assert(static_cast<std::uint32_t>(tileinfer::Opcode::ffn_reduce) == 6);
 static_assert(static_cast<std::uint32_t>(tileinfer::Opcode::logits) == 9);
 static_assert(static_cast<std::uint32_t>(tileinfer::StorageClass::weight) == 4);
 static_assert(static_cast<std::uint32_t>(tileinfer::TensorId::Wdown) == 17);

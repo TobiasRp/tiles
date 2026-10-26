@@ -21,7 +21,15 @@ of one head per task. Q and K stay unrotated in scratch; each K/V head's
 attention task applies RoPE to its query heads and its current K row, and its
 chunk-0 task stores rotated Q and the K cache row. The arithmetic is
 unchanged, and outputs are bit-identical to version 7; see
-[the S2c milestone](megakernel_next_steps.md#s2c--balanced-qkv--done). Older
+[the S2c milestone](megakernel_next_steps.md#s2c--balanced-qkv--done).
+Version 9 (2026-10-26) fuses the FFN per worker: each FFN task computes the
+gate/up rows of one product chunk and that chunk's FP32 down partial over all
+outputs, reading `Wdown` stored transposed (`[f, d]`); after a barrier, each
+reduction task sums the partials in chunk order for its rows of `y`, rounds,
+and adds the residual. The rounding boundaries are unchanged but the FP32 sum
+order of the down projection is not, so outputs match version 8 within the
+calibrated tolerances, not bitwise; see
+[the S4 results](megakernel_next_steps.md#17-s4-phase-1-results-the-fused-ffn). Older
 package formats are no longer read and must be regenerated; see
 [the megakernel plan](megakernel_next_steps.md). The historical milestone
 results below describe version 3.

@@ -18,6 +18,7 @@ struct PlanShape
     int chunks; // attention chunk tasks per K/V head
     int steps;  // most time steps one attention chunk task covers
     int fused;  // longest prefix one fused attention task per K/V head handles
+    int ffn;    // FFN chunk tasks per layer, each with one FP32 down partial
 };
 
 // Checks the supplied whole-token program without choosing tiles, waves, or

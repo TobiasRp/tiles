@@ -107,9 +107,8 @@ std::vector<int> shape(const Spec& s, Id id)
         return {kv_width};
     case Id::Wgate:
     case Id::Wup:
+    case Id::Wdown: // stored transposed, so an FFN chunk's rows are contiguous
         return {s.f, s.d};
-    case Id::Wdown:
-        return {s.d, s.f};
     case Id::product:
         return {s.f};
     case Id::K:
@@ -181,7 +180,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
     const auto model_kind = header.at("model_kind").get<std::string>();
     const bool full_stack = model_kind == "llama_decoder_stack";
     const int version = positive(header.at("format_version"), "format_version");
-    require(version == 8 && header.at("executor_abi") == kAbi &&
+    require(version == 9 && header.at("executor_abi") == kAbi &&
                 model_kind == (full_stack ? "llama_decoder_stack" : "llama_decoder_block"),
         "unsupported decoder plan header; regenerate the package with the current planner");
     const auto& model = document.at("model");
@@ -205,7 +204,8 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
         positive(model.at("max_context"), "max_context"),
         positive(model.at("attention_chunks"), "attention_chunks"),
         positive(model.at("attention_chunk_steps"), "attention_chunk_steps"),
-        positive(model.at("attention_fused_steps"), "attention_fused_steps")};
+        positive(model.at("attention_fused_steps"), "attention_fused_steps"),
+        positive(model.at("ffn_chunks"), "ffn_chunks")};
     const int layers = positive(model.at("layers"), "layers");
     const int vocab = full_stack ? positive(model.at("vocab_size"), "vocab_size") : 0;
     const bool tied = full_stack ? model.at("tie_word_embeddings").get<bool>() : false;
@@ -233,6 +233,8 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
                     kAttentionSharedBytes &&
                 s.fused <= s.steps && s.chunks == longest_chunks,
         "invalid attention chunking");
+    // One FFN chunk per task, at most one per product row.
+    require(s.ffn <= s.f, "invalid FFN chunking");
     for (std::size_t id = 0; id < kTensorCount; ++id) {
         std::uint64_t elements = 1;
         for (int dimension : shape(s, static_cast<Id>(id)))
@@ -339,14 +341,21 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
     LoadedPlan result{};
     const auto attention_bytes = multiply(multiply(s.nq, s.context), weight_element_bytes);
     const auto partial_bytes = multiply(multiply(multiply(s.chunks, s.nq), s.dh + 2), 4);
+    const auto ffn_partial_bytes = multiply(multiply(s.ffn, s.d), 4);
     require(storage.at("attention_bytes") == attention_bytes &&
-                storage.at("attention_partial_bytes") == partial_bytes,
-        "invalid attention workspace");
+                storage.at("attention_partial_bytes") == partial_bytes &&
+                storage.at("ffn_partial_bytes") == ffn_partial_bytes,
+        "invalid attention or FFN workspace");
+    require(add(partial_bytes, ffn_partial_bytes) / 4 <=
+                static_cast<std::uint64_t>(std::numeric_limits<int>::max()),
+        "partial workspace exceeds address range");
     require(attention_bytes / weight_element_bytes <=
                 static_cast<std::uint64_t>(std::numeric_limits<int>::max()),
         "attention workspace exceeds address range");
     result.attention_bytes = attention_bytes;
     result.attention_partial_bytes = partial_bytes;
+    result.ffn_partial_bytes = ffn_partial_bytes;
+    result.ffn_chunks = s.ffn;
     result.attention_chunks = s.chunks;
     result.attention_chunk_steps = s.steps;
     result.attention_fused_steps = s.fused;

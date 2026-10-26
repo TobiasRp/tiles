@@ -53,14 +53,15 @@ enum class Workspace
 constexpr int kWorkspaceCount = 3;
 
 // Physical storage the worker reads or writes while executing one token.
-// Scratch and attention workspaces are shared by all layers, the two hidden
-// buffers alternate, and each layer appends its own K/V row.
+// Scratch and the attention and FFN workspaces are shared by all layers, the
+// two hidden buffers alternate, and each layer appends its own K/V row.
 struct Buffers
 {
     static constexpr int hidden = 0;  // hidden + (h % 2)
     static constexpr int scratch = 2; // scratch + tensor index
     static constexpr int workspace = scratch + static_cast<int>(kTensorCount);
-    static constexpr int logits = workspace + kWorkspaceCount;
+    static constexpr int ffn = workspace + kWorkspaceCount; // FFN down partials, chunk * d + row
+    static constexpr int logits = ffn + 1;
     static constexpr int kv = logits + 1; // kv + 2 * layer + (0 for K, 1 for V)
 };
 
@@ -119,7 +120,9 @@ struct CheckedTask
     }
 };
 
-constexpr int kLayerKeys = static_cast<int>(kTensorCount) + kWorkspaceCount;
+// Per layer: every tensor, every attention workspace, then the FFN partials.
+constexpr int kFfnKey = static_cast<int>(kTensorCount) + kWorkspaceCount;
+constexpr int kLayerKeys = kFfnKey + 1;
 
 struct Program
 {
@@ -326,19 +329,33 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
         result.fused_reads.front().end = s.nq; // chunk 0 only
         result.fused_writes = result.writes;
         result.work = static_cast<std::int64_t>(end - begin) * s.d;
-    } else if (code == "gate_up") {
-        result.record.opcode = Opcode::gate_up;
+    } else if (code == "ffn") {
+        // A product chunk's gate/up rows, then their FP32 down partial over
+        // every output. The task reads back only its own product rows, which
+        // ops::down_partial stages in the shared vector.
+        result.record.opcode = Opcode::ffn;
         const auto [begin, end] = rows(s.f);
+        const int chunk = index(op.at("chunk"), s.ffn);
+        expected["chunk"] = chunk;
+        result.record.chunk = chunk;
+        require(static_cast<std::int64_t>(end - begin) * (bf16 ? 2 : 4) <= kAttentionSharedBytes,
+            "FFN chunk exceeds the compiled worker's shared memory");
         read(Id::r, 0, s.d);
         write(Id::product, begin, end);
-        result.work = 2LL * (end - begin) * s.d;
-    } else if (code == "down") {
-        result.record.opcode = Opcode::down;
+        result.writes.push_back({Buffers::ffn, chunk * s.d, (chunk + 1) * s.d, produced});
+        result.owned.push_back({layer * kLayerKeys + kFfnKey, chunk * s.d, (chunk + 1) * s.d});
+        outputs.push_back({{"workspace", "ffn_partials"}, {"chunk", chunk}});
+        result.work = 3LL * (end - begin) * s.d;
+    } else if (code == "ffn_reduce") {
+        // Rows of y: every chunk's partial for these rows, in chunk order.
+        result.record.opcode = Opcode::ffn_reduce;
         const auto [begin, end] = rows(s.d);
-        read(Id::product, 0, s.f);
+        for (int chunk = 0; chunk < s.ffn; ++chunk)
+            result.reads.push_back(
+                {Buffers::ffn, chunk * s.d + begin, chunk * s.d + end, produced});
         read(Id::r, begin, end);
         write(Id::y, begin, end);
-        result.work = static_cast<std::int64_t>(end - begin) * s.f;
+        result.work = static_cast<std::int64_t>(end - begin) * s.ffn;
     } else {
         throw std::runtime_error("unsupported decoder opcode");
     }
@@ -378,6 +395,7 @@ void check_ownership(const Program& program, const std::vector<CheckedTask>& tas
         for (Workspace kind : {Workspace::scores, Workspace::partials})
             covered(layer * kLayerKeys + static_cast<int>(kTensorCount) + static_cast<int>(kind),
                 lanes);
+        covered(layer * kLayerKeys + kFfnKey, program.s.ffn * program.s.d);
     }
     for (Stage stage : {Stage::embedding, Stage::final_norm, Stage::logits}) {
         if (program.full_stack)
@@ -406,6 +424,7 @@ class Dataflow
             cells_[Buffers::scratch + id].assign(program.width(static_cast<Id>(id)), {});
         for (int kind = 0; kind < kWorkspaceCount; ++kind)
             cells_[Buffers::workspace + kind].assign(s.chunks * s.nq, {});
+        cells_[Buffers::ffn].assign(static_cast<std::size_t>(s.ffn) * s.d, {});
         cells_[Buffers::logits].assign(program.vocab, {});
         for (int layer = 0; layer < program.layers; ++layer)
             for (int value = 0; value < 2; ++value)
