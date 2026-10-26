@@ -87,12 +87,35 @@ struct SequenceContext::Impl
         detail::cleanup_noexcept([&] { stream.sync(); });
     }
 
-    void require_ready() const
+    void require_ready()
     {
         if (!valid)
             throw std::runtime_error("sequence context is invalid; reset required");
-        if (pending_position)
-            throw std::runtime_error("collect generated result before appending more tokens");
+        resolve_pending();
+    }
+
+    // Only the device knows where an EOS generation stopped. A later request
+    // waits for it here, so a caller that dropped or never waited on its
+    // ticket can still continue the sequence.
+    void resolve_pending()
+    {
+        if (!pending_position)
+            return;
+        const auto ticket = pending_position;
+        try {
+            check(cudaEventSynchronize(ticket->event), "wait for pending generation");
+        } catch (...) {
+            valid = false;
+            throw;
+        }
+        const auto& generation = *ticket->generation;
+        const int count = generation.status.data()[0];
+        if (count < 0 || count > generation.requested) {
+            valid = false;
+            throw std::runtime_error("invalid generated token count");
+        }
+        queued_position = generation.start_position + count;
+        pending_position.reset();
     }
 
     void validate_token(TokenId token_id) const
@@ -325,8 +348,8 @@ Ticket SequenceContext::enqueue_generate(GenerateOptions options, DiagnosticRequ
 
 Ticket SequenceContext::enqueue_reset()
 {
-    if (impl_->pending_position)
-        throw std::runtime_error("collect generated result before reset");
+    // A reset discards the sequence, so a pending EOS position no longer matters.
+    impl_->pending_position.reset();
     auto ticket = impl_->new_ticket(Ticket::State::Kind::reset);
     ticket->end_position = 0;
     try {

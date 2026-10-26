@@ -60,13 +60,6 @@ int main(int argc, char** argv)
 
         auto eos = first.enqueue_generate({2, first_result.generated[1]});
         first.wait(one);
-        bool blocked = false;
-        try {
-            first.enqueue_decode(0);
-        } catch (const std::runtime_error&) {
-            blocked = true;
-        }
-        require(blocked, "waiting on an older ticket released the pending EOS position");
         const auto stopped = first.wait(eos);
         require(stopped.generated == std::vector<tileinfer::TokenId>{first_result.generated[1]} &&
                     stopped.position == 4 && stopped.stop_reason == tileinfer::StopReason::eos,
@@ -74,6 +67,18 @@ int main(int argc, char** argv)
 
         auto continued = first.enqueue_generate({1, std::nullopt});
         require(first.wait(continued).position == 5, "continuation started at the wrong position");
+        // A dropped EOS ticket: the next request waits for the generation and
+        // continues where it stopped, and a reset discards it.
+        first.enqueue_reset();
+        first.enqueue_prefill(prompt);
+        first.enqueue_generate({1, std::nullopt});
+        (void)first.enqueue_generate({2, first_result.generated[1]});
+        auto after_dropped = first.enqueue_generate({1, std::nullopt});
+        require(first.wait(after_dropped).position == 5,
+            "a dropped EOS ticket left the wrong continuation position");
+        first.enqueue_reset();
+        first.enqueue_prefill(prompt);
+        (void)first.enqueue_generate({2, first_result.generated[1]});
         first.enqueue_reset();
         auto final_prefill = first.enqueue_prefill(prompt);
         require(first.wait(final_prefill).position == 2, "reset did not restore the empty prefix");
