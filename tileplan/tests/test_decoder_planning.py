@@ -59,22 +59,22 @@ class DecoderPlanningTest(unittest.TestCase):
     def test_versioned_package_and_earliest_balanced_waves(self) -> None:
         package = self.package(chunk_steps=4, fused_steps=2)
         plan, weights, _ = read_package(package)
-        self.assertEqual(plan["header"]["format_version"], 7)
+        self.assertEqual(plan["header"]["format_version"], 8)
         self.assertEqual({task["layer"] for task in plan["tasks"]}, {0})
         self.assertEqual(plan["header"]["model_kind"], "llama_decoder_block")
         self.assertEqual(plan["model"]["weight_dtype"], "float32")
-        # Q/K/V heads, attention scores, attention values, Wo, gate/up, down.
+        # Q/K/V rows, attention scores, attention values, Wo, gate/up, down.
         # The scores wave ends with the barrier skipped for fused prefixes.
         self.assertEqual(len(plan["waves"]), 6)
         self.assertEqual(
             [wave.get("conditional_barrier") for wave in plan["waves"]],
             [None, {"skip_up_to_length": 2}, None, None, None, None],
         )
-        self.assertEqual(len(plan["model"]["tensors"]), 17)
+        self.assertEqual(len(plan["model"]["tensors"]), 19)
         tensors = {item["id"]: item["name"] for item in plan["model"]["tensors"]}
         self.assertEqual(
             [tensors[entry["tensor"]] for entry in plan["storage"]["scratch"]],
-            ["q_rot", "attention", "r", "product"],
+            ["q", "k", "q_rot", "attention", "r", "product"],
         )
         self.assertEqual(len(plan["storage"]["kv"]), 2)
         self.assertEqual(plan["storage"]["kv_bytes"], 768)

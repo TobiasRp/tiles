@@ -131,7 +131,7 @@ struct Program
 
     [[nodiscard]] int width(Id tensor) const
     {
-        if (tensor == Id::K || tensor == Id::V)
+        if (tensor == Id::K || tensor == Id::V || tensor == Id::k)
             return s.nkv * s.dh;
         return tensor == Id::product ? s.f : s.d;
     }
@@ -255,33 +255,45 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
         stage_output(Stage::logits, "logits", begin, end);
         result.work = static_cast<std::int64_t>(end - begin) * s.d;
     } else if (code == "qkv") {
-        // One head of the concatenated [Q; K; V] projection.
+        // Rows of the concatenated [Q; K; V] projection: Q and K unrotated
+        // into scratch, V into the cache row of the current position.
         result.record.opcode = Opcode::qkv;
         const auto [begin, end] = rows(s.d + 2 * kv_width);
-        require(begin % s.dh == 0 && end == begin + s.dh, "QKV task must cover one head");
         read(Id::x, 0, s.d);
-        if (begin < s.d) {
-            write(Id::q_rot, begin, end);
-        } else {
-            const Id cache = begin < s.d + kv_width ? Id::K : Id::V;
-            const int row = begin - (cache == Id::K ? s.d : s.d + kv_width);
-            write(cache, row, row + s.dh, false);
-            outputs.push_back(
-                {{"tensor", tensor_index(cache)}, {"position", "current"}, {"head", row / s.dh}});
+        if (begin < s.d)
+            write(Id::q, begin, std::min(end, s.d));
+        if (begin < s.d + kv_width && end > s.d)
+            write(Id::k, std::max(begin, s.d) - s.d, std::min(end, s.d + kv_width) - s.d);
+        if (end > s.d + kv_width) {
+            const int first = std::max(begin, s.d + kv_width) - s.d - kv_width;
+            const int last = end - s.d - kv_width;
+            write(Id::V, first, last, false);
+            outputs.push_back({{"tensor", tensor_index(Id::V)}, {"position", "current"},
+                {"rows", {first, last}}});
         }
-        result.work = static_cast<std::int64_t>(s.dh) * s.d;
+        result.work = static_cast<std::int64_t>(end - begin) * s.d;
     } else if (code == "attention_scores") {
         result.record.opcode = Opcode::attention_scores;
         const auto [kv_head, chunk, first] = attention_chunk(Workspace::scores, "scores");
-        read(Id::q_rot, kv_head * group * s.dh, (kv_head + 1) * group * s.dh);
-        read(Id::K, kv_head * s.dh, (kv_head + 1) * s.dh);
+        read(Id::q, kv_head * group * s.dh, (kv_head + 1) * group * s.dh);
+        read(Id::k, kv_head * s.dh, (kv_head + 1) * s.dh);
         for (Workspace kind : {Workspace::scores, Workspace::stats})
             result.writes.push_back({workspace(kind), first, first + group, produced});
+        // Every task rotates its heads; chunk 0 stores rotated Q and the rotated
+        // K row. The task whose chunk ends at the current position takes that
+        // row from scratch, so no task reads the cache row during the token.
+        if (chunk == 0) {
+            write(Id::q_rot, kv_head * group * s.dh, (kv_head + 1) * group * s.dh);
+            write(Id::K, kv_head * s.dh, (kv_head + 1) * s.dh, false);
+            outputs.push_back(
+                {{"tensor", tensor_index(Id::K)}, {"position", "current"}, {"head", kv_head}});
+        }
         result.fused_differs = true;
         if (chunk == 0) {
             result.fused_reads = result.reads;
             result.fused_reads.push_back(
                 {buffer(Id::V), kv_head * s.dh, (kv_head + 1) * s.dh, version(Id::V)});
+            result.fused_writes.assign(result.writes.end() - 2, result.writes.end());
             result.fused_writes.push_back(
                 {workspace(Workspace::partials), first, first + group, produced});
         }
@@ -357,7 +369,7 @@ void check_ownership(const Program& program, const std::vector<CheckedTask>& tas
         require(end == width, "incomplete output ownership");
     };
     constexpr std::array produced{
-        Id::q_rot, Id::K, Id::V, Id::attention, Id::r, Id::product, Id::y};
+        Id::q, Id::k, Id::q_rot, Id::K, Id::V, Id::attention, Id::r, Id::product, Id::y};
     const int lanes = program.s.chunks * program.s.nq;
     for (int layer = 0; layer < program.layers; ++layer) {
         for (Id tensor : produced)

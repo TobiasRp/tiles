@@ -102,8 +102,9 @@ class DecoderStackTest(unittest.TestCase):
                 {task["opcode"] for task in plan["tasks"] if task["layer"] is None},
                 {"embedding_f32", "final_rms_norm_f32", "logits_f32"},
             )
-            # q_rot, attention and r (32 each) plus the FFN product (64), float32.
-            self.assertEqual(plan["storage"]["scratch_bytes"], 640)
+            # q, q_rot, attention and r (32 each), k (16) and the FFN product
+            # (64), float32.
+            self.assertEqual(plan["storage"]["scratch_bytes"], 832)
             self.assertEqual(plan["storage"]["kv_bytes"], 3 * 768)
             self.assertTrue(plan["storage"]["stack"]["lm_head_alias"])
             self.assertEqual(plan["storage"]["stack"]["lm_head_offset"], 0)

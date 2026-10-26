@@ -4,6 +4,8 @@
 //   bandwidth_probe rowdot         the worker's BF16 GEMV routine on decoder shapes
 //   bandwidth_probe ring           GEMV waves through a cp.async weight ring, with
 //                                  and without prefetch across grid barriers
+//   bandwidth_probe qkv            the QKV waves of 16 layers as one-head tasks or
+//                                  as one even row range per worker (S2c gate)
 //
 // All print JSON. Timings are CUDA-event averages over repeated work and are
 // diagnostic: they separate attainable DRAM bandwidth, per-worker bandwidth,
@@ -341,6 +343,133 @@ __global__ __launch_bounds__(kThreads, 1) void ring_rowdot(
     cuda::pipeline_consumer_wait_prior<0>(ring.pipe);
 }
 
+// The QKV waves of `layers` decoder layers, each followed by a grid barrier.
+// Every layer reads its own copy of [Wq; Wk; Wv], so the waves stream from
+// DRAM as in the decoder.
+struct QkvProgram
+{
+    const Bf16* weights; // layers x [Wq; Wk; Wv], row-major
+    const Bf16* x;
+    const Bf16* norm;
+    Bf16* q;     // unrotated Q, even modes
+    Bf16* k;     // unrotated K, even modes
+    Bf16* q_rot; // rotated Q, head mode
+    Bf16* key_cache;
+    Bf16* value_cache;
+    ops::Shape shape;
+    int layers;
+    int iterations;
+};
+
+enum class QkvMode : int
+{
+    barriers, // only the grid barriers
+    heads,    // S2b's one-head tasks, round-robin as its planner assigned them
+    even,     // ops::qkv: one even row range of [Q; K; V] per worker, one norm, no RoPE
+    even_raw, // as even, but projecting x without the norm prologue (diagnostic)
+};
+
+// S2b's QKV task, kept as the reference: one head of [Q; K; V] with its own
+// norm prologue, then RoPE for Q and K and the cache write.
+__device__ inline void qkv_head(
+    int begin, const ops::Layer<Bf16>& layer, const ops::Shape& shape, ops::SharedStorage& shared)
+{
+    const int d = shape.hidden_size;
+    const int dh = shape.head_dim;
+    const int kv_width = shape.kv_heads * dh;
+    Bf16* input = ops::shared_vector<Bf16>(shared);
+    ops::normalize(layer.x, layer.attn_norm, input, 0, d, d, shape.numeric.rms_norm_eps, shared);
+    __syncthreads();
+    const Bf16* matrix = layer.Wq;
+    int row = begin;
+    if (begin >= d + kv_width) {
+        matrix = layer.Wv;
+        row = begin - d - kv_width;
+    } else if (begin >= d) {
+        matrix = layer.Wk;
+        row = begin - d;
+    }
+    Bf16* head = reinterpret_cast<Bf16*>(shared.rotated);
+    for (int i = threadIdx.x / ops::kWarpSize; i < dh; i += ops::kWarpsPerBlock) {
+        const float value =
+            ops::warp_dot(matrix + static_cast<std::size_t>(row + i) * d, input, d, shared);
+        if (threadIdx.x % ops::kWarpSize == 0)
+            head[i] = static_cast<Bf16>(value);
+    }
+    __syncthreads();
+    const int cache_row = shape.position * kv_width + row;
+    if (matrix == layer.Wv) {
+        for (int i = threadIdx.x; i < dh; i += blockDim.x)
+            layer.value_cache[cache_row + i] = head[i];
+        return;
+    }
+    Bf16* rotated = matrix == layer.Wq ? layer.q_rot + row : layer.key_cache + cache_row;
+    for (int pair = threadIdx.x; pair < dh / 2; pair += blockDim.x)
+        ops::rotate_pair(head, rotated, pair, shape);
+}
+
+// Without the norm prologue (diagnostic): the projection of x itself, with
+// the rows and stores of ops::qkv.
+__device__ inline void qkv_raw(int begin, int end, const ops::Layer<Bf16>& layer,
+    const ops::Shape& shape, ops::SharedStorage& shared)
+{
+    const int d = shape.hidden_size;
+    const int kv_width = shape.kv_heads * shape.head_dim;
+    Bf16* input = ops::shared_vector<Bf16>(shared);
+    for (int i = threadIdx.x; i < d; i += blockDim.x)
+        input[i] = layer.x[i];
+    __syncthreads();
+    for (int row = begin + threadIdx.x / ops::kWarpSize; row < end; row += ops::kWarpsPerBlock) {
+        const Bf16* weights = row < d ? layer.Wq + static_cast<std::size_t>(row) * d
+                              : row < d + kv_width
+                                  ? layer.Wk + static_cast<std::size_t>(row - d) * d
+                                  : layer.Wv + static_cast<std::size_t>(row - d - kv_width) * d;
+        const float value = ops::warp_dot(weights, input, d, shared);
+        if (threadIdx.x % ops::kWarpSize != 0)
+            continue;
+        Bf16* output = row < d ? layer.q + row
+                       : row < d + kv_width
+                           ? layer.k + row - d
+                           : layer.value_cache + shape.position * kv_width + row - d - kv_width;
+        *output = static_cast<Bf16>(value);
+    }
+}
+
+__global__ __launch_bounds__(kThreads, 1) void qkv_waves(
+    __grid_constant__ const QkvProgram program, QkvMode mode)
+{
+    __shared__ ops::SharedStorage shared;
+    const auto& shape = program.shape;
+    const int d = shape.hidden_size;
+    const int kv_width = shape.kv_heads * shape.head_dim;
+    const int rows = d + 2 * kv_width;
+    const int heads = rows / shape.head_dim;
+    for (int wave = 0; wave < program.iterations * program.layers; ++wave) {
+        const Bf16* weights =
+            program.weights + static_cast<std::size_t>(wave % program.layers) * rows * d;
+        const ops::Layer<Bf16> layer{program.x, nullptr, program.q, program.k, program.q_rot,
+            nullptr, nullptr, nullptr, program.key_cache, program.value_cache, nullptr, nullptr,
+            nullptr, program.norm, weights, weights + static_cast<std::size_t>(d) * d,
+            weights + static_cast<std::size_t>(d + kv_width) * d, nullptr, nullptr, nullptr,
+            nullptr, nullptr, nullptr, nullptr};
+        const int begin =
+            static_cast<int>(static_cast<std::int64_t>(rows) * blockIdx.x / gridDim.x);
+        const int end =
+            static_cast<int>(static_cast<std::int64_t>(rows) * (blockIdx.x + 1) / gridDim.x);
+        if (mode == QkvMode::heads)
+            for (int head = blockIdx.x; head < heads; head += gridDim.x) {
+                qkv_head(head * shape.head_dim, layer, shape, shared);
+                __syncthreads();
+            }
+        else if (mode == QkvMode::even)
+            ops::qkv(begin, end, layer, shape, shared);
+        else if (mode == QkvMode::even_raw)
+            qkv_raw(begin, end, layer, shape, shared);
+        __syncthreads();
+        cooperative_groups::this_grid().sync();
+    }
+}
+
 // Deterministic BF16 values in [-1, 1).
 __global__ void fill_hashed(Bf16* data, std::size_t count, unsigned seed)
 {
@@ -670,6 +799,92 @@ json ring_sweep(int sm_count)
     result["runs"] = rows;
     return result;
 }
+// Times the QKV waves of 16 Llama 3.2 1B layers in each QkvMode and reports
+// per-layer time; the barriers-only program is the floor of both. V rows are
+// stored unrotated in both modes and must agree bit for bit.
+json qkv_sweep(int sm_count)
+{
+    cuda::device_ref device{0};
+    cuda::stream stream{device};
+    auto& pool = cuda::device_default_memory_pool(device);
+    constexpr double kRooflineGbps = 212.9;
+    constexpr int d = 2048, kv_heads = 8, head_dim = 64, layers = 16, context = 4096;
+    constexpr int kv_width = kv_heads * head_dim;
+    constexpr int rows = d + 2 * kv_width;
+    auto filled = [&](std::size_t count, unsigned seed) {
+        cuda::device_buffer<Bf16> buffer(stream, pool, count, cuda::no_init);
+        cuda::launch(stream, cuda::make_config(cuda::block_dims<256>(), cuda::grid_dims(1024)),
+            fill_hashed, buffer.data(), count, seed);
+        return buffer;
+    };
+    const auto weights = filled(static_cast<std::size_t>(layers) * rows * d, 11);
+    const auto x = filled(d, 3);
+    const auto norm = filled(d, 7);
+    auto q = filled(d, 0);
+    auto k = filled(kv_width, 0);
+    auto q_rot = filled(d, 0);
+    auto key_cache = filled(static_cast<std::size_t>(context) * kv_width, 0);
+    auto value_cache = filled(static_cast<std::size_t>(context) * kv_width, 0);
+    std::vector<float> host_frequencies(head_dim / 2);
+    for (int pair = 0; pair < head_dim / 2; ++pair)
+        host_frequencies[pair] = std::pow(500000.0f, -2.0f * pair / head_dim);
+    cuda::device_buffer<float> frequencies(stream, pool, head_dim / 2, cuda::no_init);
+    cuda::copy_bytes(stream, host_frequencies, frequencies);
+
+    QkvProgram program{weights.data(), x.data(), norm.data(), q.data(), k.data(), q_rot.data(),
+        key_cache.data(), value_cache.data(),
+        {d, 8192, d / head_dim, kv_heads, head_dim, 0, context, 2, 2048, 384,
+            {1e-5f, 500000.0f, 32.0f, 1.0f, 4.0f, 8192.0f}, frequencies.data()},
+        layers, 8};
+    const auto config = cuda::make_config(
+        cuda::block_dims<kThreads>(), cuda::grid_dims(sm_count), cuda::cooperative_launch{});
+    // Median of five timed launches after a warm-up, per layer.
+    auto time = [&](QkvMode mode) {
+        cuda::launch(stream, config, qkv_waves, program, mode);
+        std::vector<double> samples;
+        for (int i = 0; i < 5; ++i) {
+            cuda::timed_event start{stream};
+            start.record(stream);
+            cuda::launch(stream, config, qkv_waves, program, mode);
+            cuda::timed_event end{stream};
+            end.record(stream);
+            end.sync();
+            samples.push_back(elapsed_us(start, end) / (program.iterations * layers));
+        }
+        std::ranges::sort(samples);
+        return samples[2];
+    };
+    auto values = [&] {
+        std::vector<Bf16> result(kv_width);
+        cuda::copy_bytes(stream,
+            cuda::std::span<const Bf16>(
+                value_cache.data() + program.shape.position * kv_width, kv_width),
+            result);
+        stream.sync();
+        return result;
+    };
+
+    const double ideal_us = static_cast<double>(rows) * d * sizeof(Bf16) / kRooflineGbps / 1e3;
+    json runs = json::array();
+    for (int position : {0, 255, 4095}) {
+        program.shape.position = position;
+        const double barrier_us = time(QkvMode::barriers);
+        const double heads_us = time(QkvMode::heads);
+        const auto heads_values = values();
+        const double even_us = time(QkvMode::even);
+        const bool equal =
+            std::memcmp(heads_values.data(), values().data(), kv_width * sizeof(Bf16)) == 0;
+        const double raw_us = time(QkvMode::even_raw);
+        for (const auto& [mode, us] : {std::pair{"barriers", barrier_us}, {"heads", heads_us},
+                 {"even", even_us}, {"even_raw", raw_us}})
+            runs.push_back(
+                {{"position", position}, {"mode", mode}, {"layer_us", us}, {"ideal_us", ideal_us},
+                    {"excess_us", us - barrier_us - ideal_us}, {"v_bitwise_equal", equal}});
+        runs.push_back({{"position", position}, {"mode", "saving"},
+            {"layer_us", heads_us - even_us}, {"token_ms", (heads_us - even_us) * layers / 1e3}});
+    }
+    return {{"roofline_gbps", kRooflineGbps}, {"runs", runs}};
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -686,8 +901,10 @@ int main(int argc, char** argv)
             result["rowdot"] = rowdot_sweep(props.multiProcessorCount);
         else if (mode == "ring" && argc == 2)
             result["ring"] = ring_sweep(props.multiProcessorCount);
+        else if (mode == "qkv" && argc == 2)
+            result["qkv"] = qkv_sweep(props.multiProcessorCount);
         else
-            throw std::runtime_error("usage: bandwidth_probe stream BYTES | rowdot | ring");
+            throw std::runtime_error("usage: bandwidth_probe stream BYTES | rowdot | ring | qkv");
         std::cout << result.dump() << '\n';
     } catch (const std::exception& error) {
         std::cerr << "bandwidth_probe: " << error.what() << '\n';

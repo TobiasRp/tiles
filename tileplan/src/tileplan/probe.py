@@ -4,7 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
-ABI = "tileinfer-decoder-v7"
+ABI = "tileinfer-decoder-v8"
 OPCODES = {
     "qkv_f32",
     "attention_scores_f32",

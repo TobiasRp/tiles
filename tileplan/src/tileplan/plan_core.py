@@ -24,8 +24,8 @@ import torch
 from .decoder_reference import WEIGHT_SHAPES, DecoderSpec
 from .probe import ABI
 
-FORMAT = 7
-GENERATOR = "tileplan-decoder-0.7"
+FORMAT = 8
+GENERATOR = "tileplan-decoder-0.8"
 WEIGHT_DTYPES = {"float32": 4, "bfloat16": 2}
 # Weights keep this order inside each layer's block of weights.bin.
 TENSOR_NAMES = (
@@ -34,6 +34,8 @@ TENSOR_NAMES = (
     "Wq",
     "Wk",
     "Wv",
+    "q",
+    "k",
     "q_rot",
     "K",
     "V",
@@ -162,8 +164,10 @@ def _strides(shape: tuple[int, ...]) -> list[int]:
 def tensor_shape(spec: DecoderSpec, name: str) -> tuple[int, ...]:
     if name in WEIGHT_SHAPES:
         return WEIGHT_SHAPES[name](spec)
-    if name in ("x", "q_rot", "attention", "r", "y"):
+    if name in ("x", "q", "q_rot", "attention", "r", "y"):
         return (spec.hidden_size,)
+    if name == "k":
+        return (spec.num_key_value_heads * spec.head_dim,)
     if name == "product":
         return (spec.intermediate_size,)
     if name in ("K", "V"):
@@ -269,10 +273,11 @@ def _graph(spec: DecoderSpec, workers: int, chunking: dict, dtype: str) -> list[
     """One layer's tasks with their minimal data dependencies.
 
     Projections read a whole input vector, so each depends on every producer
-    of that vector. Q/K/V tasks own one head, so RoPE and the cache write
-    fit in the same task. Attention splits every K/V head's context into
-    chunks of at most ``attention_chunk_steps`` time steps; the remaining
-    projections split their rows evenly over workers.
+    of that vector, and split their rows evenly over workers. Q/K/V tasks
+    store Q and K unrotated; the attention task of each K/V head applies RoPE,
+    and its chunk-0 task stores rotated Q and the rotated K cache row.
+    Attention splits every K/V head's context into chunks of at most
+    ``attention_chunk_steps`` time steps.
     """
     d, f, dh = spec.hidden_size, spec.intermediate_size, spec.head_dim
     nq, nkv = spec.num_attention_heads, spec.num_key_value_heads
@@ -298,17 +303,32 @@ def _graph(spec: DecoderSpec, workers: int, chunking: dict, dtype: str) -> list[
     def rows(tensor: str, begin: int, end: int) -> dict:
         return {"tensor": TID[tensor], "rows": [begin, end]}
 
-    # Q, K and V heads in the order of the concatenated [Q; K; V] projection.
-    heads = []
-    for index in range(nq + 2 * nkv):
-        begin = index * dh
-        if index < nq:
-            output = [rows("q_rot", begin, begin + dh)]
-        else:
-            cache = "K" if index < nq + nkv else "V"
-            head = (index - nq) % nkv
-            output = [{"tensor": TID[cache], "position": "current", "head": head}]
-        heads.append(add("qkv", {"rows": [begin, begin + dh]}, output, [], dh * d))
+    # Rows of the concatenated [Q; K; V] projection, and the tasks that own them.
+    kv_width = nkv * dh
+    projection = []
+    for begin, end in _split(d + 2 * kv_width, workers):
+        output = []
+        if begin < d:
+            output.append(rows("q", begin, min(end, d)))
+        if begin < d + kv_width and end > d:
+            output.append(rows("k", max(begin, d) - d, min(end, d + kv_width) - d))
+        if end > d + kv_width:
+            first = max(begin, d + kv_width) - d - kv_width
+            output.append(
+                {
+                    "tensor": TID["V"],
+                    "position": "current",
+                    "rows": [first, end - d - kv_width],
+                }
+            )
+        task = add("qkv", {"rows": [begin, end]}, output, [], (end - begin) * d)
+        projection.append((begin, end, task))
+
+    def producers(begin: int, end: int) -> list[int]:
+        """The QKV tasks that write any of rows [begin,end) of [Q; K; V]."""
+        return [
+            task for first, last, task in projection if first < end and begin < last
+        ]
 
     chunks = chunking["attention_chunks"]
     steps = min(chunking["attention_chunk_steps"], spec.max_context)
@@ -316,13 +336,21 @@ def _graph(spec: DecoderSpec, workers: int, chunking: dict, dtype: str) -> list[
     scores, values = [], []
     for kv_head in range(nkv):
         queries = [kv_head * group, (kv_head + 1) * group]
-        inputs = heads[queries[0] : queries[1]]
-        inputs += [heads[nq + kv_head], heads[nq + nkv + kv_head]]
+        inputs = producers(queries[0] * dh, queries[1] * dh)
+        inputs += producers(d + kv_head * dh, d + (kv_head + 1) * dh)
+        inputs += producers(
+            d + kv_width + kv_head * dh, d + kv_width + (kv_head + 1) * dh
+        )
+        rotated = [
+            rows("q_rot", queries[0] * dh, queries[1] * dh),
+            {"tensor": TID["K"], "position": "current", "head": kv_head},
+        ]
         group_scores = [
             add(
                 "attention_scores",
                 {"kv_head": kv_head, "chunk": chunk},
-                [{"workspace": "scores", "chunk": chunk, "heads": queries}],
+                [{"workspace": "scores", "chunk": chunk, "heads": queries}]
+                + (rotated if chunk == 0 else []),
                 inputs,
                 chunk_work,
             )

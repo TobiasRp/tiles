@@ -82,12 +82,12 @@ float positive_float(const json& value, const char* name)
 
 using Spec = detail::PlanShape;
 
-constexpr std::array<const char*, kTensorCount> names{"x", "attn_norm", "Wq", "Wk", "Wv", "q_rot",
-    "K", "V", "attention", "Wo", "r", "ffn_norm", "Wgate", "Wup", "product", "Wdown", "y"};
+constexpr std::array<const char*, kTensorCount> names{"x", "attn_norm", "Wq", "Wk", "Wv", "q", "k",
+    "q_rot", "K", "V", "attention", "Wo", "r", "ffn_norm", "Wgate", "Wup", "product", "Wdown", "y"};
 using Id = TensorId;
 constexpr std::array weight_ids{
     Id::attn_norm, Id::Wq, Id::Wk, Id::Wv, Id::Wo, Id::ffn_norm, Id::Wgate, Id::Wup, Id::Wdown};
-constexpr std::array scratch_ids{Id::q_rot, Id::attention, Id::r, Id::product};
+constexpr std::array scratch_ids{Id::q, Id::k, Id::q_rot, Id::attention, Id::r, Id::product};
 constexpr std::array kv_ids{Id::K, Id::V};
 
 std::vector<int> shape(const Spec& s, Id id)
@@ -103,6 +103,8 @@ std::vector<int> shape(const Spec& s, Id id)
     case Id::Wk:
     case Id::Wv:
         return {kv_width, s.d};
+    case Id::k:
+        return {kv_width};
     case Id::Wgate:
     case Id::Wup:
         return {s.f, s.d};
@@ -179,7 +181,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
     const auto model_kind = header.at("model_kind").get<std::string>();
     const bool full_stack = model_kind == "llama_decoder_stack";
     const int version = positive(header.at("format_version"), "format_version");
-    require(version == 7 && header.at("executor_abi") == kAbi &&
+    require(version == 8 && header.at("executor_abi") == kAbi &&
                 model_kind == (full_stack ? "llama_decoder_stack" : "llama_decoder_block"),
         "unsupported decoder plan header; regenerate the package with the current planner");
     const auto& model = document.at("model");
@@ -375,10 +377,10 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
                                 entry.at("offset").get<std::uint64_t>() / weight_element_bytes)};
     }
     const auto offset = [&](Id id) { return result.tensors[tensor_index(id)].offset; };
-    result.layout = {offset(Id::q_rot), offset(Id::attention), offset(Id::r), offset(Id::product),
-        offset(Id::K), offset(Id::V), offset(Id::attn_norm), offset(Id::Wq), offset(Id::Wk),
-        offset(Id::Wv), offset(Id::Wo), offset(Id::ffn_norm), offset(Id::Wgate), offset(Id::Wup),
-        offset(Id::Wdown)};
+    result.layout = {offset(Id::q), offset(Id::k), offset(Id::q_rot), offset(Id::attention),
+        offset(Id::r), offset(Id::product), offset(Id::K), offset(Id::V), offset(Id::attn_norm),
+        offset(Id::Wq), offset(Id::Wk), offset(Id::Wv), offset(Id::Wo), offset(Id::ffn_norm),
+        offset(Id::Wgate), offset(Id::Wup), offset(Id::Wdown)};
     for (int pair = 0; pair < s.dh / 2; ++pair) {
         const float inverse = 1.0f / std::pow(numeric.rope_theta, 2.0f * pair / s.dh);
         const float wavelength = 2.0f * std::numbers::pi_v<float> / inverse;

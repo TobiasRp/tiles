@@ -127,19 +127,19 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
                     owned(width, begin, end, w, dtype),
                 )
 
-        # One Q, K or V head: normalized input, projection, RoPE, cache write.
+        # Rows of [Q; K; V]: normalized input and projection. Q and K stay
+        # unrotated in scratch and V goes to the current cache row. Ranges
+        # cross the Q/K and K/V boundaries and start inside a head.
         for nq, nkv, dh in ((4, 2, 10), (4, 1, 64), (2, 1, 160)):
             d = nq * dh
             kv_width = nkv * dh
+            rows = d + 2 * kv_width
             for position in (0, 1, 63, 4095, 8192):
                 x, scale = random(d, dtype=dtype), random(d, dtype=dtype)
                 wq, wk, wv = (
                     random(d, d, dtype=dtype) / 8,
                     random(kv_width, d, dtype=dtype) / 8,
                     random(kv_width, d, dtype=dtype) / 8,
-                )
-                frequencies = 1.0 / (
-                    500000.0 ** (torch.arange(0, dh, 2, device="cuda").float() / dh)
                 )
                 u = norm(x, scale)
                 q, k, v = F.linear(u, wq), F.linear(u, wk), F.linear(u, wv)
@@ -156,28 +156,35 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
                     "Wq": raw(wq),
                     "Wk": raw(wk),
                     "Wv": raw(wv),
-                    "frequencies": raw(frequencies),
                 }
-                head, kv_head = nq - 1, nkv - 1
-                expected = torch.full((d,), SENTINEL, device="cuda", dtype=dtype)
-                expected[head * dh : (head + 1) * dh] = rope(
-                    q[head * dh : (head + 1) * dh], position, frequencies
-                )
-                add({**base, "begin": head * dh}, "q_rot", expected)
-                cache = torch.full(
-                    ((position + 1) * kv_width,), SENTINEL, device="cuda", dtype=dtype
-                )
-                row = position * kv_width + kv_head * dh
-                key = cache.clone()
-                key[row : row + dh] = rope(
-                    k[kv_head * dh : (kv_head + 1) * dh], position, frequencies
-                )
-                add({**base, "begin": d + kv_head * dh}, "key_cache", key)
-                value = cache.clone()
-                value[row : row + dh] = v[kv_head * dh : (kv_head + 1) * dh]
-                add(
-                    {**base, "begin": d + kv_width + kv_head * dh}, "value_cache", value
-                )
+
+                def part(begin, end, first, width):
+                    """Rows [begin,end) of [Q; K; V] within the part at ``first``."""
+                    low = min(max(begin - first, 0), width)
+                    return low, max(min(end - first, width), low)
+
+                for begin, end in (
+                    (0, rows),
+                    (d - 3, d + kv_width + 5),
+                    (d + 1, rows - 1),
+                ):
+                    case = {**base, "begin": begin, "end": end}
+                    add(case, "q", owned(d, *part(begin, end, 0, d), q, dtype))
+                    add(
+                        case,
+                        "k",
+                        owned(kv_width, *part(begin, end, d, kv_width), k, dtype),
+                    )
+                    first, last = part(begin, end, d + kv_width, kv_width)
+                    row = position * kv_width
+                    value = torch.full(
+                        ((position + 1) * kv_width,),
+                        SENTINEL,
+                        device="cuda",
+                        dtype=dtype,
+                    )
+                    value[row + first : row + last] = v[first:last]
+                    add(case, "value_cache", value)
 
         # Attention over the visible prefix for every head, as one fused task
         # per K/V head up to fused_steps, otherwise split into at least two
@@ -199,20 +206,32 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
             capacity = length + 3
             fused = length <= fused_steps
             d = nq * dh
+            position = length - 1
+            frequencies = 1.0 / (
+                500000.0 ** (torch.arange(0, dh, 2, device="cuda").float() / dh)
+            )
             for kind in ("random", "flat", "peaked"):
                 q = random(nq, dh, dtype=dtype)
                 k, v = (
                     random(capacity, nkv, dh, dtype=dtype),
                     random(capacity, nkv, dh, dtype=dtype),
                 )
+                current = random(nkv, dh, dtype=dtype)
                 if kind == "flat":
                     q.zero_()
                 if kind == "peaked":
                     q *= 16
                     k *= 16
-                # Unused capacity must not participate in attention.
-                k[length:] = 1000
+                    current *= 16
+                # Unused capacity must not participate in attention, and the
+                # task takes the current K row from scratch, not the cache.
+                k[length - 1 :] = 1000
                 v[length:] = 1000
+                rotated = torch.stack([rope(head, position, frequencies) for head in q])
+                cache = k.clone()
+                cache[position] = torch.stack(
+                    [rope(head, position, frequencies) for head in current]
+                )
                 # Split chunks leave their BF16 scores in the workspace; a fused
                 # task keeps them in shared memory.
                 attended, scores = (
@@ -221,32 +240,41 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
                 )
                 for head in range(nq):
                     kv_head = head // (nq // nkv)
-                    score = (q[head][None, :] @ k[:length, kv_head].T) * (dh**-0.5)
+                    score = (rotated[head][None, :] @ cache[:length, kv_head].T) * (
+                        dh**-0.5
+                    )
                     probs = torch.softmax(score, dim=-1, dtype=torch.float32).to(dtype)
                     if not fused:
                         scores[head, :length] = score[0]
                     attended.append((probs @ v[:length, kv_head])[0])
+                case = {
+                    "op": "attention",
+                    "dtype": label,
+                    "hidden": d,
+                    "heads": nq,
+                    "kv_heads": nkv,
+                    "head_dim": dh,
+                    "position": position,
+                    "capacity": capacity,
+                    "chunk_steps": chunk_steps,
+                    "fused_steps": fused_steps,
+                    "q": raw(q),
+                    "k": raw(current),
+                    "key_cache": raw(k),
+                    "value_cache": raw(v),
+                    "frequencies": raw(frequencies),
+                    "Wo": raw(torch.eye(d, device="cuda")),
+                }
                 add(
-                    {
-                        "op": "attention",
-                        "dtype": label,
-                        "hidden": d,
-                        "heads": nq,
-                        "kv_heads": nkv,
-                        "head_dim": dh,
-                        "position": length - 1,
-                        "capacity": capacity,
-                        "chunk_steps": chunk_steps,
-                        "fused_steps": fused_steps,
-                        "q_rot": raw(q),
-                        "key_cache": raw(k),
-                        "value_cache": raw(v),
-                        "Wo": raw(torch.eye(d, device="cuda")),
-                    },
+                    case,
                     "attention",
                     torch.cat(attended),
                     {"buffer": "scores", "expected": scores.flatten()},
                 )
+                if kind == "random":
+                    # Chunk 0 stores rotated Q and the rotated current K row.
+                    add(case, "q_rot", rotated)
+                    add(case, "key_cache", cache)
 
         # Gate and up rows of the normalized input, combined as SiLU(gate) * up.
         for d, f in ((10, 7), (64, 93), (333, 41), (2048, 64)):

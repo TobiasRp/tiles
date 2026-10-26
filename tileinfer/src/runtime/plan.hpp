@@ -13,13 +13,13 @@ namespace tileinfer {
 using TokenId = std::int32_t;
 
 inline constexpr int kThreads = 1024;
-inline constexpr const char* kAbi = "tileinfer-decoder-v7";
+inline constexpr const char* kAbi = "tileinfer-decoder-v8";
 inline constexpr const char* kFingerprint =
-    "decoder-fused-abi7-bf16-eager-simt-wide-attention-v1-sm86-b1024";
+    "decoder-fused-abi8-bf16-eager-simt-wide-attention-v2-sm86-b1024";
 
 // Shared-memory limits of the compiled worker; the loader rejects larger models.
 inline constexpr int kMaxHidden = 4096; // a task's input vector lives in shared memory
-inline constexpr int kMaxHeadDim = 128; // one projected head; one K/V row per warp at most
+inline constexpr int kMaxHeadDim = 128; // one K/V row per warp at most
 inline constexpr int kMaxGroup = 8;     // query heads per K/V head, a power of two
 // Shared bytes for one attention task's scores or probabilities of all its query heads.
 inline constexpr int kAttentionSharedBytes = kMaxHidden * 4;
@@ -35,8 +35,8 @@ enum class WeightDtype : std::uint32_t
 enum class Opcode : std::uint32_t
 {
     barrier = 0,           // grid barrier at the same stream position in every worker
-    qkv = 1,               // one head of [Q; K; V] rows: norm, project, RoPE, cache write
-    attention_scores = 2,  // one K/V head x context chunk: scores and chunk softmax statistics
+    qkv = 1,               // [Q; K; V] rows: norm, project, Q and K unrotated, V cache write
+    attention_scores = 2,  // one K/V head x context chunk: RoPE, scores, chunk softmax statistics
     attention_values = 3,  // one K/V head x context chunk: probabilities and partial P*V
     output_projection = 4, // Wo rows: combine attention partials, project, add the residual
     gate_up = 5,           // gate and up rows: norm, project both, SiLU(gate) * up
@@ -79,18 +79,20 @@ enum class TensorId : std::uint32_t
     Wq = 2,
     Wk = 3,
     Wv = 4,
-    q_rot = 5,
-    K = 6,
-    V = 7,
-    attention = 8,
-    Wo = 9,
-    r = 10,
-    ffn_norm = 11,
-    Wgate = 12,
-    Wup = 13,
-    product = 14,
-    Wdown = 15,
-    y = 16,
+    q = 5,
+    k = 6,
+    q_rot = 7,
+    K = 8,
+    V = 9,
+    attention = 10,
+    Wo = 11,
+    r = 12,
+    ffn_norm = 13,
+    Wgate = 14,
+    Wup = 15,
+    product = 16,
+    Wdown = 17,
+    y = 18,
     count,
 };
 
@@ -128,6 +130,8 @@ struct TensorRecord
 // K/V offsets are within one layer's cache, weights within one layer's block.
 struct LayerLayout
 {
+    std::uint32_t q;
+    std::uint32_t k;
     std::uint32_t q_rot;
     std::uint32_t attention;
     std::uint32_t r;

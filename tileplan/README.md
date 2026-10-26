@@ -4,11 +4,13 @@ TilePlan is the offline Python half of Tiles. It converts a checkpoint or
 synthetic fixture into `plan.json` and `weights.bin`: a tiled task DAG for a
 whole token (embedding, every layer, final norm, and logits), its wave
 schedule over logical workers, tensor layout, and packed float32 or BF16
-weights. Each layer has six task waves: one Q, K or V head per task (with its
-RMSNorm, RoPE and cache write fused in); attention scores and attention
-values per K/V head and context chunk; and the output, gate/up (with
-SiLU·up) and down projections split into one row range per worker.
-`visualize` draws one layer of that program. Version-7 packages
+weights. Each layer has six task waves: the [Q; K; V] projection (with its
+RMSNorm fused in; Q and K stay unrotated, V goes to the cache); attention
+scores and attention values per K/V head and context chunk, where the scores
+task applies RoPE and chunk 0 writes the rotated K cache row; and the output,
+gate/up (with SiLU·up) and down projections. Every projection splits its rows
+into one range per worker. `visualize` draws one layer of that program.
+Version-8 packages
 use the same storage dtype for weights, activations, and K/V, with float32
 accumulation and selected float32 internal math. Python validates graph
 dependencies and planning metadata; [TileInfer](../tileinfer/README.md) checks

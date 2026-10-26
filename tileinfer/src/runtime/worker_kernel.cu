@@ -56,12 +56,12 @@ struct Launch
         Scalar* cache = kv + index * stack.layer_kv_stride;
         float* partials = attention_partials;
         float* stats = partials + shape.attention_chunks * shape.hidden_size;
-        return {hidden(index), hidden(index + 1), scratch + layout.q_rot,
-            scratch + layout.attention, scratch + layout.r, scratch + layout.product,
-            cache + layout.key, cache + layout.value, attention_scores, partials, stats,
-            w + layout.attn_norm, w + layout.Wq, w + layout.Wk, w + layout.Wv, w + layout.Wo,
-            w + layout.ffn_norm, w + layout.Wgate, w + layout.Wup, w + layout.Wdown, ffn_trace,
-            block_trace == nullptr ? nullptr : block_trace + index * shape.hidden_size};
+        return {hidden(index), hidden(index + 1), scratch + layout.q, scratch + layout.k,
+            scratch + layout.q_rot, scratch + layout.attention, scratch + layout.r,
+            scratch + layout.product, cache + layout.key, cache + layout.value, attention_scores,
+            partials, stats, w + layout.attn_norm, w + layout.Wq, w + layout.Wk, w + layout.Wv,
+            w + layout.Wo, w + layout.ffn_norm, w + layout.Wgate, w + layout.Wup, w + layout.Wdown,
+            ffn_trace, block_trace == nullptr ? nullptr : block_trace + index * shape.hidden_size};
     }
 };
 
@@ -100,7 +100,7 @@ __global__ __launch_bounds__(kThreads, 1) void decoder_worker(Launch<Scalar> lau
                 cg::this_grid().sync();
             break;
         case Opcode::qkv:
-            ops::qkv(begin, launch.layer(task.layer), shape, shared);
+            ops::qkv(begin, end, launch.layer(task.layer), shape, shared);
             break;
         case Opcode::attention_scores:
             ops::attention_scores(

@@ -40,7 +40,8 @@ struct SharedStorage
     // A task's input vector, or an attention task's scores, probabilities and
     // P*V reduction; typed by the caller.
     alignas(16) unsigned char vector[kAttentionSharedBytes];
-    alignas(16) unsigned char head[kMaxHeadDim * sizeof(float)];
+    // An attention task's rotated query heads, then its rotated current K row.
+    alignas(16) unsigned char rotated[(kMaxGroup + 1) * kMaxHeadDim * sizeof(float)];
 };
 static_assert(kAttentionSharedBytes >= kMaxHidden * sizeof(float));
 static_assert(kAttentionSharedBytes >= kWarpsPerBlock * kMaxHeadDim * sizeof(float));
@@ -74,7 +75,9 @@ struct Layer
 {
     const Scalar* x; // layer input
     Scalar* y;       // layer output
-    Scalar* q_rot;
+    Scalar* q;       // projected Q before RoPE
+    Scalar* k;       // projected K of the current position before RoPE
+    Scalar* q_rot;   // rotated Q, kept for diagnostics
     Scalar* attention;
     Scalar* r; // attention block output, the FFN's input and residual
     Scalar* product;
@@ -236,47 +239,34 @@ __device__ inline void project_rows(int begin, int end, const Scalar* matrix, co
     }
 }
 
-/// One head of the concatenated [Q; K; V] projection: normalize the layer input,
-/// project the head's rows, then write rotated Q, rotated K, or V into its cache row.
-/// @param begin,end Rows of [Q; K; V] covering exactly one head.
+/// Rows [begin,end) of the concatenated [Q; K; V] projection of the normalized
+/// layer input, one warp per row. Q and K round to Scalar and stay unrotated in
+/// their scratch vectors; the attention task of their K/V head applies RoPE. V
+/// rows go to the cache row of the current position.
 template <typename Scalar>
 __device__ inline void qkv(
-    int begin, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
+    int begin, int end, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
 {
     const int d = shape.hidden_size;
-    const int dh = shape.head_dim;
-    const int kv_width = shape.kv_heads * dh;
+    const int kv_width = shape.kv_heads * shape.head_dim;
     Scalar* input = shared_vector<Scalar>(shared);
     normalize(layer.x, layer.attn_norm, input, 0, d, d, shape.numeric.rms_norm_eps, shared);
     __syncthreads();
-
-    const Scalar* matrix = layer.Wq;
-    int row = begin;
-    if (begin >= d + kv_width) {
-        matrix = layer.Wv;
-        row = begin - d - kv_width;
-    } else if (begin >= d) {
-        matrix = layer.Wk;
-        row = begin - d;
+    for (int row = begin + threadIdx.x / kWarpSize; row < end; row += kWarpsPerBlock) {
+        const Scalar* weights =
+            row < d ? layer.Wq + static_cast<cuda::std::size_t>(row) * d
+            : row < d + kv_width
+                ? layer.Wk + static_cast<cuda::std::size_t>(row - d) * d
+                : layer.Wv + static_cast<cuda::std::size_t>(row - d - kv_width) * d;
+        const float value = warp_dot(weights, input, d, shared);
+        if (threadIdx.x % kWarpSize != 0)
+            continue;
+        Scalar* output = row < d ? layer.q + row
+                         : row < d + kv_width
+                             ? layer.k + row - d
+                             : layer.value_cache + shape.position * kv_width + row - d - kv_width;
+        *output = static_cast<Scalar>(value);
     }
-    Scalar* head = reinterpret_cast<Scalar*>(shared.head);
-    for (int i = threadIdx.x / kWarpSize; i < dh; i += kWarpsPerBlock) {
-        const float value =
-            warp_dot(matrix + static_cast<cuda::std::size_t>(row + i) * d, input, d, shared);
-        if (threadIdx.x % kWarpSize == 0)
-            head[i] = static_cast<Scalar>(value);
-    }
-    __syncthreads();
-
-    const int cache_row = shape.position * kv_width + row;
-    if (matrix == layer.Wv) {
-        for (int i = threadIdx.x; i < dh; i += blockDim.x)
-            layer.value_cache[cache_row + i] = head[i];
-        return;
-    }
-    Scalar* rotated = matrix == layer.Wq ? layer.q_rot + row : layer.key_cache + cache_row;
-    for (int pair = threadIdx.x; pair < dh / 2; pair += blockDim.x)
-        rotate_pair(head, rotated, pair, shape);
 }
 
 /// Chunk tasks with work at this position. A prefix of at most
@@ -377,56 +367,69 @@ __device__ inline float row_dot(const uint4& query, const uint4& row, int lanes_
 }
 
 /// Scores of a K/V head's query heads over time steps [begin,end):
-/// scores[g * stride + time - begin]. QK and the scaling are separate BF16
+/// scores[g * stride + time - begin]. `rotated` holds the group's rotated
+/// query heads; `current`, when set, is the rotated K row of time end - 1,
+/// which the cache may not hold yet. QK and the scaling are separate BF16
 /// rounding boundaries, as in eager attention. With a fixed Group, lanes keep
-/// q in registers; Group == 0 reloads it from L1 for each row.
+/// q in registers; Group == 0 reloads it from shared memory for each row.
 template <typename Scalar, int Group, int Lanes>
-__device__ inline void score_rows(int kv_head, int begin, int end, const Layer<Scalar>& layer,
-    const Shape& shape, Scalar* scores, int stride)
+__device__ inline void score_rows(int kv_head, int begin, int end, const Scalar* rotated,
+    const Scalar* current, const Layer<Scalar>& layer, const Shape& shape, Scalar* scores,
+    int stride)
 {
     constexpr int kVector = kVectorElements<Scalar>;
     const RowLanes<Scalar, Lanes> lanes(shape);
     const int warp = threadIdx.x / kWarpSize;
     const float scale = 1.0f / cuda::std::sqrt(static_cast<float>(shape.head_dim));
     const int group = group_size<Group>(shape);
-    const Scalar* query = layer.q_rot + kv_head * group * shape.head_dim + lanes.vector * kVector;
+    const Scalar* query = rotated + lanes.vector * kVector;
+    const int cached = current == nullptr ? end : end - 1; // rows read from the cache
     uint4 q[Group > 0 ? Group : 1];
     if constexpr (Group > 0)
 #pragma unroll
         for (int g = 0; g < Group; ++g)
             q[g] = load_vector(query + g * shape.head_dim, true);
-    auto store = [&](int g, int time, float dot) {
-        if (lanes.vector == 0 && time < end)
+    // Every lane joins the row reduction; lanes of a valid row's first vector store.
+    auto store = [&](int g, int time, bool valid, float dot) {
+        if (lanes.vector == 0 && valid)
             scores[g * stride + time - begin] =
                 static_cast<Scalar>(static_cast<float>(static_cast<Scalar>(dot)) * scale);
     };
+    auto score = [&](int time, bool valid, const uint4& row) {
+        if constexpr (Group > 0) {
+#pragma unroll
+            for (int g = 0; g < Group; ++g)
+                store(g, time, valid, row_dot<Scalar>(q[g], row, lanes.count));
+        } else {
+            for (int g = 0; g < group; ++g)
+                store(g, time, valid,
+                    row_dot<Scalar>(
+                        load_vector(query + g * shape.head_dim, true), row, lanes.count));
+        }
+    };
 
     const int rows = kWarpsPerBlock * lanes.rows * kRowsInFlight;
-    for (int first = begin; first < end; first += rows) {
+    for (int first = begin; first < cached; first += rows) {
         uint4 raw[kRowsInFlight];
 #pragma unroll
         for (int u = 0; u < kRowsInFlight; ++u) {
             const int time = first + (u * kWarpsPerBlock + warp) * lanes.rows + lanes.sub;
             raw[u] =
-                load_vector(layer.key_cache + kv_row(time < end ? time : begin, kv_head, shape) +
+                load_vector(layer.key_cache + kv_row(time < cached ? time : begin, kv_head, shape) +
                                 lanes.vector * kVector,
-                    time < end);
+                    time < cached);
         }
 #pragma unroll
         for (int u = 0; u < kRowsInFlight; ++u) {
             const int time = first + (u * kWarpsPerBlock + warp) * lanes.rows + lanes.sub;
-            if constexpr (Group > 0) {
-#pragma unroll
-                for (int g = 0; g < Group; ++g)
-                    store(g, time, row_dot<Scalar>(q[g], raw[u], lanes.count));
-            } else {
-                for (int g = 0; g < group; ++g)
-                    store(g, time,
-                        row_dot<Scalar>(
-                            load_vector(query + g * shape.head_dim, true), raw[u], lanes.count));
-            }
+            score(time, time < cached, raw[u]);
         }
     }
+    // The current row, by the first row slot of the last warp: the same lanes
+    // and reduction as a cached row, so its scores match bit for bit.
+    if (current != nullptr && warp == kWarpsPerBlock - 1)
+        score(
+            cached, lanes.sub == 0, load_vector(current + lanes.vector * kVector, lanes.sub == 0));
 }
 
 /// Softmax statistics of `length` scores by one warp: the maximum and the sum
@@ -510,10 +513,41 @@ __device__ inline void value_rows(int kv_head, int begin, int length, const Scal
     }
 }
 
+/// Rotate a K/V head's query heads and its current K row into
+/// shared.rotated: [group][head_dim] query heads, then the K row. Chunk 0
+/// also stores them, rotated Q for diagnostics and K into the cache row of
+/// the current position, which no other task reads during this token.
+template <typename Scalar>
+__device__ inline Scalar* rotate_group(int kv_head, int chunk, int group,
+    const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
+{
+    const int dh = shape.head_dim;
+    const int first_head = kv_head * group;
+    Scalar* rotated = reinterpret_cast<Scalar*>(shared.rotated);
+    for (int index = threadIdx.x; index < (group + 1) * dh / 2; index += blockDim.x) {
+        const int head = index / (dh / 2);
+        const Scalar* source =
+            head < group ? layer.q + (first_head + head) * dh : layer.k + kv_head * dh;
+        rotate_pair(source, rotated + head * dh, index - head * (dh / 2), shape);
+    }
+    __syncthreads();
+    if (chunk == 0) {
+        Scalar* key = layer.key_cache + kv_row(shape.position, kv_head, shape);
+        for (int index = threadIdx.x; index < (group + 1) * dh; index += blockDim.x)
+            if (index < group * dh)
+                layer.q_rot[first_head * dh + index] = rotated[index];
+            else
+                key[index - group * dh] = rotated[index];
+    }
+    return rotated;
+}
+
 /// Scores task of one K/V head and context chunk. With several active chunks it
 /// stores the chunk's scores and each head's chunk statistics for the values
 /// task. With one active chunk it keeps scores and probabilities in shared
 /// memory and also computes the softmax and P*V, so the values wave has no work.
+/// Every active task rotates its query heads itself; the task whose chunk ends
+/// at the current position takes that K row from shared memory, not the cache.
 template <typename Scalar, int Group, int Lanes>
 __device__ inline void attention_scores_group(
     int kv_head, int chunk, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
@@ -527,10 +561,12 @@ __device__ inline void attention_scores_group(
     const int first_head = kv_head * group;
     const int warp = threadIdx.x / kWarpSize;
     const int lane = threadIdx.x % kWarpSize;
+    const Scalar* rotated = rotate_group(kv_head, chunk, group, layer, shape, shared);
+    const Scalar* current = end == shape.position + 1 ? rotated + group * shape.head_dim : nullptr;
     if (chunks > 1) {
         Scalar* scores = layer.scores + first_head * shape.max_context + begin;
         score_rows<Scalar, Group, Lanes>(
-            kv_head, begin, end, layer, shape, scores, shape.max_context);
+            kv_head, begin, end, rotated, current, layer, shape, scores, shape.max_context);
         __syncthreads();
         if (warp < group) {
             const float2 statistics =
@@ -546,7 +582,8 @@ __device__ inline void attention_scores_group(
 
     const int length = end;
     Scalar* scores = shared_vector<Scalar>(shared); // [group][length], then probabilities
-    score_rows<Scalar, Group, Lanes>(kv_head, 0, length, layer, shape, scores, length);
+    score_rows<Scalar, Group, Lanes>(
+        kv_head, 0, length, rotated, current, layer, shape, scores, length);
     __syncthreads();
     float* statistics = shared.norm_partials; // [0, group): maximum, [group, 2 group): sum
     if (warp < group) {

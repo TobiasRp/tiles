@@ -9,7 +9,7 @@ GPU greedy selection feeds back the next token. The current RTX 3050 worker
 uses 1024 threads per block and one logical worker per SM; worker IDs have no
 physical SM affinity.
 
-Version-7 packages use either float32 or BF16 weights, activations, and K/V.
+Version-8 packages use either float32 or BF16 weights, activations, and K/V.
 BF16 matrix operands accumulate in float32; RMSNorm statistics, softmax, RoPE
 frequency/trigonometric work, and SiLU internals retain float32 math. BF16
 rounding follows the pinned PyTorch eager operator boundaries. Public logits
@@ -138,6 +138,9 @@ projection shapes with 1–20 active workers. See
 grid barriers. It compares direct loads with a `cp.async` shared-memory
 weight ring, refilled before or after each barrier, and with an L2 prefetch;
 see [the S3 results](../docs/blog/s3-weight-prefetch-2026-10.md).
+`bandwidth_probe qkv` runs the QKV waves of 16 layers as S2b's one-head tasks
+and as the worker's even row split; see
+[the S2c results](../docs/megakernel_next_steps.md#14-s2c-results).
 `attention_probe [POSITIONS [CHUNKS]]` runs the attention waves of 16 layers
 with one block per SM: S2's kernels as the reference, an instrumented copy
 with per-phase cycle counts, the S2b wide-load candidates, and the worker's

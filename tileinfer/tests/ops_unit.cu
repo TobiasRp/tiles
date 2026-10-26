@@ -47,7 +47,7 @@ __global__ __launch_bounds__(kThreads, 1) void run_operator(int op, int begin, i
     __shared__ ops::SharedStorage shared;
     switch (op) {
     case qkv:
-        ops::qkv(begin, layer, shape, shared);
+        ops::qkv(begin, end, layer, shape, shared);
         break;
     case attention:
         // Every head's chunk tasks, then the output projection with Wo =
@@ -116,8 +116,9 @@ json evaluate(const json& item)
         for (std::size_t i = 0; i < supplied.size(); ++i)
             values[i] = static_cast<Scalar>(supplied[i]);
     };
-    for (const char* name : {"x", "r", "q_rot", "product"})
+    for (const char* name : {"x", "r", "q", "q_rot", "product"})
         buffer(name, std::max(d, f), 0.0f);
+    buffer("k", kv_width, 0.0f);
     for (const char* name : {"key_cache", "value_cache"})
         buffer(name, static_cast<std::size_t>(capacity) * kv_width, 0.0f);
     for (const char* name : {"attn_norm", "ffn_norm"})
@@ -135,7 +136,7 @@ json evaluate(const json& item)
     buffer("scores", static_cast<std::size_t>(nq) * capacity, -123.0f);
     // An operator's own output starts at the sentinel unless the case supplies it.
     const std::map<Operator, std::vector<const char*>> outputs{
-        {qkv, {"q_rot"}}, {attention, {"r"}}, {gate_up, {"product"}}};
+        {qkv, {"q", "k"}}, {attention, {"r", "q_rot"}}, {gate_up, {"product"}}};
     if (outputs.contains(op))
         for (const char* name : outputs.at(op))
             if (!item.contains(name))
@@ -168,8 +169,8 @@ json evaluate(const json& item)
     cuda::copy_bytes(stream, frequencies, d_frequencies);
 
     auto at = [&](const char* name) { return buffers.at(name).data(); };
-    const ops::Layer<Scalar> layer{at("x"), at("y"), at("q_rot"), at("attention"), at("r"),
-        at("product"), at("key_cache"), at("value_cache"), at("scores"), partials.data(),
+    const ops::Layer<Scalar> layer{at("x"), at("y"), at("q"), at("k"), at("q_rot"), at("attention"),
+        at("r"), at("product"), at("key_cache"), at("value_cache"), at("scores"), partials.data(),
         partials.data() + static_cast<std::size_t>(chunks) * nq * dh, at("attn_norm"), at("Wq"),
         at("Wk"), at("Wv"), at("Wo"), at("ffn_norm"), at("Wgate"), at("Wup"), at("Wdown"), nullptr,
         nullptr};
@@ -186,8 +187,8 @@ json evaluate(const json& item)
     json result;
     for (auto& [name, values] : host) {
         // Only buffers an operator may write are returned; inputs stay on the device.
-        static const std::set<std::string> written{
-            "y", "r", "q_rot", "attention", "product", "key_cache", "value_cache", "scores"};
+        static const std::set<std::string> written{"y", "r", "q", "k", "q_rot", "attention",
+            "product", "key_cache", "value_cache", "scores"};
         if (!written.contains(name))
             continue;
         cuda::copy_bytes(stream, buffers.at(name), values);

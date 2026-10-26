@@ -57,6 +57,13 @@ because S4's 0.1 ms gate is within the spread of the exploratory timings;
 attention task; and then a smaller **S4**
 ([Section 13](#13-the-re-plan-after-s2b)).
 
+**Progress, 2026-10-26: S2c is done, ahead of S6a.** QKV rows split evenly
+over the workers, and each K/V head's attention task applies RoPE. Outputs
+are bit-identical to S2b. The traced token is 0.10 to 0.13 ms faster at every
+context, untraced fixed-context calls 0.05 to 0.08 ms, and 64-token
+generation 0.10 ms (0.8%), each against S2b in the same session
+([Section 14](#14-s2c-results)). S6a still comes before S4.
+
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
 measured, explained advantage over PyTorch CUDA Graph replay on the same
@@ -371,8 +378,8 @@ re-planned instead of built.
 
 Order after the re-plan of 2026-10-25: S0, S1, S2 (done) → S3 (probed, not
 built) → S2b attention at the right parallelism (done) → **S6a** controlled
-measurement protocol → **S2c** balanced QKV → **S4** fewer wave boundaries →
-S5 one launch per request → S6 showcase.
+measurement protocol → **S2c** balanced QKV (done first, 2026-10-26) → **S4**
+fewer wave boundaries → S5 one launch per request → S6 showcase.
 
 ### S0 — Baseline and instruments (no kernel behavior change) — done
 
@@ -557,7 +564,14 @@ without this step.
 (otherwise S2c and S4 are judged on their probes and the trace only, and the
 write-up says so), and the S2b and llama.cpp rows are controlled.
 
-### S2c — Balanced QKV
+### S2c — Balanced QKV — done
+
+Implemented as planned below, before S6a, with one change: chunk 0, not the
+task whose chunk holds the current position, writes the rotated K cache row,
+and that task takes the row from shared memory instead. Which chunk ends at
+the current position depends on the position; chunk 0 is the same at every
+position, so the validator checks one writer. Results are in
+[Section 14](#14-s2c-results).
 
 After S2b, QKV is the largest single loss at context 1: 1,167 µs against
 946 µs ideal, at 172 GB/s, while the other projections stream at 192 to
@@ -1409,3 +1423,159 @@ within 11 µs of these, and attention loses 284 µs in 32 waves at 142 GB/s.
 
 *Targets (hypotheses):* S2c −0.05 to −0.13 ms and S4 −0.1 to −0.15 ms at
 context 1, about 12.0–12.1 ms together, 3–4% above the 11.61 ms floor.
+
+## 14. S2c results
+
+Implemented and checked on `tux`, 2026-10-25 and 26, starting from `2cb781c`.
+GPU clocks were unlocked (SM about 1.96 GHz under load). All timings are
+exploratory, not a controlled shape/tile sweep: S6a, which would state the
+smallest detectable difference, was not done first. S2c's gate rests on the
+probe's own spread and on same-session comparisons with the saved S2b binary.
+Artifacts are in `runs/s2c-2026-10-25/` on tux.
+
+### What changed
+
+- **Even QKV rows (format 8, ABI v8).** The 3,072 rows of `[Q; K; V]` split
+  into one near-equal range per worker (153 or 154 rows), with one norm
+  prologue per task. Q and K round to the storage type into two new scratch
+  vectors, `q` and `k` (the current position's K, `kv_heads × head_dim`); V
+  rows go to the cache row as before. A range may cross the Q/K and K/V
+  boundaries.
+- **RoPE in the attention scores task.** Every active scores task rotates its
+  K/V head's query heads and the current K row into a 4.5 KB shared region
+  (`rotated`, which replaces the 512-byte `head` buffer). Chunk 0 stores the
+  rotated Q (`q_rot`, kept for diagnostics) and writes the rotated K cache
+  row. The task whose chunk ends at the current position scores that row
+  from shared memory with the same lanes and reduction as a cached row, so
+  no task reads the cache row being written. In the fused regime chunk 0 is
+  both.
+- **Validator.** QKV tasks own any nonempty row range, with the matching `q`,
+  `k` and V outputs. Scores tasks read `q` and `k`; chunk-0 tasks own `q_rot`
+  and the K row, and the dataflow check runs in both regimes as before. New
+  loader cases: a legal plan whose QKV rows cross the Q/K boundary, undeclared
+  K rows, rotation outputs moved to chunk 1, and version-7 packages (164
+  cases, from 148).
+- **Worker resources.** 64 registers, no local memory, one block per SM.
+  Static shared memory grew from 18,992 to 23,088 bytes (S2 had 23,760). The
+  BF16 worker grew from 9,352 to 10,488 SASS instructions.
+- **Probes.** `bandwidth_probe qkv` keeps S2b's one-head task as its
+  reference. `attention_probe` gives the worker's tasks unrotated `q` and
+  per-layer `k` rows with zero rotary frequencies, so their exact rotation
+  leaves the values S2's reference kernels read unchanged.
+
+### Probe gate
+
+`bandwidth_probe qkv`: the QKV waves of 16 layers, each layer reading its own
+copy of the weights, µs per layer (median of five launches, three runs agree
+within 0.2 µs). Ideal streaming is 59.1 µs and the empty barrier 1.1 µs.
+
+| Position | S2b one-head tasks | Even rows (`ops::qkv`) | Even rows, no norm | Saving |
+| ---: | ---: | ---: | ---: | ---: |
+| 0 | 71.0 | 64.9 | 63.1 | 6.1 |
+| 255 | 71.0 | 64.9 | 63.1 | 6.1 |
+| 4095 | 70.4 | 64.6 | 63.0 | 5.8 |
+
+The gate (5 µs per layer, 0.08 ms per token) passed. The first build of the
+probe measured 5.4 µs; the difference is code generation, not the method.
+The norm prologue costs about 1.7 µs per wave even when paid once.
+
+The worker's attention tasks, `attention_probe`, µs per layer with both waves:
+
+| Context | S2b worker | S2c worker |
+| ---: | ---: | ---: |
+| 1 | 8.7 | 8.2 |
+| 64 | 9.7 | 10.6 |
+| 256 | 14.0 | 15.1 |
+| 1024 | 28.9 | 29.8 |
+| 2048 | 45.3 | 46.9 |
+| 4096 | 75.8 | 78.0 |
+
+Rotation adds about 1 to 2 µs per layer beyond context 1. The S2 reference
+kernels, whose code did not change, also ran 0 to 9% slower in the S2c probe
+binary, so part of this is code generation or run-to-run variation.
+
+### Correctness
+
+- **Bit identity with S2b.** The saved S2b binary on S2b packages against
+  the S2c binary on S2c packages (`bitcheck.sh`): fixture stacks in float32
+  and BF16, each with chunk steps and fused limits of 2 and 4 (fused and
+  split positions), give identical `check` traces with block outputs. On the
+  checkpoint, the 6-token prompt's `check` traces (all block outputs and
+  full logits) are identical for the default and the split (C = 4, F = 2)
+  package, as are 64 generated tokens and 32 tokens after a 450-token prompt,
+  which crosses into split attention.
+- CTest 13/13 (release) and 4/4 (`cpu-debug`); 28 Python tests; Ruff, ty and
+  clang-format report nothing beyond the pre-existing findings. `ops_unit`
+  covers QKV ranges across both boundaries and attention that reads the
+  current K row only from scratch, with rotated Q and the K cache row checked.
+  Compute Sanitizer: all 64 checks pass.
+- **Checkpoint.** Every calibrated tolerance passes. The split package
+  matches greedy selection; the default package has S2b's one BF16 near-tie
+  (26 of 27 steps), as expected from bit identity.
+
+### Bubble budget per token (µs)
+
+Mean of two traced passes each, S2b and S2c alternating in one session:
+
+| Context | S2b traced | S2c traced | Change | Barrier sync | Streaming excess | Attention excess | QKV excess | QKV tail |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 12,315 | 12,189 | −127 | 103 → 116 | 497 → 365 | 104 → 96 | 202 → 75 | 139 → 36 |
+| 64 | 12,322 | 12,215 | −107 | 98 → 114 | 501 → 363 | 102 → 118 | 205 → 76 | 139 → 38 |
+| 256 | 12,362 | 12,263 | −99 | 110 → 116 | 486 → 362 | 116 → 135 | 202 → 76 | 139 → 37 |
+| 384 | 12,417 | 12,323 | −94 | 110 → 118 | 491 → 367 | 146 → 168 | 201 → 76 | 139 → 37 |
+| 385 | 12,430 | 12,329 | −101 | 122 → 131 | 504 → 374 | 134 → 154 | 203 → 76 | 139 → 38 |
+| 1024 | 12,555 | 12,442 | −113 | 129 → 136 | 508 → 373 | 149 → 165 | 204 → 74 | 139 → 34 |
+| 2048 | 12,754 | 12,640 | −114 | 125 → 137 | 507 → 367 | 195 → 209 | 204 → 75 | 139 → 37 |
+| 4096 | 13,157 | 13,052 | −104 | 125 → 129 | 505 → 383 | 285 → 300 | 205 → 78 | 139 → 38 |
+
+The two passes of each binary agree within 10 µs. QKV excess fell by about
+127 µs per token at every context, most of it from the last worker's
+finish. The attention tasks gave back up to 22 µs (rotation; at context 1
+they are 8 µs faster), and barrier latency grew by 5 to 16 µs. The saving is
+at the top of the 0.05–0.13 ms hypothesis.
+
+### Fixed context and generation
+
+ms per decoder call, kernel only. Both TileInfer columns and both PyTorch
+paths come from one session; the PyTorch columns are the S2c run's (the S2b
+run's agree within 0.5%, except one eager outlier at 1K).
+
+| Context | PyTorch eager | PyTorch graph | S2b | S2c | S2c − S2b | S2c − graph |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 13.97 | 12.87 | 12.31 | 12.23 | −0.08 | −0.64 (−5%) |
+| 256 | 14.74 | 13.41 | 12.36 | 12.31 | −0.05 | −1.10 (−8%) |
+| 384 | 14.90 | 13.62 | 12.42 | 12.37 | −0.05 | −1.25 |
+| 385 | 14.92 | 13.62 | 12.44 | 12.38 | −0.05 | −1.23 |
+| 1024 | 15.81 | 14.69 | 12.55 | 12.49 | −0.05 | −2.20 (−15%) |
+| 2048 | 17.40 | 16.27 | 12.75 | 12.69 | −0.05 | −3.58 (−22%) |
+| 2049 | 17.39 | 16.27 | 12.78 | 12.70 | −0.08 | −3.57 |
+| 4096 | 21.51 | 20.39 | 13.16 | 13.10 | −0.06 | −7.30 (−36%) |
+
+Untraced, S2c saves 46 to 79 µs per call, about half the traced 94 to 127 µs.
+The trace's own cost does not explain the gap: S2c has 448 fewer instructions
+(3,812 against 4,260), at a few nanoseconds each. The gap is not isolated;
+S6a's protocol should settle which number holds.
+
+64-token generation after the 6-token prompt, interleaved three times in one
+session: S2b 12,379 / 12,384 / 12,379 µs per token, S2c 12,274 / 12,282 /
+12,274 µs (−104 µs, −0.8%), with the same tokens.
+
+### Against the plan
+
+S2c's projection was 0.05 to 0.13 ms per token; the trace shows 0.10 to
+0.13 ms, untraced fixed-context calls 0.05 to 0.08 ms, and generation
+0.10 ms. TileInfer is now about 0.58 ms above the
+11.61 ms floor at context 1 in the trace. What remains at context 1: GEMV
+streaming excess (365 µs, of which QKV 75, gate/up 100, down 95, Wo 48,
+lm_head 45), barrier latency (116 µs) and attention (96 µs). These are S4's
+targets; S6a comes first, because S4's parts each aim at 0.06 to 0.1 ms.
+
+### Open
+
+- Traced and untraced savings differ by about a factor of two (above).
+- The rotation cost in the attention tasks is not isolated from code
+  generation (the reference kernels moved too).
+- QKV still runs 16 µs per wave above ideal: about 1.7 µs is the norm
+  prologue, the rest pipeline ramp and the last worker's finish (36 µs per
+  token).
+

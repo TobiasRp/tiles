@@ -54,6 +54,59 @@ def stale_scratch_read(plan: dict) -> None:
     plan["waves"][late["wave"]]["workers"][early["worker"]].append(early["id"])
 
 
+def qkv_tasks(plan: dict) -> list[dict]:
+    """The first layer's Q/K/V tasks in row order."""
+    tasks = [
+        t
+        for t in plan["tasks"]
+        if t["layer"] in (None, 0) and t["opcode"].startswith("qkv")
+    ]
+    return sorted(tasks, key=lambda t: t["operands"]["rows"][0])
+
+
+def cross_qk_boundary(plan: dict) -> None:
+    """Move the Q/K boundary inside a task: legal, ownership stays complete."""
+    tasks = qkv_tasks(plan)
+    d = plan["model"]["hidden_size"]
+    first = next(t for t in tasks if t["operands"]["rows"][1] == d)
+    second = next(t for t in tasks if t["operands"]["rows"][0] == d)
+    end = second["operands"]["rows"][1]
+    split = d + (end - d) // 2
+    q_id = first["output"][0]["tensor"]
+    k_id = second["output"][0]["tensor"]
+    first["operands"]["rows"][1] = split
+    first["output"].append({"tensor": k_id, "rows": [0, split - d]})
+    first["estimated_work"] += (split - d) * d
+    second["operands"]["rows"][0] = split
+    second["output"] = [{"tensor": k_id, "rows": [split - d, end - d]}]
+    second["estimated_work"] -= (split - d) * d
+    assert first["output"][0]["tensor"] == q_id
+
+
+def drop_k_output(plan: dict) -> None:
+    """A Q/K/V task that projects K rows but does not declare them."""
+    task = next(
+        t
+        for t in qkv_tasks(plan)
+        if t["operands"]["rows"][0] >= plan["model"]["hidden_size"]
+    )
+    task["output"] = []
+
+
+def rotate_in_later_chunk(plan: dict) -> None:
+    """Move rotated Q and the K cache row from chunk 0 to chunk 1."""
+    scores = [t for t in plan["tasks"] if t["opcode"].startswith("attention_scores")]
+    first = next(t for t in scores if t["operands"]["chunk"] == 0)
+    later = next(
+        t
+        for t in scores
+        if t["layer"] == first["layer"]
+        and t["operands"] == {"kv_head": first["operands"]["kv_head"], "chunk": 1}
+    )
+    later["output"] += first["output"][1:]
+    del first["output"][1:]
+
+
 def conditional_wave(plan: dict) -> dict:
     """The first scores wave, whose barrier fused prefixes skip."""
     return next(wave for wave in plan["waves"] if "conditional_barrier" in wave)
@@ -141,6 +194,9 @@ def main() -> None:
                 legal = copy.deepcopy(original)
                 rearrange(legal)
                 check(legal, True, "alternative assignment and ordering")
+                crossing = copy.deepcopy(original)
+                cross_qk_boundary(crossing)
+                check(crossing, True, "Q/K/V rows across the Q/K boundary")
                 for version in (2, 3):
                     retired = copy.deepcopy(original)
                     retired["header"].update(
@@ -150,11 +206,13 @@ def main() -> None:
                     )
                     retired["model"]["dtype"] = "float32"
                     check(retired, False, f"retired version {version} package")
-                version6 = copy.deepcopy(original)
-                version6["header"].update(
-                    format_version=6, executor_abi="tileinfer-decoder-v6"
-                )
-                check(version6, False, "version 6 package")
+                for version in (6, 7):
+                    previous = copy.deepcopy(original)
+                    previous["header"].update(
+                        format_version=version,
+                        executor_abi=f"tileinfer-decoder-v{version}",
+                    )
+                    check(previous, False, f"version {version} package")
                 mutations = {
                     "read before producer": delay_producer,
                     "mixed activation dtype": lambda p: p["model"].update(
@@ -228,6 +286,8 @@ def main() -> None:
                     ),
                     "too few chunks": lambda p: p["model"].update(attention_chunks=1),
                     "unaligned head": lambda p: p["model"].update(head_dim=6),
+                    "undeclared K rows": drop_k_output,
+                    "rotation in a later chunk": rotate_in_later_chunk,
                 }
                 if kind == "stack":
                     layers = original["model"]["layers"]

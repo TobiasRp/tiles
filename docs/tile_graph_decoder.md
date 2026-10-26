@@ -15,7 +15,13 @@ chunks per position: a prefix of at most `attention_fused_steps` runs as one
 fused task per K/V head, and the barrier before the values wave is a
 conditional barrier that every worker skips at those positions; a longer
 prefix splits into at least two chunks of at most `attention_chunk_steps`.
-See [the S2b milestone](megakernel_next_steps.md#s2b--attention-at-the-right-parallelism--done). Older
+See [the S2b milestone](megakernel_next_steps.md#s2b--attention-at-the-right-parallelism--done).
+Version 8 (2026-10-25) splits the [Q; K; V] rows evenly over workers instead
+of one head per task. Q and K stay unrotated in scratch; each K/V head's
+attention task applies RoPE to its query heads and its current K row, and its
+chunk-0 task stores rotated Q and the K cache row. The arithmetic is
+unchanged, and outputs are bit-identical to version 7; see
+[the S2c milestone](megakernel_next_steps.md#s2c--balanced-qkv--done). Older
 package formats are no longer read and must be regenerated; see
 [the megakernel plan](megakernel_next_steps.md). The historical milestone
 results below describe version 3.

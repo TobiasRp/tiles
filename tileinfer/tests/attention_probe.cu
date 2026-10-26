@@ -37,6 +37,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <cub/block/block_reduce.cuh>
+#include <cuda/algorithm>
 #include <cuda/buffer>
 #include <cuda/launch>
 #include <cuda/memory_pool>
@@ -741,6 +742,8 @@ struct Program
     Bf16* key;   // [layers][max_context][kv_heads][head_dim]
     Bf16* value; // same
     Bf16* q;     // [query_heads][head_dim]
+    Bf16* k;     // [layers][kv_heads][head_dim]: each layer's K row at `position`
+    Bf16* q_rot; // the worker's rotated Q
     Bf16* scores;
     float* partials;
     float* stats;
@@ -768,7 +771,14 @@ __global__ __launch_bounds__(kThreads, 1) void attention_program(Program program
     for (int iteration = 0; iteration < program.iterations; ++iteration)
         for (int l = 0; l < program.layers; ++l) {
             ops::Layer<Bf16> layer{};
+            // S2's kernels read Q as rotated and the current K row from the
+            // cache; the worker's rotates both itself. Zero rotary
+            // frequencies make that rotation exact, so all see the same values.
+            layer.q = program.q;
+            layer.k = program.k + l * shape.kv_heads * shape.head_dim;
             layer.q_rot = program.q;
+            if (program.variant == v_worker)
+                layer.q_rot = program.q_rot;
             layer.key_cache = program.key + l * layer_elements;
             layer.value_cache = program.value + l * layer_elements;
             layer.scores = program.scores;
@@ -939,6 +949,12 @@ json attention_sweep(
     auto key = filled(layer_elements * kLayers, 11);
     auto value = filled(layer_elements * kLayers, 23);
     auto q = filled(kQueryHeads * kHeadDim, 5);
+    cuda::device_buffer<Bf16> q_rot(stream, pool, kQueryHeads * kHeadDim, cuda::no_init);
+    cuda::device_buffer<Bf16> k(
+        stream, pool, static_cast<std::size_t>(kLayers) * kKvHeads * kHeadDim, cuda::no_init);
+    const std::vector<float> zero_frequencies(kHeadDim / 2, 0.0f);
+    cuda::device_buffer<float> frequencies(stream, pool, kHeadDim / 2, cuda::no_init);
+    cuda::copy_bytes(stream, zero_frequencies, frequencies);
     cuda::device_buffer<Bf16> scores(
         stream, pool, static_cast<std::size_t>(kQueryHeads) * kMaxContext, cuda::no_init);
     constexpr int kMaxChunks = 64;
@@ -956,6 +972,13 @@ json attention_sweep(
     json rows = json::array();
     for (int chunks : chunk_counts)
         for (int position : positions) {
+            for (int l = 0; l < kLayers; ++l)
+                check(
+                    cudaMemcpyAsync(k.data() + static_cast<std::size_t>(l) * kKvHeads * kHeadDim,
+                        key.data() + l * layer_elements +
+                            static_cast<std::size_t>(position) * kKvHeads * kHeadDim,
+                        kKvHeads * kHeadDim * sizeof(Bf16), cudaMemcpyDeviceToDevice, stream.get()),
+                    "copy current K rows");
             std::vector<float> reference;
             for (int variant = 0; variant < kVariants; ++variant) {
                 const bool needs_shared_probabilities =
@@ -978,12 +1001,14 @@ json attention_sweep(
                 program.key = key.data();
                 program.value = value.data();
                 program.q = q.data();
+                program.k = k.data();
+                program.q_rot = q_rot.data();
                 program.scores = scores.data();
                 program.partials = partials.data();
                 program.stats = stats.data();
                 program.shape = ops::Shape{2048, 8192, kQueryHeads, kKvHeads, kHeadDim, position,
                     kMaxContext, program_chunks, worker ? kWorkerChunkSteps : kMaxContext,
-                    worker ? kWorkerFusedSteps : kMaxContext, NumericConfig{}, nullptr};
+                    worker ? kWorkerFusedSteps : kMaxContext, NumericConfig{}, frequencies.data()};
                 program.layers = kLayers;
                 program.variant = variant;
                 program.cycles = cycles.data();

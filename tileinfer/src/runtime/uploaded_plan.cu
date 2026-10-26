@@ -35,8 +35,11 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
     , stack(plan.stack)
     , weight_dtype(plan.weight_dtype)
 {
-    for (const auto id : {TensorId::q_rot, TensorId::attention, TensorId::r, TensorId::product}) {
-        const std::size_t count = id == TensorId::product ? intermediate_size : hidden_size;
+    for (const auto id : {TensorId::q, TensorId::k, TensorId::q_rot, TensorId::attention,
+             TensorId::r, TensorId::product}) {
+        const std::size_t count = id == TensorId::product ? intermediate_size
+                                  : id == TensorId::k     ? kv_heads * head_dim
+                                                          : hidden_size;
         scratch_regions.emplace_back(plan.tensors[tensor_index(id)].offset, count);
     }
     try {
