@@ -172,6 +172,9 @@ and as the worker's even row split; see
 `bandwidth_probe ffn` runs the FFN of 16 layers as S2c's split waves and as
 fused per-worker tasks with split-K down partials; see
 [the S4 probe](../docs/megakernel_next_steps.md#16-s4-probe-the-fused-ffn).
+`counter_probe PACKAGE [POSITION...]` runs a BF16 stack package with the worker's
+operators and replaces the barriers around attention with counter waits; see
+[the S4 counter probe](../docs/megakernel_next_steps.md#18-s4-phase-0b-probe-counters-around-attention).
 `attention_probe [POSITIONS [CHUNKS]]` runs the attention waves of 16 layers
 with one block per SM: S2's kernels as the reference, an instrumented copy
 with per-phase cycle counts, the S2b wide-load candidates, and the worker's

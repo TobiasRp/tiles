@@ -93,6 +93,15 @@ probe's split baseline streamed worse than the decoder's FFN does, and the
 reduction wave costs more in the decoder. Every calibrated tolerance passes
 ([Section 17](#17-s4-phase-1-results-the-fused-ffn)).
 
+**Re-plan, 2026-10-26: S4's counter gate failed.** `counter_probe` runs the
+decoder's own package and operators with the barriers around attention
+replaced by counter waits. Outputs stay bit-identical, with random delays
+too, but the token gets at most 16 µs faster (at 1K) and up to 16 µs slower
+at short context, against a 60 µs gate. Wo needs every head, and the tasks on
+both sides of each barrier are already balanced, so a wait only replaces a
+barrier's latency with a counter's. Phases 2 to 4 (counters, Wo split by
+K/V group) are not built ([Section 18](#18-s4-phase-0b-probe-counters-around-attention)).
+
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
 measured, explained advantage over PyTorch CUDA Graph replay on the same
@@ -684,7 +693,10 @@ of pipeline ramp per boundary, that is at most about 0.15 ms per token.
   own slice of `y` before one barrier. Every worker repeating the full
   reduction costs 4.6 µs per layer, 2.6 µs more.* *Built (Section 17):
   −70 µs per token, controlled.*
-- **Wo split-K by K/V group (second).** A Wo task for group *g* needs only
+- **Wo split-K by K/V group (second).** *Not built: counter waits around
+  attention gain −16 to +16 µs per token in the probe (Section 18), and the
+  counter, memory-ordering, reset and deadlock items below go with it.* A Wo
+  task for group *g* needs only
   that group's four query heads, so it can start as soon as group *g*'s
   attention is done.
 - **Counters instead of barriers** where dependencies are partial. They
@@ -2018,3 +2030,115 @@ decoder's own trace for the same phase, not from a reimplementation.
   wait could replace its barrier (Phase 2), or the next QKV could take the
   partials directly, which the probe priced at 4.6 µs per layer and is worse.
 - Run the comparison with locked clocks when `sudo` is available.
+
+## 18. S4 Phase 0b probe: counters around attention
+
+Measured on `tux`, 2026-10-26, at `2b0c0ac` plus the probe (which does not
+change the worker). Clocks unlocked, 1,950 to 1,972 MHz SM and 6,801 MHz
+memory under load, no clock-event reason. Artifacts are in
+`runs/s4-counter-probe-2026-10-26/` on tux.
+
+### The probe
+
+Section 17's lesson was that a probe's baseline must be the decoder's own.
+`counter_probe PACKAGE [POSITION...]` therefore loads a version-9 checkpoint
+package with `load_plan`, uploads it as the runtime does, and runs the
+validated instruction streams with a copy of the worker's dispatch loop over
+the same `ops` (64 registers, the same 32-byte stack frame and 23,088 bytes
+of shared memory as the worker). K/V is synthetic, which Section 15 found
+within 0.03% of a decoded prefix. Each mode drops some barriers:
+
+| Mode | Barriers dropped per layer | Counters (whole token) | Most producers per counter |
+| --- | --- | ---: | ---: |
+| `barriers` | none | 0 | 0 |
+| `qkv_attention` | QKV → scores | 128 | 6 |
+| `attention_wo` | scores → values, values → Wo | 144 | 16 |
+| `all` | all three | 272 | 16 |
+
+A task after a dropped barrier waits for the plan predecessors that barrier
+used to order. Tasks with the same predecessor set share one counter; each
+producer adds one with release semantics after `__syncthreads()` and
+`__threadfence()`, and the consumer's thread 0 spins on an acquire load
+until `launch × producers` (CUTLASS's semaphore pattern), so counters never
+need a reset. Every wait names a task in an earlier wave, which every
+stream already orders first, so the cooperative launch cannot deadlock.
+Dropping the barrier before Wo also drops the conditional one before the
+values wave: a fused prefix skips that barrier and its values tasks do
+nothing, so Wo would otherwise wait only for them and race the scores tasks.
+
+A first version polled one done flag per predecessor. Wo waits for 16 tasks,
+16 sequential acquire loads per task, and that version was 96 µs per token
+*slower* than the barriers at context 1. Shared counters removed that cost;
+the numbers below are theirs.
+
+### Correctness
+
+At every position and in every mode, the logits equal the barrier mode's bit
+for bit, also in three runs each with random delays of up to 4 µs before
+every task. The waits change only the order of work.
+
+### Baseline
+
+The probe's barrier mode runs 25 to 34 µs (0.2 to 0.3%) slower than the
+decoder under the S6a protocol (12,139 against 12,114 µs at context 1,
+13,013 against 12,979 µs at 4K), a constant offset of the copied loop and
+its kernel parameters. Savings are paired against that mode in the same
+process.
+
+### Results
+
+µs per token, saving against `barriers` (positive is faster): medians of
+seven alternating rounds of 20 launches; the two passes agree within 1.5 µs.
+
+| Context | `barriers` | `qkv_attention` | `attention_wo` | `all` |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 12,139 | −4.0 | −13.6 | −12.6 |
+| 256 | 12,220 | −2.2 | −15.6 | −9.5 |
+| 384 | 12,276 | −2.8 | −15.8 | −12.5 |
+| 385 | 12,288 | −4.7 | +3.4 | +9.8 |
+| 1024 | 12,401 | −0.1 | +6.1 | +15.2 |
+| 2048 | 12,602 | −1.2 | −2.6 | +1.4 |
+| 4096 | 13,013 | −0.3 | +0.8 | +4.2 |
+
+The gate was 60 µs per token. The best mode reaches 16 µs at one context and
+loses 13 to 16 µs at every fused context.
+
+### Why it does not pay
+
+- **There is nothing to overlap before attention.** QKV's rows are balanced
+  over 20 workers (S2c), so the producers of every K/V head finish within
+  about 2 µs per layer of each other. Starting a head's attention when its
+  own producers finish saves at most that tail, and the counter's add and
+  acquire cost about as much as the barrier it replaces.
+- **Wo needs every head.** Each Wo task reads the whole attention vector, so
+  it waits for the last attention task whether a barrier or a counter
+  signals it. In the fused regime the chain also gets a hop longer: the
+  values tasks, which do nothing there, now wait for their scores tasks
+  before Wo can see them, two counter round trips per layer instead of one
+  barrier. That is the likely cause of the 13 to 16 µs lost up to context
+  384; the probe does not trace it.
+- **Split attention gains a little.** Beyond 384 steps, the values tasks of a
+  head can start as soon as that head's scores tasks finish, which hides
+  part of the scores wave's tail: up to 16 µs at 1K, less at 4K, where the
+  waves are long and even.
+
+### What this changes
+
+1. **S4 Phases 2 to 4 are not built.** Counters only pay where a consumer
+   needs part of its producers' output and the producers finish at
+   different times. Around attention neither holds after S2b and S2c.
+2. **Wo split by K/V group would be the only way to overlap Wo with
+   attention**, and it is priced from the traces rather than probed: the
+   fused attention waves take 110 µs per token at context 1 (Section 17),
+   the most Wo could hide, while a split-K Wo needs a reduction like the
+   FFN's, which costs 52 µs per token, plus a counter hop per group. That
+   leaves at most about 40 to 60 µs before counting the waits' own cost,
+   below the gate once those are counted. It is not worth a format change.
+3. **What remains at context 1** (S4 trace): 314 µs of streaming excess
+   (QKV 84, FFN 97, FFN reduction 37, Wo 50, `lm_head` 46), 92 µs of barrier
+   latency and 96 µs of attention. The FFN reduction wave is the largest
+   single item that a change of schedule can remove; the rest is per-wave
+   ramp and streaming below the roofline.
+4. **Proposed next:** S5 (one launch per generation request), and a probe
+   of the FFN reduction wave on the decoder's own package, each with its own
+   gate.
