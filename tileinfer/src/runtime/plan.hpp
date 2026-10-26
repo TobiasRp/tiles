@@ -50,6 +50,8 @@ enum class Opcode : std::uint32_t
 inline constexpr std::array<const char*, 9> kOpcodeNames{"qkv", "attention_scores",
     "attention_values", "output_projection", "ffn", "ffn_reduce", "embedding", "final_rms_norm",
     "logits"};
+static_assert(kOpcodeNames.size() == static_cast<std::size_t>(Opcode::logits),
+    "every opcode after barrier needs a package name, in enum order");
 
 // Every package opcode name the compiled worker accepts, for the target probe.
 inline std::vector<std::string> supported_opcodes()

@@ -13,10 +13,10 @@ import torch
 from .decoder_reference import (
     DecoderSpec,
     ReferenceCache,
-    _rms_norm,
     decode_one,
     fixed_weights,
     recompute_prefix,
+    rms_norm,
 )
 from .plan_core import (
     CANDIDATE_BYTES,
@@ -123,6 +123,15 @@ class StackCache:
             layer.reset()
 
 
+def final_norm(hidden: torch.Tensor, scale: torch.Tensor, eps: float) -> torch.Tensor:
+    """The final RMSNorm over the last dimension: FP32 in one step, as the
+    FP32 worker computes it; BF16 with eager PyTorch's rounding."""
+    if hidden.dtype == torch.float32:
+        factor = torch.rsqrt(hidden.square().mean(dim=-1, keepdim=True) + eps)
+        return hidden * factor * scale
+    return rms_norm(hidden, scale, eps)
+
+
 def decode_token(
     token_id: int,
     weights: dict[str, torch.Tensor],
@@ -138,11 +147,7 @@ def decode_token(
         trace = decode_one(hidden, layer_weights, spec.block, cache.layers[layer])
         hidden = trace["y"]
         blocks.append(trace)
-    if hidden.dtype == torch.float32:
-        factor = torch.rsqrt(hidden.square().mean() + spec.block.rms_norm_eps)
-        final_hidden = hidden * factor * weights["final_norm"]
-    else:
-        final_hidden = _rms_norm(hidden, weights["final_norm"], spec.block.rms_norm_eps)
+    final_hidden = final_norm(hidden, weights["final_norm"], spec.block.rms_norm_eps)
     projection = (
         weights["embedding"] if spec.tie_word_embeddings else weights["lm_head"]
     )
@@ -162,13 +167,7 @@ def recompute_stack_prefix(
     for layer in range(spec.layers):
         layer_weights = {name: weights[f"L{layer}.{name}"] for name in WEIGHTS}
         hidden = recompute_prefix(hidden, layer_weights, spec.block)["y"]
-    if hidden.dtype == torch.float32:
-        factor = torch.rsqrt(
-            hidden.square().mean(dim=-1, keepdim=True) + spec.block.rms_norm_eps
-        )
-        final_hidden = hidden * factor * weights["final_norm"]
-    else:
-        final_hidden = _rms_norm(hidden, weights["final_norm"], spec.block.rms_norm_eps)
+    final_hidden = final_norm(hidden, weights["final_norm"], spec.block.rms_norm_eps)
     projection = (
         weights["embedding"] if spec.tie_word_embeddings else weights["lm_head"]
     )

@@ -218,6 +218,7 @@ struct SequenceContext::Impl
             detail::enqueue_zero_unused_kv(stream, buffers.kv.data(), model->weight_dtype,
                 model->kv_count, model->stack.layers, model->stack.layer_kv_stride,
                 model->shape.kv_heads * model->shape.head_dim, model->shape.max_context,
+                static_cast<int>(model->layout.key), static_cast<int>(model->layout.value),
                 generation ? generation->start_position : ticket->end_position,
                 generation ? status.data() : nullptr);
             buffers.kv.copy_to(stream, host);
@@ -356,7 +357,7 @@ Ticket SequenceContext::enqueue_reset()
     return Ticket(std::move(ticket));
 }
 
-bool SequenceContext::ready(const Ticket& ticket) const
+bool SequenceContext::ready(const Ticket& ticket)
 {
     if (!ticket.state_ || ticket.state_->owner != impl_.get())
         throw std::runtime_error("ticket belongs to a different context");

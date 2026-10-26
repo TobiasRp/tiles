@@ -13,7 +13,7 @@ Ticket::State::State(Kind value)
 Ticket::State::~State()
 {
     if (event != nullptr) {
-        if (recorded && cudaEventQuery(event) != cudaSuccess)
+        if (recorded)
             cudaEventSynchronize(event);
         cudaEventDestroy(event);
     }

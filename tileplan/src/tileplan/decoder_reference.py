@@ -171,7 +171,7 @@ def apply_rope(
     )
 
 
-def _rms_norm(x: torch.Tensor, scale: torch.Tensor, eps: float) -> torch.Tensor:
+def rms_norm(x: torch.Tensor, scale: torch.Tensor, eps: float) -> torch.Tensor:
     normalized = x.float() * torch.rsqrt(
         x.float().square().mean(dim=-1, keepdim=True) + eps
     )
@@ -221,7 +221,7 @@ def decode_one(
     ):
         raise ValueError("KV cache shape differs from the specification")
     p = cache.position
-    u = _rms_norm(x, weights["attn_norm"], spec.rms_norm_eps)
+    u = rms_norm(x, weights["attn_norm"], spec.rms_norm_eps)
     q = (weights["Wq"] @ u).reshape(spec.num_attention_heads, spec.head_dim)
     k = (weights["Wk"] @ u).reshape(spec.num_key_value_heads, spec.head_dim)
     v = (weights["Wv"] @ u).reshape(spec.num_key_value_heads, spec.head_dim)
@@ -244,7 +244,7 @@ def decode_one(
         spec.hidden_size
     )
     r = x + weights["Wo"] @ attention
-    z = _rms_norm(r, weights["ffn_norm"], spec.rms_norm_eps)
+    z = rms_norm(r, weights["ffn_norm"], spec.rms_norm_eps)
     gate = weights["Wgate"] @ z
     up = weights["Wup"] @ z
     ffn = weights["Wdown"] @ (F.silu(gate) * up)
@@ -267,7 +267,7 @@ def recompute_prefix(
     """Full causal block evaluation; never reads or writes the incremental cache."""
     _check_inputs(spec, weights, tokens)
     length = tokens.shape[0]
-    u = _rms_norm(tokens, weights["attn_norm"], spec.rms_norm_eps)
+    u = rms_norm(tokens, weights["attn_norm"], spec.rms_norm_eps)
     q = (u @ weights["Wq"].T).reshape(length, spec.num_attention_heads, spec.head_dim)
     k = (u @ weights["Wk"].T).reshape(length, spec.num_key_value_heads, spec.head_dim)
     v = (u @ weights["Wv"].T).reshape(length, spec.num_key_value_heads, spec.head_dim)
@@ -291,7 +291,7 @@ def recompute_prefix(
         length, spec.hidden_size
     )
     r = tokens + attention @ weights["Wo"].T
-    z = _rms_norm(r, weights["ffn_norm"], spec.rms_norm_eps)
+    z = rms_norm(r, weights["ffn_norm"], spec.rms_norm_eps)
     ffn = (F.silu(z @ weights["Wgate"].T) * (z @ weights["Wup"].T)) @ weights["Wdown"].T
     return {
         "q": q,

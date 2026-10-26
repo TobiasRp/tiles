@@ -337,6 +337,7 @@ std::vector<float> DiagnosticContext::kv_snapshot() const
         impl_->model.weight_dtype, impl_->model.kv_count, impl_->model.stack.layers,
         impl_->model.stack.layer_kv_stride,
         impl_->model.shape.kv_heads * impl_->model.shape.head_dim, impl_->model.shape.max_context,
+        static_cast<int>(impl_->model.layout.key), static_cast<int>(impl_->model.layout.value),
         impl_->position, nullptr);
     impl_->buffers.kv.copy_to(impl_->stream, result);
     impl_->stream.sync();

@@ -11,11 +11,11 @@ from test_decoder_planning import target
 from tileplan.decoder_block import make_plan, read_model, validate
 from tileplan.decoder_reference import (
     ReferenceCache,
-    _rms_norm,
     decode_one,
     fixed_tokens,
     fixed_weights,
     recompute_prefix,
+    rms_norm,
 )
 from tileplan.decoder_stack import (
     StackSpec,
@@ -125,7 +125,7 @@ class PrecisionTest(unittest.TestCase):
         scale = torch.randn(4096, generator=generator).to(torch.bfloat16)
         normalized = x.float() * torch.rsqrt(x.float().square().mean() + 1e-5)
         expected = normalized.to(torch.bfloat16) * scale
-        actual = _rms_norm(x, scale, 1e-5)
+        actual = rms_norm(x, scale, 1e-5)
         self.assertTrue(torch.equal(actual, expected))
         incorrectly_fused = (normalized * scale.float()).to(torch.bfloat16)
         self.assertGreater(int((actual != incorrectly_fused).sum()), 500)

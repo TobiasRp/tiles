@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -23,6 +24,9 @@ def main() -> None:
     parser.add_argument("--sanitizer", type=Path, required=True)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--report-api-errors", choices=("all", "no"), default="no")
+    parser.add_argument(
+        "--keep", action="store_true", help="keep the run directory after a pass"
+    )
     args = parser.parse_args()
     build_dir = args.build_dir.resolve()
     out = args.out or build_dir / "sanitizers"
@@ -229,7 +233,12 @@ def main() -> None:
     (root / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     if any(result["returncode"] for result in results):
         raise SystemExit(f"Sanitizer failures; see {root}")
-    print(f"All {len(results)} checks passed; logs: {root}")
+    if args.keep:
+        print(f"All {len(results)} checks passed; logs: {root}")
+    else:
+        # A full run holds several GB of packages; failed runs stay for inspection.
+        shutil.rmtree(root)
+        print(f"All {len(results)} checks passed")
 
 
 if __name__ == "__main__":

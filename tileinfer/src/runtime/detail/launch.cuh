@@ -88,7 +88,9 @@ void enqueue_worker(cuda::stream& stream, const WorkerProgramView& program,
     const WorkerBuffers& buffers, int position, TokenInput token, Selection selection = {});
 
 // Defines unused diagnostic cache entries without touching the valid prefix.
+// key_offset and value_offset are the K and V elements within one layer.
 void enqueue_zero_unused_kv(cuda::stream& stream, void* kv, WeightDtype dtype, std::size_t count,
-    int layers, int layer_stride, int width, int capacity, int prefix, const int* generated_status);
+    int layers, int layer_stride, int width, int capacity, int key_offset, int value_offset,
+    int prefix, const int* generated_status);
 
 } // namespace tileinfer::detail

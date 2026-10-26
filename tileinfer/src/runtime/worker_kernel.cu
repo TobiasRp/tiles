@@ -209,6 +209,8 @@ __global__ __launch_bounds__(kThreads, 1) void decoder_worker(Launch<Scalar> lau
         }
         __syncthreads();
         run_stream(launch, state, stream, shared);
+        // Deliberate: reloading the counter from shared memory keeps it out of
+        // a register across the stream (see StepState). The value is unchanged.
         step = state.step;
         if (generating && state.token == launch.selection.eos_id)
             return;

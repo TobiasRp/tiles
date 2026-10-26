@@ -108,7 +108,8 @@ class SequenceContext
     Ticket enqueue_decode(TokenId token_id, DiagnosticRequest diagnostics = {});
     Ticket enqueue_generate(GenerateOptions options, DiagnosticRequest diagnostics = {});
     Ticket enqueue_reset();
-    [[nodiscard]] bool ready(const Ticket& ticket) const;
+    // Marks the context invalid if the queued work failed.
+    [[nodiscard]] bool ready(const Ticket& ticket);
     // Throws if the device stopped a generation with an error, such as
     // non-finite logits; the context then requires a reset.
     Completion wait(const Ticket& ticket);
