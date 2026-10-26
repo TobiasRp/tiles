@@ -43,6 +43,9 @@ class DiagnosticContext
     BenchmarkResult benchmark_token(int position, TokenId token_id, int warmup, int iterations,
         int rounds, bool profile = false);
     TimelineResult timeline_token(int position, TokenId token_id, int warmup, int samples);
+    // Fixed-position benchmarks fill K/V with deterministic values instead of
+    // decoding the prefix: timing only, the logits are not a real token's.
+    void use_synthetic_prefix();
     void enable_block_trace();
     [[nodiscard]] std::vector<float> block_trace_snapshot() const;
     [[nodiscard]] std::vector<float> scratch_snapshot() const;

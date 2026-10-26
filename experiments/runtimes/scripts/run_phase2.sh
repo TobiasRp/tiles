@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Phase 2 sweep on the RTX 3050: TileInfer, PyTorch eager/graph and llama.cpp
 # in one session. Two passes in opposite order show session drift.
-# Usage: run_phase2.sh OUT_DIR PACKAGE_DIR
+# Usage: run_phase2.sh OUT_DIR PACKAGE_DIR [CONFIG...]
+# CONFIG names a subset of the llama.cpp configurations below (default: all).
 # Needs: llama.cpp CUDA build, rt_probe CUDA build, the GGUF, a 4K BF16 package.
 set -euo pipefail
 export PATH="/usr/local/cuda/bin:$HOME/.local/bin:$PATH"
@@ -9,6 +10,8 @@ here="$(cd "$(dirname "$0")/.." && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 out="$(realpath -m "$1")"
 package="$(realpath "$2")"
+shift 2
+selected=("$@")
 gguf="$here/models/Llama-3.2-1B-bf16.gguf"
 positions=(0 255 1023 2047 4095)
 new_tokens=64
@@ -22,6 +25,8 @@ echo '{"tokens": [128000, 16, 11, 220, 17, 11, 220, 18, 11]}' > "$out/prompt.jso
   date -u +%FT%TZ
   git -C "$repo" rev-parse HEAD
   nvidia-smi --query-gpu=name,driver_version,clocks.max.sm,clocks.max.mem,power.limit --format=csv
+  # Current clocks show whether they were locked (idle clocks are low when not).
+  nvidia-smi --query-gpu=clocks.sm,clocks.mem,persistence_mode --format=csv
   nvidia-smi --query-compute-apps=pid,name --format=csv
   sha256sum "$gguf"
 } > "$out/env.txt"
@@ -35,6 +40,14 @@ configs=(
   "fa1-bf16-nograph:on:bf16:off"
   "fa1-f16-nograph:on:f16:off"
 )
+if ((${#selected[@]})); then
+  chosen=()
+  for c in "${configs[@]}"; do
+    for name in "${selected[@]}"; do [[ ${c%%:*} == "$name" ]] && chosen+=("$c"); done
+  done
+  ((${#chosen[@]} == ${#selected[@]})) || { echo "unknown configuration in: ${selected[*]}" >&2; exit 1; }
+  configs=("${chosen[@]}")
+fi
 
 tileinfer_pass() {
   local pass=$1

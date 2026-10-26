@@ -64,6 +64,17 @@ context, untraced fixed-context calls 0.05 to 0.08 ms, and 64-token
 generation 0.10 ms (0.8%), each against S2b in the same session
 ([Section 14](#14-s2c-results)). S6a still comes before S4.
 
+**Progress, 2026-10-26: S6a is done.** A controlled protocol
+(`controlled_decode.py`: resident packages, alternating blocks, telemetry,
+paired bootstrap intervals, locked clocks) resolves about 10 µs per token
+(0.08%) in one session and 5 µs with both spawn orders, locked or not. Under
+it, S2c is 0.10
+to 0.13 ms faster than S2b, as the trace showed; TileInfer is 5.1% faster
+than CUDA Graph replay at context 1 and 35.7% at 4K, and now also faster than
+llama.cpp at every context (11% at context 1, 9% at 4K against its fastest
+configuration). A gate comparison takes about 1 to 2 minutes
+([Section 15](#15-s6a-results)).
+
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
 measured, explained advantage over PyTorch CUDA Graph replay on the same
@@ -377,9 +388,9 @@ The gate states its threshold up front. Below it, the milestone is
 re-planned instead of built.
 
 Order after the re-plan of 2026-10-25: S0, S1, S2 (done) → S3 (probed, not
-built) → S2b attention at the right parallelism (done) → **S6a** controlled
-measurement protocol → **S2c** balanced QKV (done first, 2026-10-26) → **S4**
-fewer wave boundaries → S5 one launch per request → S6 showcase.
+built) → S2b attention at the right parallelism (done) → S6a controlled
+measurement protocol (done) → S2c balanced QKV (done first, 2026-10-26) →
+**S4** fewer wave boundaries → S5 one launch per request → S6 showcase.
 
 ### S0 — Baseline and instruments (no kernel behavior change) — done
 
@@ -534,7 +545,12 @@ per token at context 1, 0.7 ms at 256, 1.1 ms at 1K, 1.6 ms at 2K and 3.9 ms
 at 4K. That puts TileInfer at about 12.6 ms at context 1, 12.7 ms at 1K and
 13.3 ms at 4K.
 
-### S6a — Controlled measurement protocol (moved forward from S6)
+### S6a — Controlled measurement protocol (moved forward from S6) — done
+
+Implemented as `tileinfer/tests/controlled_decode.py` with a resident
+benchmark server, and run on 2026-10-26 after S2c. Results, the protocol's
+resolution and its run times are in [Section 15](#15-s6a-results). The S2b
+headline below became S2c's.
 
 Every timing so far is exploratory: unlocked clocks, one session, no stated
 minimum detectable difference. That was enough while each milestone moved the
@@ -1554,7 +1570,8 @@ run's agree within 0.5%, except one eager outlier at 1K).
 Untraced, S2c saves 46 to 79 µs per call, about half the traced 94 to 127 µs.
 The trace's own cost does not explain the gap: S2c has 448 fewer instructions
 (3,812 against 4,260), at a few nanoseconds each. The gap is not isolated;
-S6a's protocol should settle which number holds.
+S6a's protocol settled it: the controlled comparison gives 97 to 130 µs, the
+traced numbers ([Section 15](#15-s6a-results)).
 
 64-token generation after the 6-token prompt, interleaved three times in one
 session: S2b 12,379 / 12,384 / 12,379 µs per token, S2c 12,274 / 12,282 /
@@ -1572,10 +1589,184 @@ targets; S6a comes first, because S4's parts each aim at 0.06 to 0.1 ms.
 
 ### Open
 
-- Traced and untraced savings differ by about a factor of two (above).
+- ~~Traced and untraced savings differ by about a factor of two.~~ The
+  controlled comparison of Section 15 agrees with the trace; the untraced
+  sweep's smaller numbers were an artifact of unpaired runs.
 - The rotation cost in the attention tasks is not isolated from code
   generation (the reference kernels moved too).
 - QKV still runs 16 µs per wave above ideal: about 1.7 µs is the norm
   prologue, the rest pipeline ramp and the last worker's finish (36 µs per
   token).
+
+## 15. S6a results
+
+Measured on `tux`, 2026-10-26, at `7a38e10` plus the S6a tooling (which does
+not change the worker). SM clock locked at 1,950 MHz and memory at 6,801 MHz
+(the clock CUDA work runs at), persistence mode on. Artifacts are in
+`runs/s6a-2026-10-26/` on tux.
+
+### The protocol
+
+- **Resident arms.** `tile_runtime_test --benchmark-serve PACKAGE` loads a
+  package once and answers fixed-position benchmark requests on standard
+  input. Its context keeps the filled prefix, so a later request with the
+  same token decodes only the rows it has not filled. Two TileInfer arms (or
+  one arm and PyTorch eager and graph, in the runner's own process) fit the
+  8 GB GPU together.
+- **Interleaving.** For every context the runner fills each arm's prefix,
+  then runs blocks (default 6) of each arm in alternating forward and
+  reversed order; a block is rounds (default 2) of 20 launches between CUDA
+  events. A background `nvidia-smi` log at 200 ms records SM and memory
+  clocks, temperature, power and clock-event reasons, joined to every block.
+- **Statistics.** Blocks next to each other in time form pairs; the report
+  gives the mean paired difference against the first arm with a bootstrap
+  95% interval. Rounds more than 0.25% from their arm's median at a context
+  are excluded and counted: they are launch hiccups (one round of 2 ms
+  extra in 20 launches), not kernel time. Locked rounds otherwise vary by
+  0.005 to 0.1%.
+- **Hashes and state.** Every report records the commit, executor hashes,
+  plan hashes, the GPU's clock state and the compute processes present.
+  Measurement modes trust the package's declared weight checksum (see below).
+
+### Resolution: A/A
+
+The S2c package as two arms, contexts 1, 256, 1K and 4K:
+
+| Session | b − a at 1 / 256 / 1K / 4K, µs | Largest 95% half-width, µs |
+| --- | --- | ---: |
+| decoded prefix, 10 blocks × 3 rounds, 1 | −0.6 / −3.4 / −3.0 / −2.8 | 3.8 |
+| decoded prefix, 2 | −1.6 / −5.9 / −5.7 / −7.5 | 7.6 |
+| decoded prefix, 3 | −3.3 / −2.5 / −2.1 / −5.6 | 6.4 |
+| synthetic prefix, 6 blocks × 2 rounds, 1 | −1.5 / −2.9 / −0.7 / −4.7 | 3.8 |
+| synthetic prefix, 2 | −4.8 / −0.8 / −5.3 / −3.4 | 4.6 |
+| synthetic prefix, 3 | −5.2 / −0.8 / −2.6 / −4.1 | 3.4 |
+
+- An arm's median repeats across sessions of one kind within about 1 µs:
+  12,188.6 to 12,189.6 µs at context 1; at 4K 13,050.4 to 13,051.5 µs with
+  decoded prefixes and 13,047.3 to 13,048.2 µs with synthetic ones.
+- **The second-spawned server is 1 to 8 µs faster** than the first, in every
+  session, although both run the same binary and package. The alternating
+  order cancels drift, so this is a property of the process, perhaps where
+  its buffers land in memory. It is not isolated. Spawning the arms in both
+  orders cancels it.
+- *Resolution:* a difference of about **10 µs per token (0.08%)** is real in
+  one session, about **5 µs** when both spawn orders are run. S2c's gate
+  (80 µs) and S4's parts (60 to 100 µs) are far above it.
+- The synthetic prefix matches the decoded one within 3 µs (0.03%) at every
+  context; at 4K it is the 3 µs faster one.
+
+### S2c against S2b, controlled
+
+The S2b binary rebuilt with only the benchmark server added (`2cb781c` plus
+the S6a `main.cpp` and `diagnostic_context.cu`), decoded prefixes, 10 blocks
+× 3 rounds, both spawn orders:
+
+| Context | S2b, µs | S2c, µs | S2c − S2b, S2b spawned first | S2c spawned first | Mean |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 12,317 | 12,188 | −131.9 [−133.7, −130.3] | −127.6 | **−129.8** |
+| 256 | 12,370 | 12,268 | −105.8 | −101.7 | −103.7 |
+| 384 | 12,423 | 12,324 | −97.5 | −96.8 | −97.2 |
+| 385 | 12,440 | 12,336 | −104.6 | −98.6 | −101.6 |
+| 1024 | 12,554 | 12,448 | −105.2 | −106.2 | −105.7 |
+| 2048 | 12,751 | 12,644 | −108.8 | −106.4 | −107.6 |
+| 4096 | 13,157 | 13,050 | −111.7 | −105.6 | **−108.6** |
+
+The intervals are ±1 to ±7 µs. This agrees with the trace (−127 µs at
+context 1, −104 µs at 4K) and not with Section 14's untraced sweep (−79 and
+−59 µs), which compared two unpaired runs of `benchmark_decode.py`.
+
+### Headline against PyTorch, controlled
+
+S2c, eager and CUDA Graph replay as three arms in one session, decoded
+prefixes, 6 blocks × 2 rounds; the next token matches PyTorch eager at every
+context. ms per decoder call:
+
+| Context | S2c | PyTorch eager | PyTorch graph | S2c − graph |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 12.189 | 13.949 | 12.840 | −0.650 (−5.1%) |
+| 256 | 12.270 | 14.741 | 13.364 | −1.094 (−8.2%) |
+| 384 | 12.326 | 14.917 | 13.585 | −1.257 (−9.3%) |
+| 385 | 12.338 | 14.887 | 13.581 | −1.247 (−9.2%) |
+| 1024 | 12.450 | 15.774 | 14.639 | −2.191 (−15.0%) |
+| 2048 | 12.646 | 17.371 | 16.220 | −3.576 (−22.0%) |
+| 2049 | 12.657 | 17.331 | 16.213 | −3.556 (−21.9%) |
+| 4096 | 13.051 | 21.400 | 20.294 | −7.244 (−35.7%) |
+
+Every difference's interval is within ±6 µs. At context 1 TileInfer runs
+0.58 ms above the 11.61 ms floor, graph replay 1.23 ms.
+
+### llama.cpp, rerun with S2c
+
+`run_phase2.sh` (now taking a subset of configurations) with flash attention
+and BF16 or f16 K/V, two passes in opposite order, locked clocks. The
+TileInfer and PyTorch rows are `benchmark_decode.py`'s, as in Phase 2; they
+agree with the controlled sweep within 0.02 ms. ms per token, decode only:
+
+| Context | TileInfer | llama.cpp FA, f16 K/V | llama.cpp FA, BF16 K/V | PyTorch graph | PyTorch eager |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 12.19 | 13.68 | 13.73 | 12.85 | 13.99 |
+| 256 | 12.27 | 13.68 | 13.73 | 13.37 | 14.76 |
+| 1024 | 12.45 | 13.83 | 14.14 | 14.63 | 15.78 |
+| 2048 | 12.64 | 13.99 | 14.68 | 16.23 | 17.40 |
+| 4096 | 13.07 | 14.32 | 15.69 | 20.34 | 21.49 |
+
+TileInfer is 11% faster than llama.cpp's fastest configuration at context 1
+and 9% faster at 4K; against matched-precision BF16 K/V, 11% and 17%. In
+64-token generation with greedy selection, TileInfer takes 12.24 ms per
+token, llama.cpp 13.91 (f16 K/V) and 14.01 (BF16 K/V), PyTorch graph 13.09.
+Every runtime picks the same token at every swept context. llama.cpp's
+numbers equal the unlocked Phase 2 ones within 0.01 ms.
+
+### Run times
+
+The first protocol took 220 s for an A/A session at four contexts: 55 s to
+start two servers, 104 s to decode prefixes, 60 s measuring. Two of the
+three costs were removable:
+
+- **The weight checksum.** `load_plan` spent 19 of its 20.5 s hashing 2.47 GB
+  with `picosha2` (125 MB/s) and peaked at 6.8 GB of host memory. The
+  measurement modes (`--benchmark-serve`, `--benchmark-stack`,
+  `--timeline-stack`) now trust the plan's declared checksum and check only
+  the size; reports say `weights_verified: false`. `generate`, `bench` and
+  `check` keep the full check, and `tileplan verify` checks a package once.
+- **The upload is hardware-bound.** The remaining 6.5 s of a server's
+  8.8 s start is the weights upload at 0.38 GB/s. The GPU's link runs at
+  **PCIe 2.0 ×1** (the card supports 4.0 ×16, the host 3.0). Decode is
+  unaffected, since weights, K/V and tokens stay on the GPU, but every
+  process start pays it.
+- **`--synthetic-prefix`** fills K/V with deterministic values instead of
+  decoding the prefix (52 s per arm at 4K), for timing-only runs.
+- **Smaller defaults** (6 blocks × 2 rounds instead of 10 × 3) keep the
+  intervals at ±1 to ±5 µs.
+- **The timeline trace** runs all positions in one process with the prefix
+  reused: 62 s for eight contexts instead of about 5 minutes.
+
+| Measurement | Before | Now |
+| --- | ---: | ---: |
+| A/A or gate comparison, 2 arms, 4 contexts | 220 s | 42 s |
+| Headline against PyTorch, 8 contexts, decoded prefixes | — | 358 s |
+| Timeline trace, 8 contexts | about 300 s | 62 s |
+| llama.cpp comparison, 2 configurations × 2 passes | about 50 min (6 configurations) | 24.5 min |
+
+### Unlocked clocks
+
+Two synthetic-prefix A/A sessions after `nvidia-smi -rgc -rmc`, persistence
+off:
+
+| Session | a at 1 / 256 / 1K / 4K, µs | b − a, µs | Largest 95% half-width, µs |
+| --- | --- | --- | ---: |
+| 1 | 12,187.1 / 12,266.1 / 12,446.0 / 13,046.0 | −7.8 / −1.1 / −4.7 / −1.1 | 5.0 |
+| 2 | 12,188.4 / 12,268.3 / 12,445.9 / 13,045.8 | −4.6 / −4.6 / −0.8 / −4.7 | 7.2 |
+
+Under this load the GPU settles at 1,957 to 1,965 MHz (1,942 MHz at 67 °C)
+with memory at 6,801 MHz and no clock-event reason, so medians are 1 to
+3 µs below the locked ones and the resolution is the same. The difference is
+the start: the first context's blocks begin at 1,822 MHz while the clock
+ramps. Locked clocks remove that ramp and record a known state; unlocked
+runs are usable on this machine if the first blocks are warm.
+
+### Open
+
+- The spawn-order bias (1 to 8 µs) is not explained.
+- The PCIe 2.0 ×1 link is worth checking in hardware (slot or riser).
 

@@ -5,10 +5,12 @@
 #include "diagnostic.hpp"
 
 #include <cuda/__event/timed_event.h>
+#include <cuda_bf16.h>
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 #include <cuda/algorithm>
 #include <cuda/buffer>
+#include <cuda/launch>
 #include <cuda/memory_pool>
 #include <cuda/std/span>
 #include <cuda/stream>
@@ -22,6 +24,24 @@
 
 namespace tileinfer {
 using detail::check;
+namespace {
+
+// Deterministic values in [-1, 1) for a synthetic K/V prefix.
+template <typename Scalar>
+__global__ void fill_synthetic(Scalar* data, std::size_t count)
+{
+    const std::size_t stride = static_cast<std::size_t>(gridDim.x) * blockDim.x;
+    for (std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < count;
+        i += stride) {
+        unsigned hash = static_cast<unsigned>(i) * 0x9e3779b1u;
+        hash ^= hash >> 15;
+        hash *= 0x85ebca77u;
+        hash ^= hash >> 13;
+        data[i] = static_cast<Scalar>(static_cast<float>(hash & 0xffffu) / 32768.0f - 1.0f);
+    }
+}
+
+} // namespace
 
 struct DiagnosticContext::Impl
 {
@@ -41,6 +61,11 @@ struct DiagnosticContext::Impl
     bool valid = true;
     bool in_flight = false;
     bool capture_blocks = false;
+    // Fixed-position benchmarks: K/V rows [0, prefix) hold prefix_token's
+    // prefix, or synthetic values for every position.
+    int prefix = 0;
+    TokenId prefix_token = -1;
+    bool synthetic_prefix = false;
 
     explicit Impl(const LoadedPlan& plan)
         : model(plan)
@@ -72,6 +97,8 @@ struct DiagnosticContext::Impl
     // Fills the visible prefix and warms up outside any timed region. Repeated
     // launches at position overwrite only K/V[position], so every later launch
     // sees the same context length and all earlier cache entries remain valid.
+    // Every prefix row holds the same token's value, so a later benchmark with
+    // that token extends the rows already filled instead of refilling them.
     void prepare_fixed_position(int position, TokenId token_id, int warmup)
     {
         if (!model.stack.full_stack)
@@ -81,8 +108,22 @@ struct DiagnosticContext::Impl
             throw std::runtime_error("invalid benchmark arguments");
         if (this->position != 0 || !valid || in_flight)
             throw std::runtime_error("benchmark requires a fresh context");
-        for (int p = 0; p < position; ++p)
+        if (token_id != prefix_token && !synthetic_prefix)
+            prefix = 0;
+        prefix_token = token_id;
+        if (synthetic_prefix && prefix < position) {
+            const auto config = cuda::make_config(cuda::block_dims<256>(), cuda::grid_dims(1024));
+            if (model.weight_dtype == WeightDtype::bfloat16)
+                cuda::launch(stream, config, fill_synthetic<__nv_bfloat16>,
+                    static_cast<__nv_bfloat16*>(kv.data()), kv.size());
+            else
+                cuda::launch(stream, config, fill_synthetic<float>, static_cast<float*>(kv.data()),
+                    kv.size());
+            prefix = model.max_context;
+        }
+        for (int p = prefix; p < position; ++p)
             launch(p, token_id);
+        prefix = std::max(prefix, position);
         stream.sync();
         for (int i = 0; i < warmup; ++i)
             launch(position, token_id);
@@ -126,6 +167,13 @@ void DiagnosticContext::reset()
     impl_->position = 0;
     impl_->valid = true;
     impl_->in_flight = false;
+    impl_->prefix = 0;
+}
+
+void DiagnosticContext::use_synthetic_prefix()
+{
+    impl_->synthetic_prefix = true;
+    impl_->prefix = 0;
 }
 
 int DiagnosticContext::position() const

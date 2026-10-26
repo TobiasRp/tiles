@@ -24,6 +24,34 @@ CPU, 6 threads; harness validation only, never compared with CUDA numbers):
 - Not exercised on the Mac: Metal. The TileInfer/PyTorch report adapters were
   first run on real reports in Phase 2.
 
+## Phase 2 rerun after S2c (2026-10-26, locked clocks)
+
+The same harness with TileInfer S2c (`7a38e10`), SM clock locked at
+1,950 MHz and memory at 6,801 MHz, flash attention with BF16 or f16 K/V
+only, two passes in opposite order (`run_phase2.sh OUT PACKAGE fa1-bf16
+fa1-f16`). Raw records and `report-both.md` are in `runs/s6a-2026-10-26/rt/`
+on tux. ms per token, decode only, both passes averaged:
+
+| Context | TileInfer | llama.cpp FA, f16 K/V | llama.cpp FA, BF16 K/V | PyTorch graph | PyTorch eager | Floor |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 12.19 | 13.68 | 13.73 | 12.85 | 13.99 | 11.61 |
+| 256 | 12.27 | 13.68 | 13.73 | 13.37 | 14.76 | 11.65 |
+| 1,024 | 12.45 | 13.83 | 14.14 | 14.63 | 15.78 | 11.77 |
+| 2,048 | 12.64 | 13.99 | 14.68 | 16.23 | 17.40 | 11.92 |
+| 4,096 | 13.07 | 14.32 | 15.69 | 20.34 | 21.49 | 12.24 |
+
+- TileInfer is now the fastest at every context: 11% ahead of llama.cpp's
+  fastest configuration at context 1 and 9% at 4,096 (17% against BF16 K/V,
+  the matched precision).
+- Generation (the `1, 2, 3,` prompt, 64 tokens, greedy): TileInfer 12.24 ms
+  per token, PyTorch graph 13.09, llama.cpp 13.91 (f16 K/V) and 14.01 (BF16
+  K/V).
+- llama.cpp's numbers equal the unlocked ones below within 0.01 ms; every
+  runtime picks the same token at every swept context, with the logit offsets
+  described below.
+- The controlled comparison behind TileInfer's numbers is in
+  [the S6a results](megakernel_next_steps.md#15-s6a-results).
+
 ## Phase 2 results: RTX 3050, CUDA
 
 Measured on `tux` on 2026-10-25: RTX 3050 (20 SMs, driver 595.99.02, CUDA

@@ -74,6 +74,39 @@ def check_timeline(executor: Path, package: Path, position: int) -> None:
         raise AssertionError("bubble budget does not sum to the traced kernel time")
 
 
+def check_served(executor: Path, package: Path) -> None:
+    """A resident benchmark server reuses its filled prefix across requests;
+    every answer must match a fresh fixed-position benchmark."""
+
+    def fresh(position: int, token: int) -> dict:
+        command = [str(executor), "--benchmark-stack", str(package)]
+        command += [str(position), str(token), "1", "1", "1"]
+        return json.loads(subprocess.check_output(command, text=True, timeout=60))
+
+    # Increasing, then lower positions, then a new token, which refills the prefix.
+    requests = [(1, 1), (3, 1), (2, 1), (0, 1), (3, 7), (1, 1)]
+    served = subprocess.run(
+        [str(executor), "--benchmark-serve", str(package)],
+        input="".join(f"{p} {t} 1 1 1\n" for p, t in requests),
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=True,
+    )
+    lines = [json.loads(line) for line in served.stdout.splitlines()]
+    if not lines or not lines[0].get("ready") or len(lines) != len(requests) + 1:
+        raise AssertionError("benchmark server did not answer every request")
+    for (position, token), answer in zip(requests, lines[1:], strict=True):
+        expected = fresh(position, token)
+        if (answer["top_token"], answer["top_logit"]) != (
+            expected["top_token"],
+            expected["top_logit"],
+        ):
+            raise AssertionError(
+                f"served benchmark differs at {position}, token {token}"
+            )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--executor", type=Path, required=True)
@@ -225,6 +258,7 @@ def main() -> None:
             check_generation(args.executor, package, root, ids[:2], quantized, spec)
             for position in (1, 2):  # fused, then split
                 check_timeline(args.block_executor, package, position)
+            check_served(args.block_executor, package)
             # Zero logits tie across the whole vocabulary. Sampling must keep
             # the smallest token ID in every precision.
             tied_weights = root / "ties-weights.npz"

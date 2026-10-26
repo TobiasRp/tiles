@@ -172,7 +172,7 @@ std::string sha256(const std::vector<std::uint8_t>& bytes)
     return picosha2::hash256_hex_string(bytes);
 }
 
-LoadedPlan load_plan(const std::string& package, const Target& device)
+LoadedPlan load_plan(const std::string& package, const Target& device, bool verify_weights)
 {
     const auto plan_data = read_bytes(std::filesystem::path(package) / "plan.json");
     auto weights = read_bytes(std::filesystem::path(package) / "weights.bin");
@@ -330,10 +330,11 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
                     static_cast<std::uint64_t>(std::numeric_limits<int>::max()),
         "decoder storage exceeds device address range");
     const auto& integrity = document.at("integrity");
-    const auto weights_sha256 = sha256(weights);
-    require(integrity.at("weights_bytes") == weights.size() &&
-                integrity.at("weights_sha256") == weights_sha256,
-        "decoder weight checksum mismatch");
+    require(integrity.at("weights_bytes") == weights.size(), "decoder weight size mismatch");
+    // Hashing the weights dominates the load time (about 19 s for Llama 3.2 1B).
+    const auto weights_sha256 =
+        verify_weights ? sha256(weights) : integrity.at("weights_sha256").get<std::string>();
+    require(integrity.at("weights_sha256") == weights_sha256, "decoder weight checksum mismatch");
 
     LoadedPlan result{};
     const auto attention_bytes = multiply(multiply(s.nq, s.context), weight_element_bytes);
@@ -365,6 +366,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device)
     result.weights = std::move(weights);
     result.plan_sha256 = sha256(plan_data);
     result.weights_sha256 = weights_sha256;
+    result.weights_verified = verify_weights;
     result.tensors.resize(names.size());
     result.tensors[tensor_index(Id::x)] = {StorageClass::input, 0};
     result.tensors[tensor_index(Id::y)] = {StorageClass::output, 0};

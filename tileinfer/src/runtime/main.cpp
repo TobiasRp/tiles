@@ -15,6 +15,7 @@
 #include <numeric>
 #include <optional>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -281,6 +282,7 @@ enum class Mode
     block,
     state,
     fixed_bench,
+    serve,
     timeline
 };
 
@@ -295,6 +297,8 @@ struct Command
     int position = 0;
     int token = 0;
     int iterations = 0;
+    std::vector<int> positions; // timeline: in the order traced
+    bool synthetic = false;     // fixed-position modes: synthetic K/V prefix
     std::optional<tileinfer::TokenId> eos;
     bool trace = false;
     bool profile = false;
@@ -342,13 +346,26 @@ Command parse_command(int argc, char** argv)
             throw std::runtime_error("invalid benchmark arguments");
         return result;
     }
-    if (mode == "--timeline-stack" && argc == 7) {
+    const bool synthetic = std::string_view(argv[argc - 1]) == "--synthetic-prefix";
+    if (mode == "--benchmark-serve" && argc - synthetic == 3) {
+        Command result{Mode::serve, argv[2]};
+        result.synthetic = synthetic;
+        return result;
+    }
+    if (mode == "--timeline-stack" && argc - synthetic == 7) {
         Command result{Mode::timeline, argv[2]};
-        result.position = parse_int(argv[3]);
+        for (std::string_view list = argv[3]; !list.empty();) {
+            const auto comma = list.find(',');
+            result.positions.push_back(parse_int(list.substr(0, comma)));
+            list = comma == std::string_view::npos ? std::string_view{} : list.substr(comma + 1);
+        }
         result.token = parse_int(argv[4]);
         result.warmup = parse_int(argv[5]);
         result.rounds = parse_int(argv[6]);
-        if (result.position < 0 || result.token < 0 || result.warmup < 0 || result.rounds <= 0)
+        result.synthetic = synthetic;
+        if (result.positions.empty() ||
+            std::ranges::any_of(result.positions, [](int p) { return p < 0; }) ||
+            result.token < 0 || result.warmup < 0 || result.rounds <= 0)
             throw std::runtime_error("invalid timeline arguments");
         return result;
     }
@@ -447,6 +464,54 @@ json bench(const tileinfer::LoadedPlan& plan, const std::string& input_path, int
 
 } // namespace
 
+#ifdef TILE_TEST_HARNESS
+json fixed_benchmark(const tileinfer::LoadedPlan& plan, tileinfer::DiagnosticContext& context,
+    int position, int token, int warmup, int iterations, int rounds, bool profile)
+{
+    const auto measurement =
+        context.benchmark_token(position, token, warmup, iterations, rounds, profile);
+    const double mean =
+        std::accumulate(measurement.samples_us.begin(), measurement.samples_us.end(), 0.0) /
+        measurement.samples_us.size();
+    json result = {{"plan_sha256", plan.plan_sha256}, {"weights_sha256", plan.weights_sha256},
+        {"weights_verified", plan.weights_verified}, {"position", position},
+        {"context_length", position + 1}, {"token_id", token}, {"warmup", warmup},
+        {"iterations", iterations}, {"rounds", rounds}, {"samples_us", measurement.samples_us},
+        {"mean_us", mean}, {"top_token", measurement.top_token},
+        {"top_logit", measurement.top_logit}, {"timing", "CUDA event batch average; kernel only"}};
+    result.update(precision(plan));
+    return result;
+}
+
+// Answers fixed-position benchmark requests, one per input line
+// "POSITION TOKEN WARMUP ITERATIONS ROUNDS", with one JSON line each, until
+// end of input. The package stays resident and the context keeps its filled
+// prefix, so interleaved measurements of several packages need no reloads.
+// A synthetic prefix skips the prefix decode; its logits are not a token's.
+void serve_benchmarks(const tileinfer::LoadedPlan& plan, bool synthetic)
+{
+    tileinfer::DiagnosticContext context(plan);
+    if (synthetic)
+        context.use_synthetic_prefix();
+    std::cout << json{{"ready", true}, {"plan_sha256", plan.plan_sha256},
+                     {"weights_verified", plan.weights_verified}}
+                     .dump()
+              << std::endl;
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        std::istringstream request(line);
+        int position = 0, token = 0, warmup = 0, iterations = 0, rounds = 0;
+        if (!(request >> position >> token >> warmup >> iterations >> rounds) || iterations <= 0 ||
+            rounds <= 0)
+            throw std::runtime_error("invalid benchmark request: " + line);
+        auto result =
+            fixed_benchmark(plan, context, position, token, warmup, iterations, rounds, false);
+        result["synthetic_prefix"] = synthetic;
+        std::cout << result.dump() << std::endl;
+    }
+}
+#endif
+
 int main(int argc, char** argv)
 {
     try {
@@ -465,7 +530,11 @@ int main(int argc, char** argv)
             std::cout << target_json(target).dump(2) << '\n';
             return 0;
         }
-        const auto plan = tileinfer::load_plan(command.package, target);
+        // Measurement modes reload a package many times per run; they trust its
+        // declared weight checksum instead of hashing 2.5 GB each time.
+        const bool measurement = command.mode == Mode::fixed_bench || command.mode == Mode::serve ||
+                                 command.mode == Mode::timeline;
+        const auto plan = tileinfer::load_plan(command.package, target, !measurement);
         json result;
         switch (command.mode) {
         case Mode::inspect:
@@ -490,47 +559,48 @@ int main(int argc, char** argv)
             break;
         case Mode::fixed_bench: {
             tileinfer::DiagnosticContext context(plan);
-            const auto measurement = context.benchmark_token(command.position, command.token,
-                command.warmup, command.iterations, command.rounds, command.profile);
-            const double mean =
-                std::accumulate(measurement.samples_us.begin(), measurement.samples_us.end(), 0.0) /
-                measurement.samples_us.size();
-            result = {{"plan_sha256", plan.plan_sha256}, {"weights_sha256", plan.weights_sha256},
-                {"weight_dtype",
-                    plan.weight_dtype == tileinfer::WeightDtype::bfloat16 ? "bfloat16" : "float32"},
-                {"position", command.position}, {"context_length", command.position + 1},
-                {"token_id", command.token}, {"warmup", command.warmup},
-                {"iterations", command.iterations}, {"rounds", command.rounds},
-                {"samples_us", measurement.samples_us}, {"mean_us", mean},
-                {"top_token", measurement.top_token}, {"top_logit", measurement.top_logit},
-                {"timing", "CUDA event batch average; kernel only"}};
+            result = fixed_benchmark(plan, context, command.position, command.token, command.warmup,
+                command.iterations, command.rounds, command.profile);
             break;
         }
+        case Mode::serve:
+            serve_benchmarks(plan, command.synthetic);
+            return 0;
         case Mode::timeline: {
+            // One JSON line per position; the context keeps its filled prefix.
             tileinfer::DiagnosticContext context(plan);
-            const auto timeline = context.timeline_token(
-                command.position, command.token, command.warmup, command.rounds);
+            if (command.synthetic)
+                context.use_synthetic_prefix();
             std::vector<int> workers;
             for (std::size_t worker = 0; worker < plan.streams.size(); ++worker)
                 workers.insert(workers.end(), plan.streams[worker].count, static_cast<int>(worker));
-            json samples = json::array();
-            for (std::size_t i = 0; i < timeline.records.size(); ++i) {
-                std::array<std::vector<std::uint64_t>, 3> fields;
-                for (std::size_t word = 0; word < timeline.records[i].size(); ++word)
-                    fields[word % 3].push_back(timeline.records[i][word]);
-                samples.push_back({{"kernel_us", timeline.kernel_us[i]}, {"start_cycle", fields[0]},
-                    {"end_cycle", fields[1]}, {"start_ns", fields[2]}});
+            for (const int position : command.positions) {
+                const auto timeline =
+                    context.timeline_token(position, command.token, command.warmup, command.rounds);
+                json samples = json::array();
+                for (std::size_t i = 0; i < timeline.records.size(); ++i) {
+                    std::array<std::vector<std::uint64_t>, 3> fields;
+                    for (std::size_t word = 0; word < timeline.records[i].size(); ++word)
+                        fields[word % 3].push_back(timeline.records[i][word]);
+                    samples.push_back(
+                        {{"kernel_us", timeline.kernel_us[i]}, {"start_cycle", fields[0]},
+                            {"end_cycle", fields[1]}, {"start_ns", fields[2]}});
+                }
+                json trace = {{"plan_sha256", plan.plan_sha256},
+                    {"weights_sha256", plan.weights_sha256},
+                    {"weights_verified", plan.weights_verified}, {"position", position},
+                    {"context_length", position + 1}, {"token_id", command.token},
+                    {"warmup", command.warmup}, {"synthetic_prefix", command.synthetic},
+                    {"instruction_tasks", plan.instruction_tasks}, {"instruction_workers", workers},
+                    {"samples", samples},
+                    {"timing",
+                        "SM cycle counters per instruction; %globaltimer at instruction start for "
+                        "cross-worker alignment; kernel_us is the CUDA event time of the traced "
+                        "launch"}};
+                trace.update(precision(plan));
+                std::cout << trace.dump() << std::endl;
             }
-            result = {{"plan_sha256", plan.plan_sha256}, {"weights_sha256", plan.weights_sha256},
-                {"position", command.position}, {"context_length", command.position + 1},
-                {"token_id", command.token}, {"warmup", command.warmup},
-                {"instruction_tasks", plan.instruction_tasks}, {"instruction_workers", workers},
-                {"samples", samples},
-                {"timing",
-                    "SM cycle counters per instruction; %globaltimer at instruction start for "
-                    "cross-worker alignment; kernel_us is the CUDA event time of the traced "
-                    "launch"}};
-            break;
+            return 0;
         }
 #endif
         default:

@@ -118,6 +118,31 @@ The reference precision now follows the package; an explicit
 [profile_decode.py](tests/profile_decode.py) collects Nsight counters.
 Both expose their arguments through `--help`.
 
+For a comparison between binaries or packages, use the controlled protocol in
+[controlled_decode.py](tests/controlled_decode.py). Each package stays
+resident in a `tile_runtime_test --benchmark-serve` process, blocks of the
+arms alternate in time, a background `nvidia-smi` log records clocks,
+temperature, power and clock-event reasons for every block, and the report
+gives paired differences with bootstrap intervals. Lock the GPU clocks first
+when possible (`sudo nvidia-smi -lgc 1950,1950` and `-lmc 6801,6801` on the
+RTX 3050) and record that in `--note`:
+
+```sh
+uv run --locked --project ../tileplan python tests/controlled_decode.py \
+  --arm old=OLD/tile_runtime_test,OLD_PACKAGE \
+  --arm new=build/release/tile_runtime_test,"$PACKAGE" \
+  --positions 0 255 1023 4095 --synthetic-prefix --note "locked clocks" \
+  --out ../runs/compare
+```
+
+`--synthetic-prefix` fills K/V with deterministic values instead of decoding
+the prefix; timing is unchanged within 0.03%, but the next token is no longer
+compared with PyTorch. `--pytorch CHECKPOINT` adds eager and CUDA Graph arms.
+Measurement modes trust the package's declared weight checksum (hashing
+2.5 GB took 19 s per process), so run `tileplan verify` once per package. Run
+the same package as two arms (A/A) to see the protocol's resolution; see
+[the S6a results](../docs/megakernel_next_steps.md#15-s6a-results).
+
 To see where a token's time goes, measure the bandwidth roofline once, then
 trace the worker at chosen contexts. The trace records every instruction's
 start and end on every worker; the report splits the token into ideal
@@ -130,6 +155,9 @@ uv run --locked --project ../tileplan python tests/profile_timeline.py \
   --executor build/release/tile_runtime_test --package "$PACKAGE" \
   --stream-report ../runs/stream.json --positions 0 1023 --out ../runs/timeline
 ```
+
+All positions are traced in one process, so the prefix is decoded once;
+`--synthetic-prefix` skips it.
 
 `bandwidth_probe rowdot` times the worker's GEMV routine on the Llama 3.2 1B
 projection shapes with 1–20 active workers. See

@@ -240,7 +240,8 @@ struct LoadedPlan
     std::vector<std::int32_t> instruction_tasks;
     std::vector<std::vector<std::int64_t>> worker_loads; // [wave][worker]
     std::string plan_sha256;
-    std::string weights_sha256;
+    std::string weights_sha256; // computed, or the plan's declared value when not verified
+    bool weights_verified;
 };
 
 inline constexpr int element_bytes(WeightDtype dtype)
@@ -249,7 +250,9 @@ inline constexpr int element_bytes(WeightDtype dtype)
 }
 
 Target describe_target();
-LoadedPlan load_plan(const std::string& package, const Target& target);
+// verify_weights = false trusts the plan's declared checksum and checks only the
+// weight size; for repeated measurement runs of a package that was verified once.
+LoadedPlan load_plan(const std::string& package, const Target& target, bool verify_weights = true);
 std::string sha256(const std::vector<std::uint8_t>& bytes);
 
 } // namespace tileinfer

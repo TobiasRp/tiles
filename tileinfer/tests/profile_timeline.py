@@ -1,7 +1,8 @@
 """Trace one decoder launch per context length and write a bubble budget.
 
-Runs ``tile_runtime_test --timeline-stack`` at each position, keeps the
-traced launch with the median CUDA-event time, and decomposes it with
+Runs ``tile_runtime_test --timeline-stack`` once for all positions, in
+increasing order so the prefix is filled once; keeps each position's traced
+launch with the median CUDA-event time, and decomposes it with
 ``tileplan.timeline``. The ideal stream uses the best rate from a
 ``bandwidth_probe stream`` report. Writes ``timeline-report.json`` plus a
 whole-token and a one-layer Gantt chart per position.
@@ -25,6 +26,11 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--samples", type=int, default=5)
     parser.add_argument(
+        "--synthetic-prefix",
+        action="store_true",
+        help="fill K/V with deterministic values instead of decoding the prefix",
+    )
+    parser.add_argument(
         "--layer", type=int, default=8, help="layer for the zoomed chart"
     )
     parser.add_argument("--out", type=Path, required=True)
@@ -39,23 +45,28 @@ def main() -> None:
         "bandwidth_source": str(args.stream_report),
         "positions": [],
     }
-    for position in args.positions:
-        completed = subprocess.run(
-            [
-                str(args.executor),
-                "--timeline-stack",
-                str(args.package),
-                str(position),
-                str(args.token_id),
-                str(args.warmup),
-                str(args.samples),
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=1800,
-        )
-        trace = json.loads(completed.stdout)
+    report["synthetic_prefix"] = args.synthetic_prefix
+    positions = sorted(set(args.positions))
+    completed = subprocess.run(
+        [
+            str(args.executor),
+            "--timeline-stack",
+            str(args.package),
+            ",".join(map(str, positions)),
+            str(args.token_id),
+            str(args.warmup),
+            str(args.samples),
+        ]
+        + (["--synthetic-prefix"] if args.synthetic_prefix else []),
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=3600,
+    )
+    traces = [json.loads(line) for line in completed.stdout.splitlines()]
+    if [trace["position"] for trace in traces] != positions:
+        raise RuntimeError("timeline output does not cover every position")
+    for position, trace in zip(positions, traces, strict=True):
         times = [sample["kernel_us"] for sample in trace["samples"]]
         median = sorted(range(len(times)), key=times.__getitem__)[len(times) // 2]
         events, info = align(trace, median)
