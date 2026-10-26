@@ -3,12 +3,15 @@
 import argparse
 import copy
 import json
+import struct
 import subprocess
 import tempfile
+from hashlib import sha256
 from pathlib import Path
 
 import numpy as np
 import torch
+from tileplan.decoder_reference import DecoderSpec
 from tileplan.decoder_stack import (
     StackCache,
     StackSpec,
@@ -191,6 +194,86 @@ def check_generation(
         raise AssertionError(measurement)
 
 
+def check_multi_launch(executor: Path, root: Path, sequence_smoke: Path | None) -> None:
+    """Prefill and generation longer than one launch (64 steps), EOS that
+    skips the remaining launches, and non-finite logits as a device error."""
+    spec = StackSpec(DecoderSpec(max_context=160), layers=2)
+    fixture = root / "long-fixture"
+    generate_stack_fixture(fixture, spec)
+    package = root / "long-package"
+    build_stack(
+        fixture / "model.json",
+        fixture / "weights.npz",
+        root / "target.json",
+        package,
+        "float32",
+        64,
+        32,
+    )
+    weights = fixed_stack_weights(spec)
+    # Token vocab_size - 1 stays out of the prompt.
+    prompt = [(7 * index + 3) % (spec.vocab_size - 1) for index in range(70)]
+    count = 85
+    cache = StackCache.empty(spec)
+    with torch.inference_mode():
+        for token in prompt:
+            step = decode_token(token, weights, spec, cache)
+        expected = []
+        for _ in range(count):
+            token = int(step["logits"].argmax())
+            expected.append(token)
+            step = decode_token(token, weights, spec, cache)
+    input_path = root / "long_inputs.json"
+    input_path.write_text(json.dumps({"tokens": prompt}))
+
+    def generate(*options: str) -> subprocess.CompletedProcess[str]:
+        return run(executor, "generate", str(package), str(input_path), *options)
+
+    result = generate("--max-new-tokens", str(count))
+    if result.returncode:
+        raise AssertionError(result.stderr)
+    actual = json.loads(result.stdout)
+    if (
+        actual["generated"] != expected
+        or actual["position"] != len(prompt) + count
+        or actual["stop_reason"] != "limit"
+    ):
+        raise AssertionError({"long generation": actual, "expected": expected})
+    # EOS at the latest first occurrence of any generated token.
+    firsts: dict[int, int] = {}
+    for index, token in enumerate(expected):
+        firsts.setdefault(token, index)
+    first = max(firsts.values())
+    eos = generate("--max-new-tokens", str(count), "--eos-id", str(expected[first]))
+    if eos.returncode:
+        raise AssertionError(eos.stderr)
+    stopped = json.loads(eos.stdout)
+    if (
+        stopped["generated"] != expected[: first + 1]
+        or stopped["position"] != len(prompt) + first + 1
+        or stopped["stop_reason"] != "eos"
+    ):
+        raise AssertionError({"long EOS": stopped})
+
+    # A NaN in a tied embedding row the prompt never uses makes that logit NaN.
+    plan_path = package / "plan.json"
+    weights_path = package / "weights.bin"
+    plan = json.loads(plan_path.read_text())
+    unused = next(t for t in range(spec.vocab_size) if t not in prompt)
+    image = bytearray(weights_path.read_bytes())
+    struct.pack_into("<f", image, 4 * unused * spec.block.hidden_size, float("nan"))
+    weights_path.write_bytes(image)
+    plan["integrity"]["weights_sha256"] = sha256(image).hexdigest()
+    plan_path.write_text(json.dumps(plan))
+    failed = generate("--max-new-tokens", "2")
+    if failed.returncode == 0 or "non-finite logits" not in failed.stderr:
+        raise AssertionError({"non-finite logits": failed.stdout + failed.stderr})
+    if sequence_smoke:
+        smoke = run(sequence_smoke, str(package), "--non-finite")
+        if smoke.returncode:
+            raise AssertionError(smoke.stderr)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--executor", type=Path, required=True)
@@ -246,6 +329,7 @@ def main() -> None:
             raise AssertionError(report)
         check_sequence(args.executor, package, root, ids, traces, spec)
         check_generation(args.executor, package, root, ids[:2], weights, spec)
+        check_multi_launch(args.executor, root, args.sequence_smoke)
         for smoke in (args.sequence_smoke, args.ring_smoke):
             if smoke:
                 smoke_result = run(smoke, str(package))
@@ -360,7 +444,8 @@ def main() -> None:
             untied,
         )
     print(
-        "stack logits, per-layer cache, tails, reset, capacity, and loader checks passed"
+        "stack logits, per-layer cache, tails, reset, capacity, multi-launch "
+        "generation, and loader checks passed"
     )
 
 

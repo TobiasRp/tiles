@@ -180,7 +180,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
     const auto model_kind = header.at("model_kind").get<std::string>();
     const bool full_stack = model_kind == "llama_decoder_stack";
     const int version = positive(header.at("format_version"), "format_version");
-    require(version == 9 && header.at("executor_abi") == kAbi &&
+    require(version == 10 && header.at("executor_abi") == kAbi &&
                 model_kind == (full_stack ? "llama_decoder_stack" : "llama_decoder_block"),
         "unsupported decoder plan header; regenerate the package with the current planner");
     const auto& model = document.at("model");
@@ -231,7 +231,8 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
                                    (static_cast<std::int64_t>(s.context) + s.steps - 1) / s.steps);
     require(static_cast<std::int64_t>(s.steps) * group * weight_element_bytes <=
                     kAttentionSharedBytes &&
-                s.fused <= s.steps && s.chunks == longest_chunks,
+                s.fused <= s.steps && s.chunks == longest_chunks &&
+                static_cast<std::int64_t>(s.context) * s.chunks <= std::numeric_limits<int>::max(),
         "invalid attention chunking");
     // One FFN chunk per task, at most one per product row.
     require(s.ffn <= s.f, "invalid FFN chunking");
@@ -277,6 +278,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
     const auto [scratch_regions, scratch_bytes] = regions(s, scratch_ids, 16, weight_element_bytes);
     const auto [kv_regions, kv_bytes] = regions(s, kv_ids, 16, weight_element_bytes);
     StackConfig stack{layers, vocab, 0, 0, 0, 0, 0, 0, full_stack};
+    int selection_slots = 0;
     const std::uint64_t expected_kv_bytes =
         full_stack ? multiply(kv_bytes, static_cast<std::uint64_t>(layers)) : kv_bytes;
     require(storage.at("scratch") == scratch_regions &&
@@ -310,6 +312,16 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
                     storage.at("weight_bytes") == total && storage.at("stack") == expected_stack &&
                     total == weights.size(),
             "invalid decoder stack storage");
+        // One greedy candidate per logits task; the program validator checks
+        // that the logits tasks own the slots.
+        const auto& selection = storage.at("selection_bytes");
+        require(selection.is_number_unsigned() &&
+                    selection.get<std::uint64_t>() % sizeof(Candidate) == 0 &&
+                    selection.get<std::uint64_t>() / sizeof(Candidate) > 0 &&
+                    selection.get<std::uint64_t>() / sizeof(Candidate) <=
+                        static_cast<std::uint64_t>(vocab),
+            "invalid greedy selection workspace");
+        selection_slots = static_cast<int>(selection.get<std::uint64_t>() / sizeof(Candidate));
         stack.embedding_offset = 0;
         stack.layer_weights_offset = static_cast<int>(layer_offset / weight_element_bytes);
         stack.layer_weight_stride = static_cast<int>(layer_stride / weight_element_bytes);
@@ -321,7 +333,8 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
             storage.at("input_bytes") == static_cast<std::uint64_t>(s.d) * weight_element_bytes &&
                 storage.at("output_bytes") ==
                     static_cast<std::uint64_t>(s.d) * weight_element_bytes &&
-                storage.at("weight_bytes") == weight_bytes && weight_bytes == weights.size(),
+                storage.at("weight_bytes") == weight_bytes && weight_bytes == weights.size() &&
+                !storage.contains("selection_bytes"),
             "invalid decoder block storage");
     }
     require(weight_bytes / weight_element_bytes <=
@@ -356,6 +369,7 @@ LoadedPlan load_plan(const std::string& package, const Target& device, bool veri
     result.attention_partial_bytes = partial_bytes;
     result.ffn_partial_bytes = ffn_partial_bytes;
     result.ffn_chunks = s.ffn;
+    result.selection_slots = selection_slots;
     result.attention_chunks = s.chunks;
     result.attention_chunk_steps = s.steps;
     result.attention_fused_steps = s.fused;

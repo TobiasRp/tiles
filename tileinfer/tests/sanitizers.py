@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 from tileplan.decoder_block import build
 from tileplan.decoder_reference import DecoderSpec, generate_fixture
-from tileplan.decoder_stack import build_stack
+from tileplan.decoder_stack import StackSpec, build_stack, generate_stack_fixture
 from tileplan.probe import probe
 
 
@@ -115,6 +115,33 @@ def main() -> None:
             str(build_dir / "sequence_ring_smoke"),
             str(stack),
         ]
+    # Prefill and generation over several launches of up to 64 steps, with
+    # split attention beyond 32 steps.
+    long_fixture = root / "long-fixture"
+    generate_stack_fixture(
+        long_fixture, StackSpec(DecoderSpec(max_context=160), layers=2)
+    )
+    long_stack = root / "long-stack"
+    build_stack(
+        long_fixture / "model.json",
+        long_fixture / "weights.npz",
+        root / "target.json",
+        long_stack,
+        "bfloat16",
+        64,
+        32,
+    )
+    (root / "long-prompt.json").write_text(
+        json.dumps({"tokens": [(7 * index + 3) % 47 for index in range(70)]})
+    )
+    cases["bfloat16-multi-launch-generate"] = [
+        str(executor),
+        "generate",
+        str(long_stack),
+        str(root / "long-prompt.json"),
+        "--max-new-tokens",
+        "85",
+    ]
     ops_cases = root / "ops-cases.json"
     subprocess.run(
         [
@@ -167,7 +194,9 @@ def main() -> None:
                 )
                 try:
                     _, stderr = process.communicate(
-                        timeout=600 if name.endswith("-ring") else 180
+                        timeout=600
+                        if name.endswith(("-ring", "-multi-launch-generate"))
+                        else 180
                     )
                     returncode = process.returncode
                 except subprocess.TimeoutExpired:

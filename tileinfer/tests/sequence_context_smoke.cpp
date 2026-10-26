@@ -3,6 +3,7 @@
 #include <array>
 #include <iostream>
 #include <stdexcept>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -13,15 +14,62 @@ void require(bool condition, const char* message)
         throw std::runtime_error(message);
 }
 
+// Requires `call` to throw an error whose message contains `expected`.
+template <typename Call>
+void require_error(Call call, std::string_view expected, const char* message)
+{
+    try {
+        call();
+    } catch (const std::runtime_error& error) {
+        require(std::string_view(error.what()).find(expected) != std::string_view::npos, message);
+        return;
+    }
+    throw std::runtime_error(message);
+}
+
+// A package whose logits are NaN for some token the prompt {0} avoids:
+// generation stops with a device error, and the context needs a reset.
+void check_non_finite(const tileinfer::DecoderModel& model)
+{
+    const std::array<tileinfer::TokenId, 1> prompt{0};
+    auto context = model.create_context();
+    context.enqueue_prefill(prompt);
+    auto failed = context.enqueue_generate({2, std::nullopt});
+    require_error([&] { context.wait(failed); }, "non-finite logits",
+        "non-finite logits did not stop generation");
+    require_error([&] { context.enqueue_decode(0); }, "reset required",
+        "a stopped generation left the context valid");
+    // A dropped ticket: the next request reports the error.
+    context.enqueue_reset();
+    context.enqueue_prefill(prompt);
+    (void)context.enqueue_generate({2, std::nullopt});
+    require_error([&] { context.enqueue_decode(0); }, "non-finite logits",
+        "a dropped failed generation was not reported");
+    // After a reset, waiting on the old ticket reports it again but leaves
+    // the new sequence valid.
+    context.enqueue_reset();
+    auto prefill = context.enqueue_prefill(prompt);
+    require_error([&] { context.wait(failed); }, "non-finite logits",
+        "a completed failed ticket changed its result");
+    require(context.wait(prefill).position == 1, "reset context did not accept a prefill");
+    context.enqueue_decode(0);
+}
+
 } // namespace
 
 int main(int argc, char** argv)
 {
     try {
-        require(argc == 2, "expected a stack package path");
+        const bool non_finite = argc == 3 && std::string_view(argv[2]) == "--non-finite";
+        require(argc == 2 || non_finite, "expected a stack package path [--non-finite]");
         const auto plan = tileinfer::load_plan(argv[1], tileinfer::describe_target());
         require(plan.stack.full_stack && plan.max_context >= 5, "expected a small stack package");
         tileinfer::DecoderModel model(plan);
+        if (non_finite) {
+            check_non_finite(model);
+            std::cout << "sequence context non-finite smoke passed\n";
+            return 0;
+        }
         const std::array<tileinfer::TokenId, 2> prompt{0, 1};
         const std::array<tileinfer::TokenId, 2> other_prompt{1, 0};
 

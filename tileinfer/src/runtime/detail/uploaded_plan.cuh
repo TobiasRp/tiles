@@ -40,6 +40,7 @@ class UploadedPlan
     int attention_chunk_steps;
     int attention_fused_steps;
     int ffn_chunks;
+    int selection_slots;
     std::size_t scratch_count;
     std::size_t kv_count;
     std::size_t attention_count; // scores workspace elements

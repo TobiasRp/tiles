@@ -55,6 +55,7 @@ struct DiagnosticContext::Impl
     detail::ActivationBuffer attention_scores;
     cuda::device_buffer<float> attention_partials;
     cuda::device_buffer<float> logits;
+    cuda::device_buffer<Candidate> candidates;
     std::optional<cuda::device_buffer<float>> block_trace;
     cuda::device_buffer<float> ffn_trace;
     int position = 0;
@@ -76,6 +77,7 @@ struct DiagnosticContext::Impl
         , attention_scores(stream, pool, model.attention_count, model.weight_dtype)
         , attention_partials(stream, pool, model.partial_count, cuda::no_init)
         , logits(stream, pool, std::max(1, model.stack.vocab_size), cuda::no_init)
+        , candidates(stream, pool, std::max(1, model.selection_slots), cuda::no_init)
         , ffn_trace(stream, pool, model.hidden_size, cuda::no_init)
     {
         stream.sync();
@@ -90,8 +92,8 @@ struct DiagnosticContext::Impl
     {
         const detail::WorkerBuffers buffers{input.data(), output.data(), scratch.data(), kv.data(),
             logits.data(), capture_blocks ? block_trace->data() : nullptr, attention_scores.data(),
-            attention_partials.data(), ffn_trace.data(), timeline};
-        detail::enqueue_worker(stream, model.view(), buffers, position, {token_id, nullptr, 0});
+            attention_partials.data(), candidates.data(), ffn_trace.data(), timeline};
+        detail::enqueue_worker(stream, model.view(), buffers, position, {token_id, nullptr, 1});
     }
 
     // Fills the visible prefix and warms up outside any timed region. Repeated

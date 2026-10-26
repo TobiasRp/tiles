@@ -19,6 +19,7 @@ from .decoder_reference import (
     recompute_prefix,
 )
 from .plan_core import (
+    CANDIDATE_BYTES,
     WEIGHTS,
     align,
     assemble_plan,
@@ -34,6 +35,7 @@ from .plan_core import (
     regions,
     require,
     scheduled_program,
+    selection_slots,
     source_shape,
     storage_section,
     validate_header,
@@ -278,7 +280,13 @@ def stack_plan(
         MODEL_KIND,
         target,
         model_section(spec.as_dict(), block, dtype, chunking, workers),
-        {**storage, "stack": stack},
+        {
+            **storage,
+            "stack": stack,
+            # One greedy candidate per logits task.
+            "selection_bytes": CANDIDATE_BYTES
+            * selection_slots(spec.vocab_size, workers),
+        },
         scheduled_program(
             block, dtype, workers, chunking, spec.layers, spec.vocab_size
         ),

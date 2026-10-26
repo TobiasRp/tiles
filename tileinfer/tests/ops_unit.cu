@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -64,7 +65,8 @@ __device__ void split_down(int begin, int end, bool with_gate_up, const ops::Lay
 
 template <typename Scalar>
 __global__ __launch_bounds__(kThreads, 1) void run_operator(int op, int begin, int end,
-    ops::Layer<Scalar> layer, ops::Shape shape, const Scalar* weights, float* logits_out)
+    ops::Layer<Scalar> layer, ops::Shape shape, const Scalar* weights, float* logits_out,
+    Candidate* candidate)
 {
     __shared__ ops::SharedStorage shared;
     switch (op) {
@@ -105,7 +107,7 @@ __global__ __launch_bounds__(kThreads, 1) void run_operator(int op, int begin, i
             shape.numeric.rms_norm_eps, shared);
         break;
     case logits:
-        ops::logits(layer.x, weights, logits_out, begin, end, shape.hidden_size, shared);
+        ops::logits(layer.x, weights, logits_out, candidate, begin, end, shape.hidden_size, shared);
         break;
     }
 }
@@ -167,6 +169,10 @@ json evaluate(const json& item)
         down = std::move(transposed);
     }
     buffer("weights", static_cast<std::size_t>(rows) * d, 0.0f);
+    if (item.contains("poison")) // JSON has no NaN or infinity
+        host["weights"].at(static_cast<std::size_t>(20) * d + 5) = static_cast<Scalar>(
+            item.at("poison") == "nan" ? std::numeric_limits<float>::quiet_NaN()
+                                       : std::numeric_limits<float>::infinity());
     buffer("y", rows, -123.0f);
     buffer("attention", d, -123.0f);
     buffer("scores", static_cast<std::size_t>(nq) * capacity, -123.0f);
@@ -203,6 +209,9 @@ json evaluate(const json& item)
     const std::vector<float> sentinel(rows, -123.0f);
     cuda::device_buffer<float> d_logits(stream, pool, sentinel.size(), cuda::no_init);
     cuda::copy_bytes(stream, sentinel, d_logits);
+    const std::vector<Candidate> no_candidate{{-123.0f, -123}};
+    cuda::device_buffer<Candidate> d_candidate(stream, pool, 1, cuda::no_init);
+    cuda::copy_bytes(stream, no_candidate, d_candidate);
     auto frequencies = item.value("frequencies", std::vector<float>(dh / 2, 0.01f));
     cuda::device_buffer<float> d_frequencies(stream, pool, frequencies.size(), cuda::no_init);
     cuda::copy_bytes(stream, frequencies, d_frequencies);
@@ -212,16 +221,16 @@ json evaluate(const json& item)
         at("r"), at("product"), at("key_cache"), at("value_cache"), at("scores"), partials.data(),
         partials.data() + static_cast<std::size_t>(chunks) * nq * dh,
         partials.data() + attention_partials, at("attn_norm"), at("Wq"), at("Wk"), at("Wv"),
-        at("Wo"), at("ffn_norm"), at("Wgate"), at("Wup"), at("Wdown"), nullptr, nullptr};
+        at("Wo"), at("ffn_norm"), at("Wgate"), at("Wup"), at("Wdown"), nullptr, nullptr, position};
     NumericConfig numeric{};
     numeric.rms_norm_eps = item.value("epsilon", 1e-5f);
-    const ops::Shape shape{d, f, nq, nkv, dh, position, capacity, chunks, chunk_steps, fused_steps,
+    const ops::Shape shape{d, f, nq, nkv, dh, capacity, chunks, chunk_steps, fused_steps,
         ffn_chunks, numeric, d_frequencies.data()};
     const int begin = item.value("begin", 0);
     const int end = item.value("end", rows);
     const auto config = cuda::make_config(cuda::block_dims<kThreads>(), cuda::grid_dims(1));
     cuda::launch(stream, config, run_operator<Scalar>, static_cast<int>(op), begin, end, layer,
-        shape, at("weights"), d_logits.data());
+        shape, at("weights"), d_logits.data(), d_candidate.data());
 
     json result;
     for (auto& [name, values] : host) {
@@ -241,6 +250,12 @@ json evaluate(const json& item)
     cuda::copy_bytes(stream, d_logits, host_logits);
     stream.sync();
     result["logits"] = host_logits;
+    std::vector<Candidate> candidate(1);
+    cuda::copy_bytes(stream, d_candidate, candidate);
+    stream.sync();
+    // A NaN value is not valid JSON; the candidate's ID marks it.
+    result["candidate"] = {
+        candidate[0].id == kNonFinite ? 0.0f : candidate[0].value, candidate[0].id};
     return result;
 }
 } // namespace

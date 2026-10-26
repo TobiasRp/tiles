@@ -24,8 +24,8 @@ import torch
 from .decoder_reference import WEIGHT_SHAPES, DecoderSpec
 from .probe import ABI
 
-FORMAT = 9
-GENERATOR = "tileplan-decoder-0.9"
+FORMAT = 10
+GENERATOR = "tileplan-decoder-0.10"
 WEIGHT_DTYPES = {"float32": 4, "bfloat16": 2}
 # Weights keep this order inside each layer's block of weights.bin.
 TENSOR_NAMES = (
@@ -285,6 +285,15 @@ def ffn_chunks(spec: DecoderSpec, workers: int) -> int:
     return len(_split(spec.intermediate_size, workers))
 
 
+# Bytes of one greedy candidate: an FP32 logit and an int32 token ID.
+CANDIDATE_BYTES = 8
+
+
+def selection_slots(vocab_size: int, workers: int) -> int:
+    """Greedy candidates per token, one per logits task."""
+    return len(_split(vocab_size, workers))
+
+
 def _graph(spec: DecoderSpec, workers: int, chunking: dict, dtype: str) -> list[dict]:
     """One layer's tasks with their minimal data dependencies.
 
@@ -431,6 +440,8 @@ def _program(
 
     A stack (``vocab_size`` set) starts with embedding tasks and ends with final
     normalization and logits tasks, each split into one row range per worker.
+    Each logits task also writes its rows' greedy candidate to its own slot of
+    the selection workspace; the executor combines them before the next token.
     Every layer repeats the block graph; its first normalization depends on the
     previous layer's output tasks. Layer tasks name their layer so the executor
     selects that layer's weights, K/V, and alternating hidden buffers.
@@ -440,18 +451,28 @@ def _program(
     tasks: list[dict] = []
 
     def stage(
-        opcode: str, name: str, rows: int, predecessors: list[int], work
+        opcode: str,
+        name: str,
+        rows: int,
+        predecessors: list[int],
+        work,
+        selection: bool = False,
     ) -> list[int]:
         ids = []
-        for begin, end in _split(rows, workers):
+        for slot, (begin, end) in enumerate(_split(rows, workers)):
+            operands: dict = {"rows": [begin, end]}
+            output: list[dict] = [{"stage": name, "rows": [begin, end]}]
+            if selection:
+                operands["chunk"] = slot
+                output.append({"workspace": "selection", "chunk": slot})
             ids.append(len(tasks))
             tasks.append(
                 {
                     "id": len(tasks),
                     "layer": None,
                     "opcode": opcode + suffix,
-                    "operands": {"rows": [begin, end]},
-                    "output": [{"stage": name, "rows": [begin, end]}],
+                    "operands": operands,
+                    "output": output,
                     "predecessors": sorted(predecessors),
                     "estimated_work": work(begin, end),
                 }
@@ -495,6 +516,7 @@ def _program(
             vocab_size,
             normalized,
             lambda begin, end: (end - begin) * d,
+            selection=True,
         )
     return tasks
 

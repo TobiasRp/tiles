@@ -1,6 +1,7 @@
 #pragma once
 
 #include "detail/cuda_check.hpp"
+#include "detail/launch.cuh"
 #include "runtime.hpp"
 
 #include <cuda/__event/timed_event.h>
@@ -38,7 +39,8 @@ struct Ticket::State
             : start_position(start)
             , requested(count)
             , output(stream, cuda::pinned_default_memory_pool(), count, cuda::no_init)
-            , status(stream, cuda::pinned_default_memory_pool(), 2, cuda::no_init)
+            , status(
+                  stream, cuda::pinned_default_memory_pool(), detail::kStatusWords, cuda::no_init)
             , compute_start(stream)
             , compute_end(stream)
         {

@@ -96,9 +96,13 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
                     owned(rows, begin, end, F.linear(product, w) + r, dtype),
                 )
 
-        # Logits: whole and partial vocabulary ranges.
+        # Logits: whole and partial vocabulary ranges, then each range's
+        # greedy candidate. Rows 7, 30 and 41 repeat row 40, so their logits
+        # tie and the lowest ID among them wins if they hold the maximum.
         x, w = random(93, dtype=dtype), random(53, 93, dtype=dtype)
-        for begin, end in ((0, 53), (1, 52)):
+        w[40] = w[w.float() @ x.float() == (w.float() @ x.float()).max()][0]
+        w[7] = w[30] = w[41] = w[40]
+        for begin, end in ((0, 53), (1, 52), (31, 53)):
             expected = torch.full((53,), SENTINEL, device="cuda")
             expected[begin:end] = F.linear(x, w).float()[begin:end]
             add(
@@ -114,6 +118,24 @@ def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
                 },
                 "logits",
                 expected,
+            )
+        # A non-finite logit makes the candidate kNonFinite (-1).
+        for poison in ("nan", "inf"):
+            add(
+                {
+                    "op": "logits",
+                    "dtype": label,
+                    "hidden": 93,
+                    "rows": 53,
+                    "x": raw(x),
+                    "weights": raw(w),
+                    "poison": poison,  # the harness sets row 20, column 5
+                    "begin": 0,
+                    "end": 53,
+                    "non_finite": True,
+                },
+                "candidate",
+                torch.tensor([0.0, -1.0]),
             )
 
         # Final norm and embedding rows, whole and partial.
@@ -440,7 +462,18 @@ def main() -> None:
     for index, ((case, buffer, reference, extra), result) in enumerate(
         zip(cases, results, strict=True)
     ):
+        if case.get("non_finite", False):
+            if result["candidate"] != [0.0, -1]:
+                raise AssertionError(f"operator case {index}: {result['candidate']}")
+            continue
         actual = torch.tensor(result[buffer][: reference.numel()])
+        if case["op"] == "logits":
+            # The candidate is the largest logit it stored, lowest ID first.
+            begin, end = case["begin"], case["end"]
+            owned_logits = actual[begin:end].tolist()
+            best = max(range(len(owned_logits)), key=lambda i: (owned_logits[i], -i))
+            if result["candidate"] != [owned_logits[best], begin + best]:
+                raise AssertionError(f"operator case {index}: {result['candidate']}")
         bf16 = case["dtype"] == "bfloat16"
         atol, rtol = (1e-2, 1e-2) if bf16 else (1e-4, 5e-5)
         try:

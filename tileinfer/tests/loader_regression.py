@@ -171,6 +171,28 @@ def fuse_into_projection(plan: dict) -> None:
     projection["conditional_barrier"] = wave.pop("conditional_barrier")
 
 
+def logits_tasks(plan: dict) -> list[dict]:
+    return [task for task in plan["tasks"] if task["opcode"].startswith("logits")]
+
+
+def set_candidate_slot(task: dict, slot: int) -> None:
+    task["operands"]["chunk"] = slot
+    task["output"][-1]["chunk"] = slot
+
+
+def swap_candidate_slots(plan: dict) -> None:
+    """Logits tasks may own any permutation of the candidate slots."""
+    first, second = logits_tasks(plan)[:2]
+    slot = first["operands"]["chunk"]
+    set_candidate_slot(first, second["operands"]["chunk"])
+    set_candidate_slot(second, slot)
+
+
+def share_candidate_slot(plan: dict) -> None:
+    first, second = logits_tasks(plan)[:2]
+    set_candidate_slot(second, first["operands"]["chunk"])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--loader", type=Path, required=True)
@@ -247,7 +269,7 @@ def main() -> None:
                     )
                     retired["model"]["dtype"] = "float32"
                     check(retired, False, f"retired version {version} package")
-                for version in (6, 7, 8):
+                for version in (6, 7, 8, 9):
                     previous = copy.deepcopy(original)
                     previous["header"].update(
                         format_version=version,
@@ -340,8 +362,27 @@ def main() -> None:
                     "rotation in a later chunk": rotate_in_later_chunk,
                 }
                 if kind == "stack":
+                    swapped = copy.deepcopy(original)
+                    swap_candidate_slots(swapped)
+                    check(swapped, True, "candidate slots out of row order")
                     layers = original["model"]["layers"]
                     mutations |= {
+                        "candidate slot outside range": lambda p: logits_tasks(p)[0][
+                            "operands"
+                        ].update(chunk=len(logits_tasks(p))),
+                        "candidate slot shared": share_candidate_slot,
+                        "selection workspace size": lambda p: p["storage"].update(
+                            selection_bytes=p["storage"]["selection_bytes"] + 8
+                        ),
+                        "unaligned selection workspace": lambda p: p["storage"].update(
+                            selection_bytes=p["storage"]["selection_bytes"] + 4
+                        ),
+                        "missing selection workspace": lambda p: p["storage"].pop(
+                            "selection_bytes"
+                        ),
+                        "undeclared candidate": lambda p: logits_tasks(p)[0][
+                            "output"
+                        ].pop(),
                         "layer outside range": lambda p: next(
                             t for t in p["tasks"] if t["layer"] is not None
                         ).update(layer=layers),
@@ -354,6 +395,9 @@ def main() -> None:
                     mutations["block task without a layer"] = lambda p: p["tasks"][
                         0
                     ].update(layer=None)
+                    mutations["selection workspace in a block"] = lambda p: p[
+                        "storage"
+                    ].update(selection_bytes=8)
                 for label, mutate in mutations.items():
                     invalid = copy.deepcopy(original)
                     mutate(invalid)

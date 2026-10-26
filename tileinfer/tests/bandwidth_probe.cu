@@ -360,6 +360,7 @@ struct QkvProgram
     Bf16* key_cache;
     Bf16* value_cache;
     ops::Shape shape;
+    int position;
     int layers;
     int iterations;
 };
@@ -400,7 +401,7 @@ __device__ inline void qkv_head(
             head[i] = static_cast<Bf16>(value);
     }
     __syncthreads();
-    const int cache_row = shape.position * kv_width + row;
+    const int cache_row = layer.position * kv_width + row;
     if (matrix == layer.Wv) {
         for (int i = threadIdx.x; i < dh; i += blockDim.x)
             layer.value_cache[cache_row + i] = head[i];
@@ -408,7 +409,7 @@ __device__ inline void qkv_head(
     }
     Bf16* rotated = matrix == layer.Wq ? layer.q_rot + row : layer.key_cache + cache_row;
     for (int pair = threadIdx.x; pair < dh / 2; pair += blockDim.x)
-        ops::rotate_pair(head, rotated, pair, shape);
+        ops::rotate_pair(head, rotated, pair, layer.position, shape);
 }
 
 // Without the norm prologue (diagnostic): the projection of x itself, with
@@ -433,7 +434,7 @@ __device__ inline void qkv_raw(int begin, int end, const ops::Layer<Bf16>& layer
         Bf16* output = row < d ? layer.q + row
                        : row < d + kv_width
                            ? layer.k + row - d
-                           : layer.value_cache + shape.position * kv_width + row - d - kv_width;
+                           : layer.value_cache + layer.position * kv_width + row - d - kv_width;
         *output = static_cast<Bf16>(value);
     }
 }
@@ -454,7 +455,7 @@ __global__ __launch_bounds__(kThreads, 1) void qkv_waves(
             nullptr, nullptr, nullptr, program.key_cache, program.value_cache, nullptr, nullptr,
             nullptr, nullptr, program.norm, weights, weights + static_cast<std::size_t>(d) * d,
             weights + static_cast<std::size_t>(d + kv_width) * d, nullptr, nullptr, nullptr,
-            nullptr, nullptr, nullptr, nullptr};
+            nullptr, nullptr, nullptr, nullptr, program.position};
         const int begin =
             static_cast<int>(static_cast<std::int64_t>(rows) * blockIdx.x / gridDim.x);
         const int end =
@@ -836,9 +837,9 @@ json qkv_sweep(int sm_count)
 
     QkvProgram program{weights.data(), x.data(), norm.data(), q.data(), k.data(), q_rot.data(),
         key_cache.data(), value_cache.data(),
-        {d, 8192, d / head_dim, kv_heads, head_dim, 0, context, 2, 2048, 384, sm_count,
+        {d, 8192, d / head_dim, kv_heads, head_dim, context, 2, 2048, 384, sm_count,
             {1e-5f, 500000.0f, 32.0f, 1.0f, 4.0f, 8192.0f}, frequencies.data()},
-        layers, 8};
+        0, layers, 8};
     const auto config = cuda::make_config(
         cuda::block_dims<kThreads>(), cuda::grid_dims(sm_count), cuda::cooperative_launch{});
     // Median of five timed launches after a warm-up, per layer.
@@ -860,8 +861,7 @@ json qkv_sweep(int sm_count)
     auto values = [&] {
         std::vector<Bf16> result(kv_width);
         cuda::copy_bytes(stream,
-            cuda::std::span<const Bf16>(
-                value_cache.data() + program.shape.position * kv_width, kv_width),
+            cuda::std::span<const Bf16>(value_cache.data() + program.position * kv_width, kv_width),
             result);
         stream.sync();
         return result;
@@ -870,7 +870,7 @@ json qkv_sweep(int sm_count)
     const double ideal_us = static_cast<double>(rows) * d * sizeof(Bf16) / kRooflineGbps / 1e3;
     json runs = json::array();
     for (int position : {0, 255, 4095}) {
-        program.shape.position = position;
+        program.position = position;
         const double barrier_us = time(QkvMode::barriers);
         const double heads_us = time(QkvMode::heads);
         const auto heads_values = values();
@@ -1050,7 +1050,7 @@ __global__ __launch_bounds__(kThreads, 1) void ffn_waves(__grid_constant__ const
         const ops::Layer<Bf16> layer{nullptr, program.y, nullptr, nullptr, nullptr, nullptr,
             const_cast<Bf16*>(program.r), program.product, nullptr, nullptr, nullptr, nullptr,
             nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, program.ffn_norm,
-            weights, weights + matrix, weights + 2 * matrix, nullptr, nullptr};
+            weights, weights + matrix, weights + 2 * matrix, nullptr, nullptr, 0};
         if constexpr (Mode == FfnMode::split) {
             ops::gate_up(worker_begin(f), worker_end(f), layer, shape, shared);
             __syncthreads();
@@ -1116,7 +1116,7 @@ json ffn_sweep(int sm_count)
 
     FfnProgram program{weights.data(), chunks.data(), r.data(), ffn_norm.data(), attn_norm.data(),
         product.data(), y.data(), partials.data(),
-        {d, f, 32, 8, 64, 0, 4096, 2, 2048, 384, sm_count,
+        {d, f, 32, 8, 64, 4096, 2, 2048, 384, sm_count,
             {1e-5f, 500000.0f, 32.0f, 1.0f, 4.0f, 8192.0f}, nullptr},
         layers, 4};
     const auto config = cuda::make_config(

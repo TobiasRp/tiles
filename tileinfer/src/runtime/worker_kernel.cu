@@ -9,6 +9,7 @@
 #include <cuda/stream>
 
 #include <algorithm>
+#include <stdexcept>
 
 namespace tileinfer {
 using detail::check;
@@ -30,9 +31,13 @@ struct Launch
     LayerLayout layout;
     ops::Shape shape;
     StackConfig stack;
+    int position;                 // the first step's position
+    int steps;                    // consecutive positions from `position`
     TokenId token_id;             // used when device_tokens is null
-    const TokenId* device_tokens; // the token is device_tokens[token_index] when set
-    int token_index;
+    const TokenId* device_tokens; // step s decodes device_tokens[s] when set
+    detail::Selection selection;  // generation when selection.generated is set
+    Candidate* candidates;        // one per logits task, read by greedy selection
+    int selection_slots;
     Scalar* input;  // hidden state of even layers
     Scalar* output; // hidden state of odd layers
     Scalar* scratch;
@@ -50,7 +55,7 @@ struct Launch
     // array made activation reads generic loads.
     __device__ Scalar* hidden(int index) const { return index % 2 == 0 ? input : output; }
 
-    __device__ ops::Layer<Scalar> layer(int index) const
+    __device__ ops::Layer<Scalar> layer(int index, int position) const
     {
         const Scalar* w = weights + stack.layer_weights_offset + index * stack.layer_weight_stride;
         Scalar* cache = kv + index * stack.layer_kv_stride;
@@ -63,30 +68,30 @@ struct Launch
             partials, stats, ffn_partials, w + layout.attn_norm, w + layout.Wq, w + layout.Wk,
             w + layout.Wv, w + layout.Wo, w + layout.ffn_norm, w + layout.Wgate, w + layout.Wup,
             w + layout.Wdown, ffn_trace,
-            block_trace == nullptr ? nullptr : block_trace + index * shape.hidden_size};
+            block_trace == nullptr ? nullptr : block_trace + index * shape.hidden_size, position};
     }
 };
 
-// Executes this block's validated instruction stream for one token. Barrier
-// instructions appear at the same stream positions in every worker.
+// The current step of a launch and its token, kept in shared memory and
+// read through a volatile reference whenever a task needs them. Passed to
+// the stream as values instead, they made the token about 80 us slower.
+struct StepState
+{
+    int step;
+    TokenId token;
+};
+
+// Executes one step of this block's instruction stream.
 template <typename Scalar>
-__global__ __launch_bounds__(kThreads, 1) void decoder_worker(Launch<Scalar> launch)
+__device__ __forceinline__ void run_stream(const Launch<Scalar>& launch,
+    const volatile StepState& state, WorkerTaskRange stream, ops::SharedStorage& shared)
 {
     namespace cg = cooperative_groups;
-    __shared__ ops::SharedStorage shared;
     const auto& shape = launch.shape;
     const auto& stack = launch.stack;
-
-    const TokenId token = launch.device_tokens == nullptr
-                              ? launch.token_id
-                              : launch.device_tokens[launch.token_index];
-    // Every block takes the same EOS skip decision, so no barrier is left waiting.
-    if (stack.full_stack && token < 0)
-        return;
-
-    const WorkerTaskRange stream = launch.streams[blockIdx.x];
     for (cuda::std::uint32_t index = stream.begin; index < stream.begin + stream.count; ++index) {
         const TaskRecord task = launch.instructions[index];
+        const int position = launch.position + state.step;
         // Store start times at once: values kept live across a task would
         // compete for the worker's 64 registers per thread and cause spills.
         if (launch.timeline != nullptr && threadIdx.x == 0) {
@@ -98,31 +103,31 @@ __global__ __launch_bounds__(kThreads, 1) void decoder_worker(Launch<Scalar> lau
         const int end = static_cast<int>(task.end);
         switch (task.opcode) {
         case Opcode::barrier:
-            if (shape.position + 1 > begin)
+            if (position + 1 > begin)
                 cg::this_grid().sync();
             break;
         case Opcode::qkv:
-            ops::qkv(begin, end, launch.layer(task.layer), shape, shared);
+            ops::qkv(begin, end, launch.layer(task.layer, position), shape, shared);
             break;
         case Opcode::attention_scores:
             ops::attention_scores(
-                task.kv_head, task.chunk, launch.layer(task.layer), shape, shared);
+                task.kv_head, task.chunk, launch.layer(task.layer, position), shape, shared);
             break;
         case Opcode::attention_values:
             ops::attention_values(
-                task.kv_head, task.chunk, launch.layer(task.layer), shape, shared);
+                task.kv_head, task.chunk, launch.layer(task.layer, position), shape, shared);
             break;
         case Opcode::output_projection:
-            ops::output_projection(begin, end, launch.layer(task.layer), shape, shared);
+            ops::output_projection(begin, end, launch.layer(task.layer, position), shape, shared);
             break;
         case Opcode::ffn:
-            ops::ffn(begin, end, task.chunk, launch.layer(task.layer), shape, shared);
+            ops::ffn(begin, end, task.chunk, launch.layer(task.layer, position), shape, shared);
             break;
         case Opcode::ffn_reduce:
-            ops::ffn_reduce(begin, end, launch.layer(task.layer), shape);
+            ops::ffn_reduce(begin, end, launch.layer(task.layer, position), shape);
             break;
         case Opcode::embedding:
-            ops::embedding_lookup(token, begin, end, shape.hidden_size,
+            ops::embedding_lookup(state.token, begin, end, shape.hidden_size,
                 launch.weights + stack.embedding_offset, launch.hidden(0));
             break;
         case Opcode::final_rms_norm:
@@ -132,7 +137,8 @@ __global__ __launch_bounds__(kThreads, 1) void decoder_worker(Launch<Scalar> lau
             break;
         case Opcode::logits:
             ops::logits(launch.hidden(stack.layers + 1), launch.weights + stack.lm_head_offset,
-                launch.logits, begin, end, shape.hidden_size, shared);
+                launch.logits, launch.candidates + task.chunk, begin, end, shape.hidden_size,
+                shared);
             break;
         }
         if (task.opcode != Opcode::barrier)
@@ -142,20 +148,87 @@ __global__ __launch_bounds__(kThreads, 1) void decoder_worker(Launch<Scalar> lau
     }
 }
 
+// Thread 0 of the first worker records a generation step's choice, or the
+// error that stops the request.
+template <typename Scalar>
+__device__ void record_choice(const Launch<Scalar>& launch, int step, TokenId token)
+{
+    const auto& selection = launch.selection;
+    int* status = selection.status;
+    if (token == kNonFinite) {
+        status[detail::kStatusError] = detail::non_finite_logits;
+    } else if (token < 0 || token >= launch.stack.vocab_size) {
+        status[detail::kStatusError] = detail::token_out_of_range;
+    } else {
+        selection.generated[selection.first + step] = token;
+        status[detail::kStatusCount] = selection.first + step + 1;
+        if (token == selection.eos_id)
+            status[detail::kStatusEos] = 1;
+    }
+}
+
+// Executes this block's validated instruction stream once per step, for
+// consecutive positions. Barrier instructions appear at the same stream
+// positions in every worker, and a grid barrier separates the steps. Every
+// worker derives each step's token, and so its decision to stop, from the
+// same values, so no barrier is left waiting.
+template <typename Scalar>
+__global__ __launch_bounds__(kThreads, 1) void decoder_worker(Launch<Scalar> launch)
+{
+    namespace cg = cooperative_groups;
+    __shared__ ops::SharedStorage shared;
+    __shared__ StepState step_state;
+    volatile StepState& state = step_state;
+    const auto& stack = launch.stack;
+    const bool generating = launch.selection.generated != nullptr;
+    // A request stopped by an earlier launch skips its remaining launches.
+    if (generating && (launch.selection.status[detail::kStatusEos] != 0 ||
+                          launch.selection.status[detail::kStatusError] != 0))
+        return;
+
+    const WorkerTaskRange stream = launch.streams[blockIdx.x];
+    for (int step = 0; step < launch.steps; ++step) {
+        if (step > 0)
+            cg::this_grid().sync();
+        TokenId token = launch.token_id;
+        if (generating) {
+            token = ops::greedy_choice(launch.candidates, launch.selection_slots, shared).id;
+            if (blockIdx.x == 0 && threadIdx.x == 0)
+                record_choice(launch, step, token);
+        } else if (launch.device_tokens != nullptr) {
+            token = launch.device_tokens[step];
+        }
+        // Host-supplied IDs are validated; this also stops a failed selection.
+        if (stack.full_stack && (token < 0 || token >= stack.vocab_size))
+            return;
+        // The step's state goes to shared memory; the loop reloads it below.
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            state.step = step;
+            state.token = token;
+        }
+        __syncthreads();
+        run_stream(launch, state, stream, shared);
+        step = state.step;
+        if (generating && state.token == launch.selection.eos_id)
+            return;
+    }
+}
 } // namespace
 
 namespace detail {
 
 template <typename Scalar>
 void enqueue_worker_typed(cuda::stream& stream, const WorkerProgramView& program,
-    const WorkerBuffers& buffers, int position, TokenInput token)
+    const WorkerBuffers& buffers, int position, TokenInput token, Selection selection)
 {
     const Launch<Scalar> launch{program.instructions, program.streams, program.layout,
         {program.hidden_size, program.intermediate_size, program.query_heads, program.kv_heads,
-            program.head_dim, position, program.max_context, program.attention_chunks,
+            program.head_dim, program.max_context, program.attention_chunks,
             program.attention_chunk_steps, program.attention_fused_steps, program.ffn_chunks,
             program.numeric, program.rotary_frequencies},
-        program.stack, token.immediate, token.ids, token.index, static_cast<Scalar*>(buffers.input),
+        program.stack, position, token.steps, token.immediate, token.ids, selection,
+        buffers.selection, program.selection_slots, static_cast<Scalar*>(buffers.input),
         static_cast<Scalar*>(buffers.output), static_cast<Scalar*>(buffers.scratch),
         static_cast<Scalar*>(buffers.kv), static_cast<const Scalar*>(program.weights),
         static_cast<Scalar*>(buffers.attention_scores), buffers.attention_partials, buffers.logits,
@@ -166,12 +239,14 @@ void enqueue_worker_typed(cuda::stream& stream, const WorkerProgramView& program
 }
 
 void enqueue_worker(cuda::stream& stream, const WorkerProgramView& program,
-    const WorkerBuffers& buffers, int position, TokenInput token)
+    const WorkerBuffers& buffers, int position, TokenInput token, Selection selection)
 {
+    if (token.steps < 1 || token.steps > kMaxLaunchSteps)
+        throw std::runtime_error("invalid worker launch step count");
     if (program.weight_dtype == WeightDtype::bfloat16)
-        enqueue_worker_typed<__nv_bfloat16>(stream, program, buffers, position, token);
+        enqueue_worker_typed<__nv_bfloat16>(stream, program, buffers, position, token, selection);
     else
-        enqueue_worker_typed<float>(stream, program, buffers, position, token);
+        enqueue_worker_typed<float>(stream, program, buffers, position, token, selection);
 }
 
 } // namespace detail

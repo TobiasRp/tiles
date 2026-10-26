@@ -13,9 +13,9 @@ namespace tileinfer {
 using TokenId = std::int32_t;
 
 inline constexpr int kThreads = 1024;
-inline constexpr const char* kAbi = "tileinfer-decoder-v9";
+inline constexpr const char* kAbi = "tileinfer-decoder-v10";
 inline constexpr const char* kFingerprint =
-    "decoder-fused-abi9-bf16-eager-simt-wide-attention-v2-split-ffn-sm86-b1024";
+    "decoder-fused-abi10-bf16-eager-simt-wide-attention-v2-split-ffn-select-sm86-b1024";
 
 // Shared-memory limits of the compiled worker; the loader rejects larger models.
 inline constexpr int kMaxHidden = 4096; // a task's input vector lives in shared memory
@@ -43,7 +43,7 @@ enum class Opcode : std::uint32_t
     ffn_reduce = 6,        // y rows: sum the FFN chunks' down partials, add the residual
     embedding = 7,         // copies [begin,end) of the token's embedding row into hidden state
     final_rms_norm = 8,    // normalizes [begin,end) of the last layer's output
-    logits = 9,            // projects vocabulary rows [begin,end)
+    logits = 9,            // projects vocabulary rows [begin,end), then their greedy candidate
 };
 
 // Package opcode names, without the _f32/_bf16 precision suffix.
@@ -116,7 +116,7 @@ struct TaskRecord
     std::uint32_t begin;
     std::uint32_t end;
     std::uint32_t kv_head; // attention tasks
-    std::uint32_t chunk;   // attention tasks: context chunk; ffn tasks: product chunk
+    std::uint32_t chunk;   // attention: context chunk; ffn: product chunk; logits: candidate slot
 };
 
 // Resolves one tensor ID to a storage buffer and element offset.
@@ -173,6 +173,15 @@ struct StackConfig
     int layer_kv_stride;
     bool full_stack;
 };
+
+// One logits task's greedy candidate: its largest logit and the lowest ID
+// holding it, or kNonFinite when any of its logits is NaN or infinite.
+struct Candidate
+{
+    float value;
+    TokenId id;
+};
+inline constexpr TokenId kNonFinite = -1;
 
 // Gives one logical worker its contiguous instruction stream for a whole token.
 struct WorkerTaskRange
@@ -234,6 +243,7 @@ struct LoadedPlan
     std::uint64_t attention_bytes;         // scores workspace, [query_heads, max_context]
     std::uint64_t attention_partial_bytes; // FP32 statistics and partial P*V per head and chunk
     std::uint64_t ffn_partial_bytes;       // FP32 down partials, [ffn_chunks, hidden_size]
+    int selection_slots; // stacks: one greedy candidate per logits task; 0 for a block
     std::vector<std::uint8_t> weights;
     // Worker streams, concatenated; one barrier separates consecutive waves in every stream.
     std::vector<TaskRecord> instructions;

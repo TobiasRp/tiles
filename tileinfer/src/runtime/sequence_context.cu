@@ -51,6 +51,7 @@ struct SequenceContext::Impl
     detail::ActivationBuffer attention_scores;
     cuda::device_buffer<float> attention_partials;
     cuda::device_buffer<float> logits;
+    cuda::device_buffer<Candidate> candidates; // the last token's greedy candidates
     std::optional<cuda::device_buffer<float>> block_trace;
     cuda::device_buffer<TokenId> tokens;
     cuda::device_buffer<TokenId> generated;
@@ -73,9 +74,10 @@ struct SequenceContext::Impl
         , attention_scores(stream, pool, model->attention_count, model->weight_dtype)
         , attention_partials(stream, pool, model->partial_count, cuda::no_init)
         , logits(stream, pool, model->stack.vocab_size, cuda::no_init)
+        , candidates(stream, pool, model->selection_slots, cuda::no_init)
         , tokens(stream, pool, model->max_context, cuda::no_init)
         , generated(stream, pool, model->max_context, cuda::no_init)
-        , status(stream, pool, 2, cuda::no_init)
+        , status(stream, pool, detail::kStatusWords, cuda::no_init)
         , input_ring(stream, cuda::pinned_default_memory_pool(),
               input_ring_size(model->max_context), cuda::no_init)
         , ring_cursor(input_ring.size())
@@ -94,9 +96,9 @@ struct SequenceContext::Impl
         resolve_pending();
     }
 
-    // Only the device knows where an EOS generation stopped. A later request
-    // waits for it here, so a caller that dropped or never waited on its
-    // ticket can still continue the sequence.
+    // Only the device knows where a generation stopped: at EOS, or earlier
+    // at a device error. A later request waits for it here, so a caller that
+    // dropped or never waited on its ticket can still continue the sequence.
     void resolve_pending()
     {
         if (!pending_position)
@@ -104,18 +106,33 @@ struct SequenceContext::Impl
         const auto ticket = pending_position;
         try {
             check(cudaEventSynchronize(ticket->event), "wait for pending generation");
+            queued_position = generation_end(*ticket->generation);
         } catch (...) {
             valid = false;
             throw;
         }
-        const auto& generation = *ticket->generation;
-        const int count = generation.status.data()[0];
-        if (count < 0 || count > generation.requested) {
-            valid = false;
-            throw std::runtime_error("invalid generated token count");
-        }
-        queued_position = generation.start_position + count;
         pending_position.reset();
+    }
+
+    // The position after a completed generation. Throws for a device error
+    // that stopped it.
+    static int generation_end(const Ticket::State::Generation& generation)
+    {
+        const int* status = generation.status.data();
+        switch (status[detail::kStatusError]) {
+        case detail::no_error:
+            break;
+        case detail::non_finite_logits:
+            throw std::runtime_error("generation stopped: non-finite logits");
+        case detail::token_out_of_range:
+            throw std::runtime_error("generation stopped: selected token outside vocabulary");
+        default:
+            throw std::runtime_error("generation stopped: unknown device error");
+        }
+        const int count = status[detail::kStatusCount];
+        if (count < 0 || count > generation.requested)
+            throw std::runtime_error("invalid generated token count");
+        return generation.start_position + count;
     }
 
     void validate_token(TokenId token_id) const
@@ -130,16 +147,24 @@ struct SequenceContext::Impl
             throw std::runtime_error("sequence context capacity reached");
     }
 
-    void launch(int position, const TokenId* token_ids, int token_index, bool trace)
+    // Decodes `steps` positions from `position` in launches of at most
+    // kMaxLaunchSteps. Step s decodes token_ids[s], or generates when
+    // selection is set; a trace keeps the last step's block outputs.
+    void launch(int position, const TokenId* token_ids, int steps, bool trace,
+        detail::Selection selection = {})
     {
         if (trace && !block_trace)
             block_trace.emplace(stream, pool,
                 static_cast<std::size_t>(model->stack.layers) * model->hidden_size, cuda::no_init);
         const detail::WorkerBuffers buffers{input.data(), output.data(), scratch.data(), kv.data(),
             logits.data(), trace ? block_trace->data() : nullptr, attention_scores.data(),
-            attention_partials.data()};
-        detail::enqueue_worker(
-            stream, model->view(), buffers, position, {-1, token_ids, token_index});
+            attention_partials.data(), candidates.data()};
+        for (int first = 0; first < steps; first += detail::kMaxLaunchSteps) {
+            const int count = std::min(detail::kMaxLaunchSteps, steps - first);
+            selection.first = first;
+            detail::enqueue_worker(stream, model->view(), buffers, position + first,
+                {-1, token_ids == nullptr ? nullptr : token_ids + first, count}, selection);
+        }
     }
 
     // Stream order makes the first unfinished event the ring's reclamation
@@ -267,9 +292,8 @@ Ticket SequenceContext::enqueue_prefill(
             std::memcpy(impl_->input_ring.data(), token_ids.data() + tail,
                 (token_ids.size() - tail) * sizeof(TokenId));
         impl_->copy_input(begin, token_ids.size());
-        for (size_t i = 0; i < token_ids.size(); ++i)
-            impl_->launch(start_position + static_cast<int>(i), impl_->tokens.data(),
-                static_cast<int>(i), diagnostics.block_outputs && i + 1 == token_ids.size());
+        impl_->launch(start_position, impl_->tokens.data(), static_cast<int>(token_ids.size()),
+            diagnostics.block_outputs);
         impl_->finish_ticket(ticket, diagnostics);
         impl_->queued_position = ticket->end_position;
     } catch (...) {
@@ -292,7 +316,7 @@ Ticket SequenceContext::enqueue_decode(TokenId token_id, DiagnosticRequest diagn
     try {
         impl_->input_ring.data()[begin] = token_id;
         impl_->copy_input(begin, 1);
-        impl_->launch(start_position, impl_->tokens.data(), 0, diagnostics.block_outputs);
+        impl_->launch(start_position, impl_->tokens.data(), 1, diagnostics.block_outputs);
         impl_->finish_ticket(ticket, diagnostics);
         impl_->queued_position = ticket->end_position;
     } catch (...) {
@@ -318,17 +342,18 @@ Ticket SequenceContext::enqueue_generate(GenerateOptions options, DiagnosticRequ
     try {
         auto& generation = ticket->generation.emplace(
             impl_->stream, impl_->queued_position, options.max_new_tokens);
-        check(cudaMemsetAsync(impl_->status.data(), 0, 2 * sizeof(int), impl_->stream.get()),
+        check(cudaMemsetAsync(
+                  impl_->status.data(), 0, detail::kStatusWords * sizeof(int), impl_->stream.get()),
             "reset selection state");
+        // Steps after a stop write no token; their slots are still copied back.
+        check(cudaMemsetAsync(impl_->generated.data(), 0xff,
+                  static_cast<std::size_t>(generation.requested) * sizeof(TokenId),
+                  impl_->stream.get()),
+            "reset generated tokens");
         generation.compute_start.record(impl_->stream);
-        const TokenId eos = options.eos_id.value_or(-1);
-        for (int step = 0; step < generation.requested; ++step) {
-            detail::enqueue_greedy_sampling(impl_->stream, impl_->logits.data(),
-                impl_->model->stack.vocab_size, impl_->generated.data(), impl_->status.data(), step,
-                eos);
-            impl_->launch(generation.start_position + step, impl_->generated.data(), step,
-                diagnostics.block_outputs);
-        }
+        impl_->launch(generation.start_position, nullptr, generation.requested,
+            diagnostics.block_outputs,
+            {impl_->generated.data(), impl_->status.data(), 0, options.eos_id.value_or(-1)});
         generation.compute_end.record(impl_->stream);
         cuda::copy_bytes(impl_->stream,
             cuda::std::span<const TokenId>(impl_->generated.data(), generation.requested),
@@ -336,8 +361,7 @@ Ticket SequenceContext::enqueue_generate(GenerateOptions options, DiagnosticRequ
         cuda::copy_bytes(impl_->stream, impl_->status, generation.status);
         impl_->finish_ticket(ticket, diagnostics);
         impl_->queued_position = ticket->end_position;
-        if (options.eos_id)
-            impl_->pending_position = ticket;
+        impl_->pending_position = ticket;
     } catch (...) {
         impl_->valid = false;
         detail::cleanup_noexcept([&] { impl_->stream.sync(); });
@@ -353,7 +377,8 @@ Ticket SequenceContext::enqueue_reset()
     auto ticket = impl_->new_ticket(Ticket::State::Kind::reset);
     ticket->end_position = 0;
     try {
-        check(cudaMemsetAsync(impl_->status.data(), 0, 2 * sizeof(int), impl_->stream.get()),
+        check(cudaMemsetAsync(
+                  impl_->status.data(), 0, detail::kStatusWords * sizeof(int), impl_->stream.get()),
             "reset selection state");
         impl_->finish_ticket(ticket, {});
         impl_->queued_position = 0;
@@ -397,13 +422,20 @@ Completion SequenceContext::wait(const Ticket& ticket)
         result.compute_us = cuda::std::chrono::duration<double, cuda::std::micro>(
             generation.compute_end - generation.compute_start)
                                 .count();
-        const int count = generation.status.data()[0];
-        if (count < 0 || count > generation.requested)
-            throw std::runtime_error("invalid generated token count");
+        const bool pending = impl_->pending_position == ticket.state_;
+        try {
+            result.position = Impl::generation_end(generation);
+        } catch (...) {
+            // A stopped sequence needs a reset, unless one already discarded it.
+            if (pending)
+                impl_->valid = false;
+            throw;
+        }
+        const int count = result.position - generation.start_position;
         result.generated.assign(generation.output.data(), generation.output.data() + count);
-        result.position = generation.start_position + count;
-        result.stop_reason = generation.status.data()[1] ? StopReason::eos : StopReason::limit;
-        if (impl_->pending_position == ticket.state_) {
+        result.stop_reason =
+            generation.status.data()[detail::kStatusEos] ? StopReason::eos : StopReason::limit;
+        if (pending) {
             impl_->queued_position = result.position;
             impl_->pending_position.reset();
         }

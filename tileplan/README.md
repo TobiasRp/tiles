@@ -12,8 +12,9 @@ projection; one FFN task per product chunk, which computes its gate/up rows
 (with SiLU·up) and that chunk's FP32 down partial; and the FFN reduction,
 which sums the partials in chunk order into rows of the layer output. Every
 projection splits its rows into one range per worker, and `Wdown` is stored
-transposed so a chunk's rows are contiguous. `visualize` draws one layer of
-that program. Version-9 packages
+transposed so a chunk's rows are contiguous. Each logits task also owns
+one slot of the greedy-selection workspace. `visualize` draws one layer of
+that program. Version-10 packages
 use the same storage dtype for weights, activations, and K/V, with float32
 accumulation and selected float32 internal math. Python validates graph
 dependencies and planning metadata; [TileInfer](../tileinfer/README.md) checks

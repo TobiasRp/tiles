@@ -42,6 +42,8 @@ struct SharedStorage
     alignas(16) unsigned char vector[kAttentionSharedBytes];
     // An attention task's rotated query heads, then its rotated current K row.
     alignas(16) unsigned char rotated[(kMaxGroup + 1) * kMaxHeadDim * sizeof(float)];
+    Candidate warp_candidates[kWarpsPerBlock]; // a logits task's per-warp candidates
+    Candidate choice;                          // the token greedy selection chose
 };
 static_assert(kAttentionSharedBytes >= kMaxHidden * sizeof(float));
 static_assert(kAttentionSharedBytes >= kWarpsPerBlock * kMaxHeadDim * sizeof(float));
@@ -52,7 +54,9 @@ __device__ inline Scalar* shared_vector(SharedStorage& shared)
     return reinterpret_cast<Scalar*>(shared.vector);
 }
 
-/// Model dimensions, the current position and FP32 constants for one launch.
+/// Model dimensions and FP32 constants, the same for every step of a launch.
+/// The position of the current step travels in Layer: a Shape copied per step
+/// lived in local memory, and every task read its fields from there.
 struct Shape
 {
     int hidden_size;
@@ -60,7 +64,6 @@ struct Shape
     int query_heads;
     int kv_heads;
     int head_dim;
-    int position;
     int max_context;
     int attention_chunks;      // chunk tasks per K/V head in the program
     int attention_chunk_steps; // most time steps one chunk task covers
@@ -70,7 +73,7 @@ struct Shape
     const float* rotary_frequencies;
 };
 
-/// One layer's buffers, already offset to that layer.
+/// One layer's buffers, already offset to that layer, and the current position.
 template <typename Scalar>
 struct Layer
 {
@@ -99,6 +102,7 @@ struct Layer
     const Scalar* Wdown; // stored transposed, [intermediate_size, hidden_size]
     float* ffn_trace;    // optional: Wdown projection before the residual
     float* block_trace;  // optional: this layer's output
+    int position;        // the current token's position
 };
 
 /// Rotate one split-half pair; BF16 coefficients and products round before the sum.
@@ -106,9 +110,9 @@ struct Layer
 /// @param pair Pair index in [0, shape.head_dim / 2), owned by this thread.
 template <typename Scalar>
 __device__ inline void rotate_pair(
-    const Scalar* source, Scalar* destination, int pair, const Shape& shape)
+    const Scalar* source, Scalar* destination, int pair, int position, const Shape& shape)
 {
-    const float angle = shape.position * shape.rotary_frequencies[pair];
+    const float angle = position * shape.rotary_frequencies[pair];
     const float sine = static_cast<float>(static_cast<Scalar>(cuda::std::sin(angle)));
     const float cosine = static_cast<float>(static_cast<Scalar>(cuda::std::cos(angle)));
     const int half = shape.head_dim / 2;
@@ -266,7 +270,7 @@ __device__ inline void qkv(
         Scalar* output = row < d ? layer.q + row
                          : row < d + kv_width
                              ? layer.k + row - d
-                             : layer.value_cache + shape.position * kv_width + row - d - kv_width;
+                             : layer.value_cache + layer.position * kv_width + row - d - kv_width;
         *output = static_cast<Scalar>(value);
     }
 }
@@ -276,9 +280,9 @@ __device__ inline void qkv(
 /// attention by itself. A longer prefix splits into the fewest chunks of at
 /// most attention_chunk_steps steps, but at least two: the S2b probe found two
 /// half-length tasks faster than one beyond about 384 steps.
-__device__ inline int active_chunks(const Shape& shape)
+__device__ inline int active_chunks(int position, const Shape& shape)
 {
-    const int length = shape.position + 1;
+    const int length = position + 1;
     if (length <= shape.attention_fused_steps)
         return 1;
     const int chunks = (length + shape.attention_chunk_steps - 1) / shape.attention_chunk_steps;
@@ -286,13 +290,16 @@ __device__ inline int active_chunks(const Shape& shape)
 }
 
 /// The time steps of the visible prefix that active chunk `chunk` covers; the
-/// active chunks split the prefix evenly.
-__device__ inline void chunk_range(int chunk, const Shape& shape, int& begin, int& end)
+/// active chunks split the prefix evenly. The loader bounds max_context times
+/// attention_chunks by INT_MAX, so 32-bit products suffice; 64-bit division by
+/// a run-time position compiles to a call that made the token 70 us slower.
+__device__ inline void chunk_range(
+    int chunk, int position, const Shape& shape, int& begin, int& end)
 {
-    const int length = shape.position + 1;
-    const int chunks = active_chunks(shape);
-    begin = static_cast<int>(static_cast<long long>(length) * chunk / chunks);
-    end = static_cast<int>(static_cast<long long>(length) * (chunk + 1) / chunks);
+    const int length = position + 1;
+    const int chunks = active_chunks(position, shape);
+    begin = length * chunk / chunks;
+    end = length * (chunk + 1) / chunks;
 }
 
 /// Scalar elements in one 16-byte q or K/V load.
@@ -530,11 +537,11 @@ __device__ inline Scalar* rotate_group(int kv_head, int chunk, int group,
         const int head = index / (dh / 2);
         const Scalar* source =
             head < group ? layer.q + (first_head + head) * dh : layer.k + kv_head * dh;
-        rotate_pair(source, rotated + head * dh, index - head * (dh / 2), shape);
+        rotate_pair(source, rotated + head * dh, index - head * (dh / 2), layer.position, shape);
     }
     __syncthreads();
     if (chunk == 0) {
-        Scalar* key = layer.key_cache + kv_row(shape.position, kv_head, shape);
+        Scalar* key = layer.key_cache + kv_row(layer.position, kv_head, shape);
         for (int index = threadIdx.x; index < (group + 1) * dh; index += blockDim.x)
             if (index < group * dh)
                 layer.q_rot[first_head * dh + index] = rotated[index];
@@ -554,17 +561,17 @@ template <typename Scalar, int Group, int Lanes>
 __device__ inline void attention_scores_group(
     int kv_head, int chunk, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
 {
-    const int chunks = active_chunks(shape);
+    const int chunks = active_chunks(layer.position, shape);
     if (chunk >= chunks)
         return;
     int begin = 0, end = 0;
-    chunk_range(chunk, shape, begin, end);
+    chunk_range(chunk, layer.position, shape, begin, end);
     const int group = group_size<Group>(shape);
     const int first_head = kv_head * group;
     const int warp = threadIdx.x / kWarpSize;
     const int lane = threadIdx.x % kWarpSize;
     const Scalar* rotated = rotate_group(kv_head, chunk, group, layer, shape, shared);
-    const Scalar* current = end == shape.position + 1 ? rotated + group * shape.head_dim : nullptr;
+    const Scalar* current = end == layer.position + 1 ? rotated + group * shape.head_dim : nullptr;
     if (chunks > 1) {
         Scalar* scores = layer.scores + first_head * shape.max_context + begin;
         score_rows<Scalar, Group, Lanes>(
@@ -616,11 +623,11 @@ template <typename Scalar, int Group, int Lanes>
 __device__ inline void attention_values_group(
     int kv_head, int chunk, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
 {
-    const int chunks = active_chunks(shape);
+    const int chunks = active_chunks(layer.position, shape);
     if (chunks == 1 || chunk >= chunks)
         return;
     int begin = 0, end = 0;
-    chunk_range(chunk, shape, begin, end);
+    chunk_range(chunk, layer.position, shape, begin, end);
     const int length = end - begin;
     const int group = group_size<Group>(shape);
     const int first_head = kv_head * group;
@@ -699,7 +706,7 @@ __device__ inline void output_projection(
     int begin, int end, const Layer<Scalar>& layer, const Shape& shape, SharedStorage& shared)
 {
     const int d = shape.hidden_size;
-    const int chunks = active_chunks(shape);
+    const int chunks = active_chunks(layer.position, shape);
     Scalar* input = shared_vector<Scalar>(shared);
     for (int i = threadIdx.x; i < d; i += blockDim.x) {
         float total = 0.0f;
@@ -826,17 +833,68 @@ __device__ inline void embedding_lookup(
         hidden[index] = embedding[token_id * hidden_size + index];
 }
 
-/// Vocabulary logits [begin,end), one warp per row; BF16 logits round before widening.
-template <typename Scalar>
-__device__ inline void logits(const Scalar* hidden, const Scalar* lm_head, float* output, int begin,
-    int end, int hidden_size, SharedStorage& shared)
+/// Keep the better of two candidates: the larger value, then the lower ID.
+/// A kNonFinite candidate wins over every other.
+__device__ inline void keep_better(Candidate& best, Candidate other)
 {
-    for (int row = begin + threadIdx.x / kWarpSize; row < end; row += kWarpsPerBlock) {
+    if (best.id == kNonFinite)
+        return;
+    if (other.id == kNonFinite || other.value > best.value ||
+        (other.value == best.value && other.id < best.id))
+        best = other;
+}
+
+/// Vocabulary logits [begin,end), one warp per row; BF16 logits round before
+/// widening. Thread 0 then stores the rows' greedy candidate: the largest
+/// logit with the lowest ID among equals, or kNonFinite if any is NaN or
+/// infinite. The candidate is the same for any order of rows and warps.
+template <typename Scalar>
+__device__ inline void logits(const Scalar* hidden, const Scalar* lm_head, float* output,
+    Candidate* candidate, int begin, int end, int hidden_size, SharedStorage& shared)
+{
+    const int lane = threadIdx.x % kWarpSize;
+    const int warp = threadIdx.x / kWarpSize;
+    Candidate best{
+        -cuda::std::numeric_limits<float>::infinity(), cuda::std::numeric_limits<TokenId>::max()};
+    for (int row = begin + warp; row < end; row += kWarpsPerBlock) {
         const float value = warp_dot(lm_head + static_cast<cuda::std::size_t>(row) * hidden_size,
             hidden, hidden_size, shared);
-        if (threadIdx.x % kWarpSize == 0)
-            output[row] = static_cast<float>(static_cast<Scalar>(value));
+        if (lane == 0) {
+            const float logit = static_cast<float>(static_cast<Scalar>(value));
+            output[row] = logit;
+            keep_better(best, {logit, cuda::std::isfinite(logit) ? row : kNonFinite});
+        }
     }
+    if (lane == 0)
+        shared.warp_candidates[warp] = best;
+    __syncthreads();
+    if (threadIdx.x != 0)
+        return;
+    for (int other = 1; other < kWarpsPerBlock; ++other)
+        keep_better(best, shared.warp_candidates[other]);
+    *candidate = best;
+}
+
+/// Greedy selection over the candidates of every logits task: the largest
+/// logit with the lowest ID, or kNonFinite. Every thread of the block
+/// returns the same choice; the caller synchronizes the block before shared
+/// scratch is reused.
+__device__ inline Candidate greedy_choice(
+    const Candidate* candidates, int count, SharedStorage& shared)
+{
+    if (threadIdx.x < kWarpSize) {
+        Candidate best{-cuda::std::numeric_limits<float>::infinity(),
+            cuda::std::numeric_limits<TokenId>::max()};
+        for (int slot = threadIdx.x; slot < count; slot += kWarpSize)
+            keep_better(best, candidates[slot]);
+        for (int offset = kWarpSize / 2; offset > 0; offset /= 2)
+            keep_better(best, {__shfl_down_sync(0xffffffff, best.value, offset),
+                                  __shfl_down_sync(0xffffffff, best.id, offset)});
+        if (threadIdx.x == 0)
+            shared.choice = best;
+    }
+    __syncthreads();
+    return shared.choice;
 }
 
 } // namespace tileinfer::ops

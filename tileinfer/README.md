@@ -1,15 +1,19 @@
 # TileInfer
 
-TileInfer executes TilePlan decoder packages in C++23/CUDA20. One cooperative
-worker launch executes a whole token: embedding lookup, every decoder layer,
-final normalization, and logits. The loader validates the package's flat task
-program and encodes one instruction stream per worker; grid barriers are
-explicit `barrier` instructions at the same stream positions in every worker.
-GPU greedy selection feeds back the next token. The current RTX 3050 worker
+TileInfer executes TilePlan decoder packages in C++23/CUDA20. The cooperative
+worker executes a whole token per pass over its program: embedding lookup,
+every decoder layer, final normalization, and logits. The loader validates the
+package's flat task program and encodes one instruction stream per worker;
+grid barriers are explicit `barrier` instructions at the same stream positions
+in every worker. One launch decodes up to 64 consecutive tokens with a grid
+barrier between them. During generation the logits tasks also store each
+row range's greedy candidate, and every worker combines them into the next
+token at the start of the following step; a non-finite logit stops the
+request with a device error. The current RTX 3050 worker
 uses 1024 threads per block and one logical worker per SM; worker IDs have no
 physical SM affinity.
 
-Version-9 packages use either float32 or BF16 weights, activations, and K/V.
+Version-10 packages use either float32 or BF16 weights, activations, and K/V.
 BF16 matrix operands accumulate in float32; RMSNorm statistics, softmax, RoPE
 frequency/trigonometric work, and SiLU internals retain float32 math. BF16
 rounding follows the pinned PyTorch eager operator boundaries. Public logits

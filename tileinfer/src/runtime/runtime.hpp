@@ -109,6 +109,8 @@ class SequenceContext
     Ticket enqueue_generate(GenerateOptions options, DiagnosticRequest diagnostics = {});
     Ticket enqueue_reset();
     [[nodiscard]] bool ready(const Ticket& ticket) const;
+    // Throws if the device stopped a generation with an error, such as
+    // non-finite logits; the context then requires a reset.
     Completion wait(const Ticket& ticket);
     Diagnostics collect(const Ticket& ticket);
 

@@ -40,8 +40,9 @@ enum class Stage
     embedding,
     final_norm,
     logits,
+    selection, // one greedy candidate slot per logits task
 };
-constexpr int kStageCount = 3;
+constexpr int kStageCount = 4;
 
 // Attention workspaces, indexed per (chunk, query head): element chunk * nq + head.
 enum class Workspace
@@ -62,7 +63,8 @@ struct Buffers
     static constexpr int workspace = scratch + static_cast<int>(kTensorCount);
     static constexpr int ffn = workspace + kWorkspaceCount; // FFN down partials, chunk * d + row
     static constexpr int logits = ffn + 1;
-    static constexpr int kv = logits + 1; // kv + 2 * layer + (0 for K, 1 for V)
+    static constexpr int selection = logits + 1; // greedy candidates, one per slot
+    static constexpr int kv = selection + 1;     // kv + 2 * layer + (0 for K, 1 for V)
 };
 
 // One contiguous element range and the logical value it reads or writes.
@@ -129,6 +131,7 @@ struct Program
     const PlanShape& s;
     int layers;
     int vocab;
+    int slots; // greedy candidate slots
     bool full_stack;
     bool bf16;
 
@@ -146,6 +149,8 @@ struct Program
 
     [[nodiscard]] int stage_width(Stage stage) const
     {
+        if (stage == Stage::selection)
+            return slots;
         return stage == Stage::logits ? vocab : s.d;
     }
 
@@ -251,11 +256,19 @@ CheckedTask Program::check(const json& task, int workers, int waves) const
         stage_output(Stage::final_norm, "final_norm", begin, end);
         result.work = s.d + end - begin;
     } else if (code == "logits") {
+        // Vocabulary rows, then their greedy candidate. The worker combines
+        // every slot before the next token's embedding, after a grid barrier.
         result.record.opcode = Opcode::logits;
         const auto [begin, end] = rows(vocab);
+        const int slot = index(op.at("chunk"), slots);
+        expected["chunk"] = slot;
+        result.record.chunk = slot;
         result.reads.push_back({Buffers::hidden + (layers + 1) % 2, 0, s.d, layers + 1});
         result.writes.push_back({Buffers::logits, begin, end, 1});
+        result.writes.push_back({Buffers::selection, slot, slot + 1, 1});
         stage_output(Stage::logits, "logits", begin, end);
+        result.owned.push_back({stage_key(Stage::selection), slot, slot + 1});
+        outputs.push_back({{"workspace", "selection"}, {"chunk", slot}});
         result.work = static_cast<std::int64_t>(end - begin) * s.d;
     } else if (code == "qkv") {
         // Rows of the concatenated [Q; K; V] projection: Q and K unrotated
@@ -397,7 +410,7 @@ void check_ownership(const Program& program, const std::vector<CheckedTask>& tas
                 lanes);
         covered(layer * kLayerKeys + kFfnKey, program.s.ffn * program.s.d);
     }
-    for (Stage stage : {Stage::embedding, Stage::final_norm, Stage::logits}) {
+    for (Stage stage : {Stage::embedding, Stage::final_norm, Stage::logits, Stage::selection}) {
         if (program.full_stack)
             covered(program.stage_key(stage), program.stage_width(stage));
         else
@@ -426,6 +439,7 @@ class Dataflow
             cells_[Buffers::workspace + kind].assign(s.chunks * s.nq, {});
         cells_[Buffers::ffn].assign(static_cast<std::size_t>(s.ffn) * s.d, {});
         cells_[Buffers::logits].assign(program.vocab, {});
+        cells_[Buffers::selection].assign(program.slots, {});
         for (int layer = 0; layer < program.layers; ++layer)
             for (int value = 0; value < 2; ++value)
                 cells_[Buffers::kv + 2 * layer + value].assign(s.nkv * s.dh, {});
@@ -481,8 +495,8 @@ class Dataflow
 
 void validate_program(const json& document, const PlanShape& s, int workers, LoadedPlan& result)
 {
-    const Program program{s, result.stack.layers, result.stack.vocab_size, result.stack.full_stack,
-        result.weight_dtype == WeightDtype::bfloat16};
+    const Program program{s, result.stack.layers, result.stack.vocab_size, result.selection_slots,
+        result.stack.full_stack, result.weight_dtype == WeightDtype::bfloat16};
     const auto& input = document.at("tasks");
     const auto& waves = document.at("waves");
     require(input.is_array() && !input.empty() &&
@@ -500,6 +514,10 @@ void validate_program(const json& document, const PlanShape& s, int workers, Loa
         require(!seen[id], "duplicate task ID");
         seen[id] = true;
         tasks[id] = program.check(task, workers, result.wave_count);
+        // A multi-token launch combines the candidates before the first wave,
+        // so a barrier must separate their writes from that read.
+        require(tasks[id].record.opcode != Opcode::logits || tasks[id].wave > 0,
+            "logits task in the first wave");
     }
     check_ownership(program, tasks);
 

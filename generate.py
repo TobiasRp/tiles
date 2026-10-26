@@ -19,7 +19,7 @@ EXECUTOR = INFER / "build" / "release" / "tile_runtime"
 VENV = PLAN / ".venv"
 # Package format accepted by the runtime built from this checkout; keep it
 # equal to tileplan.plan_core.FORMAT.
-FORMAT = 9
+FORMAT = 10
 
 
 def run(command, *, cwd):

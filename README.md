@@ -5,8 +5,9 @@ built on an 8 GB RTX 3050.
 
 The idea is to execute a decoder as a program of small tensor tiles. Python
 builds the task graph and schedule offline; a cooperative C++/CUDA worker
-executes that schedule in one decoder launch per token. Weights and K/V state
-stay on the GPU, which also selects and feeds back the next token.
+executes that schedule once per token and loops over tokens inside the
+kernel, up to 64 per launch. Weights and K/V state stay on the GPU, and the
+worker itself selects and feeds back the next token.
 
 ```mermaid
 flowchart LR

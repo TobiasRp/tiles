@@ -4,6 +4,9 @@ Status: implemented and GPU-validated on `tux` on 2026-10-13. The validation
 section below records the original version-3 implementation. Version 4 replaces
 its BF16-weight/float32-activation arithmetic; see the
 [BF16 implementation results](bf16_compute_results.md) for current precision and checks.
+Since S5 (version 10, 2026-10-26), greedy selection runs inside the decoder
+worker, and one launch decodes up to 64 consecutive tokens; see
+[Device-side selection and multi-token launches](#device-side-selection-and-multi-token-launches).
 
 ## Why change the current path
 
@@ -15,8 +18,8 @@ The existing package contract remains useful: one validated block schedule is re
 
 ## Target behavior
 
-1. A caller supplies prompt token IDs once. Prefill processes them in order on one stream, with no per-token host synchronization. For the first version, prefill uses the existing one-token decoder worker once per prompt token. The final prompt token leaves next-token logits on the GPU.
-2. A GPU selection kernel reads those logits, writes one chosen token ID to device memory, and records it in a device output buffer. The existing decoder worker reads that device token ID, appends its K/V at the next position, and produces the following logits. Repeat for the requested number of new tokens. The host may enqueue the whole fixed maximum sequence before waiting.
+1. A caller supplies prompt token IDs once. Prefill processes them in order on one stream, with no per-token host synchronization. Prefill runs the one-token decoder program once per prompt token (since S5, up to 64 tokens per launch). The final prompt token leaves next-token logits on the GPU.
+2. Greedy selection reads those logits on the GPU, records the chosen token ID in a device output buffer, and the decoder appends its K/V at the next position and produces the following logits. Repeat for the requested number of new tokens. The host may enqueue the whole fixed maximum sequence before waiting. (The first implementation used a separate selection kernel per token; S5 moved selection into the worker.)
 3. Generation reads back only the selected IDs, count, stop reason, and optional summary values. Full logits, K/V, and block outputs are explicit diagnostic requests.
 4. A request has a single completion point. No normal generation step calls `stream.sync()` or copies vocabulary logits to the CPU.
 
@@ -73,7 +76,7 @@ These names specify behavior, not a required final spelling. `DecoderModel` owns
 
 `TokenId` is the type for prompt IDs, EOS IDs, selected IDs, generated-ID buffers, and the worker's token input; cache positions and counts are separate types. JSON input must reject IDs outside the signed 32-bit range and then validate them against the model vocabulary.
 
-`enqueue_prefill` must copy its host input into context-owned pinned staging before returning, then enqueue a single asynchronous host-to-device transfer and one decoder-worker launch per prompt token. Each launch reads its own offset in the device token array and uses the next position. The caller's span need not outlive the call. `enqueue_decode` similarly stages its scalar without synchronizing. The worker must accept a device token pointer (or an offset into a device token array) instead of the current by-value host `token_id` argument. CUDA stream order connects copies, selection kernels, worker launches, and optional readbacks. The caller may enqueue generation immediately after prefill on the same context; the stream preserves the dependency without a host wait. This first prefill path repeats a growing attention-prefix scan and has one launch per token; a chunked prefill kernel is a later performance change behind the same interface.
+`enqueue_prefill` must copy its host input into context-owned pinned staging before returning, then enqueue a single asynchronous host-to-device transfer and the decoder-worker launches for the prompt (one per token before S5, up to 64 tokens per launch since). Each step reads its own offset in the device token array and uses the next position. The caller's span need not outlive the call. `enqueue_decode` similarly stages its scalar without synchronizing. The worker must accept a device token pointer (or an offset into a device token array) instead of the current by-value host `token_id` argument. CUDA stream order connects copies, selection kernels, worker launches, and optional readbacks. The caller may enqueue generation immediately after prefill on the same context; the stream preserves the dependency without a host wait. This first prefill path repeats a growing attention-prefix scan and has one launch per token; a chunked prefill kernel is a later performance change behind the same interface.
 
 ### Ticket and completion contract
 
@@ -89,9 +92,17 @@ Remove blocking `run_token` and `run_hidden` from the public hot-path interface 
 
 For a prompt of length `P`, prefill consumes positions `0..P-1` and leaves logits predicting token `P`. Each generation step selects a token from the current logits, records it, and runs the worker at the next cache position to produce the next logits. Thus `N` requested new tokens entail `N` selection operations and `N` decoder calls after prefill. The final selected token is also in the cache, making a completed context ready for another generation request. Require `P > 0` (the caller supplies a BOS token if needed) and `P + N <= max_context`.
 
-The GPU maintains an enabled flag and generated count. If EOS is selected, that token is recorded and decoded once; later queued steps skip cache writes and arithmetic. All blocks of a cooperative launch take the same skip decision so barriers remain legal. The completed result reports the actual generated count, stop reason (`eos` or `limit`), and actual valid context length. Because EOS makes the final position unknown to the host until completion, the next request on that context (prefill, decode, or generate) first waits for that generation and continues at the position it stopped at, whether or not its ticket was kept; a reset discards the pending position without waiting. For fixed-length benchmarking, disable EOS so every requested step executes.
+The GPU maintains an EOS flag and generated count. If EOS is selected, that token is recorded and decoded once; later steps skip cache writes and arithmetic. All blocks of a cooperative launch take the same skip decision so barriers remain legal. The completed result reports the actual generated count, stop reason (`eos` or `limit`), and actual valid context length. Because EOS makes the final position unknown to the host until completion, the next request on that context (prefill, decode, or generate) first waits for that generation and continues at the position it stopped at, whether or not its ticket was kept; a reset discards the pending position without waiting. For fixed-length benchmarking, disable EOS so every requested step executes.
 
-The first implementation may enqueue one selection kernel and one cooperative worker launch per token. Both operate on resident buffers in the same stream, and the host queues the sequence without waiting between steps. A captured graph or a persistent multi-token device loop can be evaluated later against measured launch overhead; neither is needed to establish asynchronous autoregressive behavior.
+The first implementation enqueued one selection kernel and one cooperative worker launch per token. Both operated on resident buffers in the same stream, and the host queued the sequence without waiting between steps. S5 replaced that with the persistent loop below.
+
+### Device-side selection and multi-token launches
+
+Since S5 (format 10, ABI v10), each `logits` task also stores its rows' greedy candidate, the largest logit and the lowest ID that holds it, in its own slot of a small selection workspace (`storage.selection_bytes`, one 8-byte slot per logits task). One worker launch decodes up to 64 consecutive positions, with a grid barrier between them. In a generation launch every worker combines all candidates at the start of each step, so every worker derives the same token and the same decision to stop; the first worker records the token, the count, and the EOS flag. Combining the 20 candidates in every worker avoids the counter wait and the second barrier that one combining worker would need to hand the token to the others.
+
+- **Errors.** A NaN or infinite logit makes its candidate non-finite, and selection then stops the request with a device error instead of choosing an ID (formerly the separate kernel could return `INT_MAX` when every logit was NaN). The worker also checks every token against the vocabulary before the embedding lookup. `wait` throws for a device error, and the context then requires a reset.
+- **Launch length.** The RTX 3050 runs a kernel watchdog because a display is attached, so the runtime splits a longer prefill or generation into launches of at most 64 steps, about 0.85 s at 4K context. Every launch of a generation request first reads the EOS and error words, so a stop in one launch makes the later launches return at once.
+- **Positions.** The host learns where a generation stopped only at completion, either at EOS or at a device error, so every generation leaves its end position pending until a later request or `wait` resolves it.
 
 ## CLI: generation first, diagnostics explicit
 

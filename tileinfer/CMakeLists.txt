@@ -68,7 +68,7 @@ if(TILE_INFER_ENABLE_CUDA)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_EXTENSIONS OFF)
 
-    add_library(tileinfer_runtime STATIC src/runtime/worker_kernel.cu src/runtime/sampling.cu
+    add_library(tileinfer_runtime STATIC src/runtime/worker_kernel.cu
         src/runtime/uploaded_plan.cu src/runtime/ticket.cu src/runtime/sequence_context.cu
         src/runtime/snapshot.cu src/runtime/ops.cuh)
     target_include_directories(tileinfer_runtime PUBLIC src/runtime PRIVATE ${CUDAToolkit_INCLUDE_DIRS}/cccl)

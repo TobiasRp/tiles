@@ -15,9 +15,11 @@ from unittest.mock import Mock, patch
 
 class GenerateTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.main = runpy.run_path(
+        script = runpy.run_path(
             str(Path(__file__).resolve().parents[2] / "generate.py")
-        )["main"]
+        )
+        self.main = script["main"]
+        self.format = script["FORMAT"]
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -62,7 +64,7 @@ class GenerateTests(unittest.TestCase):
             [str(part) for part in call.args[0]] for call in commands.call_args_list
         ]
 
-    def package(self, dtype: str | None, version: int = 6) -> Path:
+    def package(self, dtype: str | None, version: int | None = None) -> Path:
         path = self.root / "existing"
         path.mkdir(exist_ok=True)
         model = {"max_context": 64}
@@ -71,7 +73,7 @@ class GenerateTests(unittest.TestCase):
         (path / "plan.json").write_text(
             json.dumps(
                 {
-                    "header": {"format_version": version},
+                    "header": {"format_version": version or self.format},
                     "source": {"repository": "meta-llama/Llama-3.2-1B"},
                     "model": model,
                 }

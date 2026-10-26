@@ -113,6 +113,15 @@ closed ([Section 3](#3-is-a-codearchitecture-cleanup-needed)). S5 and S6
 remain. [The S2b-to-S4 post](blog/s2b-to-s4-2026-10.md) summarizes the four
 milestones.
 
+**Progress, 2026-10-26: S5 is done** (format 10, ABI v10). Greedy selection
+runs in the worker, the logits tasks emit per-task candidates, and one
+launch decodes up to 64 tokens (the GPU's kernel watchdog rules out one
+launch per request). Non-finite logits are a device error (review finding 2).
+Outputs are bit-identical to S4. Generation is about 10 µs per token
+(0.08%) faster; fixed-context calls are within 0 to 7 µs of S4. A first
+version was 0.2 ms per token slower, from codegen that a run-time position
+caused ([Section 19](#19-s5-results)). S6 remains.
+
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
 measured, explained advantage over PyTorch CUDA Graph replay on the same
@@ -313,6 +322,9 @@ matters is the cleanup that unblocks scheduling work.
 
 - Review finding 2 (NaN/INT_MAX greedy selection). It goes away when argmax
   moves into the worker in S5. Design the device error status then.
+  *Closed in S5: a NaN or infinite logit stops generation with a device
+  error, and every token is checked against the vocabulary before the
+  embedding lookup ([Section 19](#19-s5-results)).*
 - Review finding 3 (throwing destructors). This is a small fix. Do it before
   adding spin-wait code, because a hung or failed kernel must produce a
   clean error. *Closed (checked 2026-10-26): every runtime destructor is
@@ -777,7 +789,16 @@ of pipeline ramp per boundary, that is at most about 0.15 ms per token.
 boundaries, and similar at long context. With S2c, about 12.0–12.1 ms at
 context 1, 3–4% above the 11.61 ms floor.
 
-### S5 — One launch per generation request
+### S5 — One launch per generation request — done
+
+Results are in [Section 19](#19-s5-results). Greedy selection is folded into
+the logits tasks and the token loop, and one launch decodes up to 64 tokens
+(the GPU's kernel watchdog rules out one launch for any request length).
+Two choices differ from the plan below: every worker combines the
+candidates instead of one fixed worker after a counter wait, which needs no
+counter and no second barrier to hand the token to the others, and the
+layer-0 prefetch during the `lm_head` tail is not
+built (S3 found that weights prefetched before a barrier hide nothing).
 
 - Fold greedy selection into the program as instructions. Logits tiles emit
   per-worker `(max, lowest id)` partials, and one fixed worker combines them
@@ -2180,3 +2201,144 @@ loses 13 to 16 µs at every fused context.
 4. **Proposed next:** S5 (one launch per generation request), and a probe
    of the FFN reduction wave on the decoder's own package, each with its own
    gate.
+
+## 19. S5 results
+
+Measured on `tux`, 2026-10-26, against S4 (`51876b9`) in the same session.
+Clocks unlocked. Artifacts are in `runs/s5-2026-10-26/` on tux
+(`correctness.sh`, `timing.sh`, `summarize_bench.py`, and the rejected
+variants under `experiments/`).
+
+### What changed
+
+- **Selection in the program (format 10, ABI v10).** Each `logits` task
+  also stores its rows' greedy candidate, the largest logit with the lowest
+  ID among equals, in its own slot of a selection workspace
+  (`storage.selection_bytes`, 8 bytes per logits task, 20 slots for Llama
+  3.2 1B). The validator checks that the logits tasks own every slot once
+  and that no logits task is in the first wave. The separate
+  `select_greedy` kernel (`sampling.cu`) is gone.
+- **The token loop is in the worker.** One launch decodes up to 64
+  consecutive positions with a grid barrier between them. In generation,
+  every worker combines the 20 candidates at the start of a step, so all
+  derive the same token and the same decision to stop without a counter or
+  a second barrier; worker 0 records the token, the count and the EOS flag.
+  Prefill uses the same loop with host tokens.
+- **Why 64 steps, not the whole request.** The RTX 3050 reports a kernel
+  execution timeout (a display is attached), so one launch of a 4K-token
+  request (about 50 s) would be killed. 64 steps are about 0.85 s at 4K
+  context. Every launch of a request first reads the EOS and error words,
+  so a stop in one launch makes the rest return at once.
+- **Device errors (review finding 2).** A NaN or infinite logit makes its
+  candidate non-finite, and selection then stops the request with a device
+  error instead of choosing `INT_MAX`; every token is checked against the
+  vocabulary before the embedding lookup. `wait` throws, and the context
+  requires a reset. Because only the device knows where a generation
+  stopped (EOS or error), every generation now leaves its end position
+  pending until the next request or `wait`.
+- **Not built:** the layer-0 prefetch during the `lm_head` tail. S3 found
+  that weights prefetched before a barrier hide nothing.
+
+### Codegen: three ways to lose 0.1 to 0.45 ms per token
+
+The first working version was 230 to 455 µs per token slower than S4 at
+fixed context and 217 to 245 µs per token slower in generation. Bisected
+with short A/B runs of the S6a protocol at contexts 1 and 4096 (`experiments/`):
+
+| Variant | Context 1, µs vs S4 | Context 4096, µs vs S4 |
+| --- | ---: | ---: |
+| `ops::Shape` copied per step, position advanced in the copy | +230 | +455 |
+| Shape copied per task | +100 | +119 |
+| Shape in parameter space, position in `ops::Layer` | +86 | +102 |
+| as above, step state in volatile shared memory | +73 | +86 |
+| as above, 32-bit chunk division (final) | +2 | −2 |
+| position as a plain argument, 32-bit division | +84 | +104 |
+
+- A `Shape` modified per step lived in local memory, and every task read
+  its fields from there instead of the constant bank. `Shape` is now the
+  same for every step; the position travels in the per-task `Layer` view.
+- With a run-time position, `chunk_range`'s 64-bit division compiled to a
+  call to the software division routine, and its presence cost every task
+  about 70 µs per token, although attention itself got no slower. The
+  bisection pinned it to the chunk bounds of `attention_scores`: RoPE,
+  QKV's V row, the values task and Wo with a run-time position cost
+  nothing. The loader now bounds `max_context × attention_chunks` by
+  `INT_MAX`, so 32-bit products suffice.
+- The step and its token passed to the stream as values cost another
+  80 µs; read through a volatile shared `StepState` per task, they cost
+  nothing. Padding the prologue by one to four instructions changed nothing,
+  so code alignment is ruled out.
+
+Lesson, again: the worker sits at 64 registers, and run-time values that
+were launch constants before must not reach the hot code as registers or
+divisions. Check every loop change against the decoder's own controlled
+timing before trusting its outputs.
+
+### Correctness
+
+- Both version-10 packages are **bit-identical** to S4 on the France prompt
+  (every logit, block output and K/V value), and so are 64-token, 32-token
+  (450-token prompt) and 150-token generations; the last spans three
+  launches.
+- Every calibrated checkpoint tolerance passes, with metrics identical to
+  S4's; the default package keeps its known one-step BF16 near-tie
+  (step 15), the split package matches greedy selection.
+- New tests: candidate ties and NaN/infinity in `ops_unit` (482 cases); 20
+  more loader cases (212), including slot ownership and the selection
+  workspace; a 160-context stack that prefills 70 tokens and generates 85
+  over two launches against the reference, EOS that skips the later
+  launch, and a NaN logit that stops generation (CLI and C++ API, including
+  reset and a stale failed ticket). CTest passes; all 68 Compute Sanitizer
+  checks pass, including the multi-launch generation (racecheck takes
+  4 minutes, so its limit is 600 s).
+
+### Timing
+
+Fixed-context decoder calls (one launch each in both), S6a protocol,
+10 blocks × 3 rounds, both spawn orders, µs, S5 minus S4:
+
+| Context | S4 first | S5 first |
+| ---: | ---: | ---: |
+| 1 | +3.5 | +11.2 |
+| 256 | +0.9 | +5.9 |
+| 384 | −3.1 | +6.1 |
+| 385 | +3.7 | +8.9 |
+| 1024 | −0.1 | +6.7 |
+| 2048 | +2.0 | +1.8 |
+| 2049 | −0.7 | −0.2 |
+| 4096 | −2.9 | −1.4 |
+
+S5's single-step launch costs 0 to 7 µs per call on average over both
+orders, within or near the protocol's 5 µs resolution: the candidate
+reduction in the logits tasks and the loop's bookkeeping.
+
+Generation with `tile_runtime bench`: three alternating passes per case,
+three warmups and ten rounds each, median round per pass, µs per
+generated token:
+
+| Prompt, new tokens | S4 | S5 | Saving (per pass) |
+| --- | ---: | ---: | ---: |
+| 6 tokens, 64 | 12,162.6 | 12,153.7 | 9.0 (8.7, 7.2, 11.0) |
+| 6 tokens, 256 | 12,190.0 | 12,178.9 | 11.1 (10.6, 12.5, 10.2) |
+| 450 tokens, 64 | 12,297.7 | 12,287.5 | 10.3 (9.6, 10.6, 10.6) |
+
+Generated tokens are identical in every pass. Removing the selection
+kernel and the per-token launches saves about 10 µs per token (0.08%), as
+the plan expected: a small effect that completes the single-kernel story.
+
+### Against the plan
+
+- The S5 gate was "no regression": fixed-context calls within the
+  protocol's resolution and generation not slower. Both hold after the
+  codegen fixes; the first version failed it by 0.2 ms.
+- The milestone expected a small effect, with S2's argmax kernel at 15 µs
+  per token; the measured saving, that kernel and the launch gaps together,
+  is about 10 µs.
+
+### Open
+
+- Prefill still runs the one-token program per prompt token, now up to 64
+  per launch; a matrix prefill is a separate milestone.
+- A generation followed by another request now waits on the host for the
+  generation's end position; queuing work after a generation without that
+  wait would need the position on the device.

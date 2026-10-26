@@ -59,7 +59,7 @@ class DecoderPlanningTest(unittest.TestCase):
     def test_versioned_package_and_earliest_balanced_waves(self) -> None:
         package = self.package(chunk_steps=4, fused_steps=2)
         plan, weights, _ = read_package(package)
-        self.assertEqual(plan["header"]["format_version"], 9)
+        self.assertEqual(plan["header"]["format_version"], 10)
         self.assertEqual({task["layer"] for task in plan["tasks"]}, {0})
         self.assertEqual(plan["header"]["model_kind"], "llama_decoder_block")
         self.assertEqual(plan["model"]["weight_dtype"], "float32")

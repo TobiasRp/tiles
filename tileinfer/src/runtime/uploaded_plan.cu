@@ -28,6 +28,7 @@ UploadedPlan::UploadedPlan(const LoadedPlan& plan)
     , attention_chunk_steps(plan.attention_chunk_steps)
     , attention_fused_steps(plan.attention_fused_steps)
     , ffn_chunks(plan.ffn_chunks)
+    , selection_slots(plan.selection_slots)
     , scratch_count(plan.scratch_bytes / element_bytes(plan.weight_dtype))
     , kv_count(plan.kv_bytes / element_bytes(plan.weight_dtype))
     , attention_count(plan.attention_bytes / element_bytes(plan.weight_dtype))
@@ -59,8 +60,8 @@ WorkerProgramView UploadedPlan::view() const
 {
     return {instructions.data(), streams.data(), layout, weights.data(), rotary_frequencies.data(),
         workers, hidden_size, intermediate_size, query_heads, kv_heads, head_dim, max_context,
-        attention_chunks, attention_chunk_steps, attention_fused_steps, ffn_chunks, numeric, stack,
-        weight_dtype};
+        attention_chunks, attention_chunk_steps, attention_fused_steps, ffn_chunks, selection_slots,
+        numeric, stack, weight_dtype};
 }
 
 } // namespace tileinfer::detail

@@ -74,6 +74,7 @@ struct Buffers
     StackConfig stack;
     ops::Shape shape;
     TokenId token;
+    int position;
     Bf16* input;
     Bf16* output;
     Bf16* scratch;
@@ -82,6 +83,7 @@ struct Buffers
     Bf16* attention_scores;
     float* partials;
     float* logits;
+    Candidate* candidates;
 
     __device__ Bf16* hidden(int index) const { return index % 2 == 0 ? input : output; }
 
@@ -96,7 +98,7 @@ struct Buffers
             scratch + layout.product, cache + layout.key, cache + layout.value, attention_scores,
             partials, stats, ffn_partials, w + layout.attn_norm, w + layout.Wq, w + layout.Wk,
             w + layout.Wv, w + layout.Wo, w + layout.ffn_norm, w + layout.Wgate, w + layout.Wup,
-            w + layout.Wdown, nullptr, nullptr};
+            w + layout.Wdown, nullptr, nullptr, position};
     }
 };
 
@@ -120,7 +122,7 @@ __global__ __launch_bounds__(kThreads, 1) void probe_worker(
         const int begin = static_cast<int>(task.begin);
         const int end = static_cast<int>(task.end);
         if (task.opcode == Opcode::barrier) {
-            if (shape.position + 1 > begin)
+            if (buffers.position + 1 > begin)
                 cooperative_groups::this_grid().sync();
             continue;
         }
@@ -170,7 +172,8 @@ __global__ __launch_bounds__(kThreads, 1) void probe_worker(
             break;
         case Opcode::logits:
             ops::logits(buffers.hidden(stack.layers + 1), buffers.weights + stack.lm_head_offset,
-                buffers.logits, begin, end, shape.hidden_size, shared);
+                buffers.logits, buffers.candidates + task.chunk, begin, end, shape.hidden_size,
+                shared);
             break;
         default:
             break;
@@ -392,6 +395,7 @@ json run(const std::string& package, std::vector<int> positions)
     cuda::device_buffer<float> partials(
         stream, pool, (plan.attention_partial_bytes + plan.ffn_partial_bytes) / 4, cuda::no_init);
     cuda::device_buffer<float> logits(stream, pool, plan.stack.vocab_size, cuda::no_init);
+    cuda::device_buffer<Candidate> candidates(stream, pool, plan.selection_slots, cuda::no_init);
     cuda::launch(stream, cuda::make_config(cuda::block_dims<256>(), cuda::grid_dims(1024)),
         fill_synthetic, kv.data(), kv.size());
 
@@ -402,10 +406,11 @@ json run(const std::string& package, std::vector<int> positions)
 
     Buffers buffers{view.layout, view.stack,
         {view.hidden_size, view.intermediate_size, view.query_heads, view.kv_heads, view.head_dim,
-            0, view.max_context, view.attention_chunks, view.attention_chunk_steps,
+            view.max_context, view.attention_chunks, view.attention_chunk_steps,
             view.attention_fused_steps, view.ffn_chunks, view.numeric, view.rotary_frequencies},
-        1, input.data(), output.data(), scratch.data(), kv.data(),
-        static_cast<const Bf16*>(view.weights), scores.data(), partials.data(), logits.data()};
+        1, 0, input.data(), output.data(), scratch.data(), kv.data(),
+        static_cast<const Bf16*>(view.weights), scores.data(), partials.data(), logits.data(),
+        candidates.data()};
     const auto config = cuda::make_config(
         cuda::block_dims<kThreads>(), cuda::grid_dims(view.workers), cuda::cooperative_launch{});
     auto launch = [&](DeviceSchedule& schedule, std::uint32_t jitter) {
@@ -435,7 +440,7 @@ json run(const std::string& package, std::vector<int> positions)
     for (const int position : positions) {
         if (position < 0 || position >= plan.max_context)
             throw std::runtime_error("position outside the package context");
-        buffers.shape.position = position;
+        buffers.position = position;
         // Bit identity: every mode, with and without delays, against barriers.
         launch(schedules[0], 0);
         const auto reference = read_logits();
