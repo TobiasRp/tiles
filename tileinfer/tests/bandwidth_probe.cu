@@ -6,6 +6,8 @@
 //                                  and without prefetch across grid barriers
 //   bandwidth_probe qkv            the QKV waves of 16 layers as one-head tasks or
 //                                  as one even row range per worker (S2c gate)
+//   bandwidth_probe ffn            the FFN waves of 16 layers split by a barrier or
+//                                  fused per worker with split-K down (S4 gate)
 //
 // All print JSON. Timings are CUDA-event averages over repeated work and are
 // diagnostic: they separate attainable DRAM bandwidth, per-worker bandwidth,
@@ -30,6 +32,7 @@
 #include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <stdexcept>
@@ -702,7 +705,7 @@ json ring_sweep(int sm_count)
             cuda::launch(stream, dims, kernel, program);
         };
         run();
-        std::vector<double> samples;
+        std::vector<double> samples = {};
         for (int i = 0; i < 3; ++i) {
             cuda::timed_event start{stream};
             start.record(stream);
@@ -841,7 +844,7 @@ json qkv_sweep(int sm_count)
     // Median of five timed launches after a warm-up, per layer.
     auto time = [&](QkvMode mode) {
         cuda::launch(stream, config, qkv_waves, program, mode);
-        std::vector<double> samples;
+        std::vector<double> samples = {};
         for (int i = 0; i < 5; ++i) {
             cuda::timed_event start{stream};
             start.record(stream);
@@ -885,6 +888,306 @@ json qkv_sweep(int sm_count)
     }
     return {{"roofline_gbps", kRooflineGbps}, {"runs", runs}};
 }
+// The FFN waves of `layers` decoder layers (S4 gate). Every layer reads its
+// own [Wgate; Wup; Wdown], and Wdown also exists transposed, so that a
+// worker's column chunk is contiguous. Each wave starts with the next consumer's prologue, standing in
+// for the next layer's QKV norm: in the split modes it normalizes y, in the
+// fused modes it first reduces the previous wave's down partials into y.
+struct FfnProgram
+{
+    const Bf16* weights;     // layers x [Wgate (f x d); Wup (f x d); Wdown (d x f)]
+    const Bf16* down_chunks; // layers x Wdown transposed, [f x d]
+    const Bf16* r;           // FFN input and residual
+    const Bf16* ffn_norm;
+    const Bf16* attn_norm; // the consumer's norm scale
+    Bf16* product;
+    Bf16* y;
+    float* partials; // 2 x [workers x d], alternating by wave
+    ops::Shape shape;
+    int layers;
+    int iterations;
+};
+
+enum class FfnMode : int
+{
+    barriers_split,     // only the split modes' two barriers per layer
+    barriers_fused,     // only the fused modes' one barrier per layer
+    split,              // S2c: gate/up rows, barrier, down rows, barrier
+    fused_rows,         // gate/up chunk, then its down partial from row-major Wdown
+    fused_rows_plain,   // fused_rows, but the consumer only normalizes (no reduction)
+    fused_chunks,       // gate/up chunk, then its down partial from a transposed chunk
+    fused_chunks_plain, // fused_chunks, but the consumer only normalizes (no reduction)
+    fused_chunks_slice, // fused_chunks; workers reduce their slices of y, then a barrier
+};
+
+__host__ __device__ constexpr bool fused(FfnMode mode)
+{
+    return mode != FfnMode::barriers_split && mode != FfnMode::split &&
+           mode != FfnMode::barriers_fused;
+}
+
+__host__ __device__ constexpr bool reduces(FfnMode mode)
+{
+    return mode == FfnMode::fused_rows || mode == FfnMode::fused_chunks;
+}
+
+__device__ inline int worker_begin(int rows)
+{
+    return static_cast<int>(static_cast<std::int64_t>(rows) * blockIdx.x / gridDim.x);
+}
+
+__device__ inline int worker_end(int rows)
+{
+    return static_cast<int>(static_cast<std::int64_t>(rows) * (blockIdx.x + 1) / gridDim.x);
+}
+
+// The next consumer's y: the worker partials summed in worker order, rounded,
+// plus the residual, rounded, as ops::down rounds the unsplit projection.
+// With `local` set, every worker reduces all of y into shared memory and
+// stores its own slice; without it, a worker reduces only its slice.
+__device__ inline void reduce_partials(
+    const float* partials, const Bf16* residual, Bf16* y, Bf16* local, int d)
+{
+    const int begin = worker_begin(d);
+    const int end = worker_end(d);
+    for (int i = (local == nullptr ? begin : 0) + threadIdx.x; i < (local == nullptr ? end : d);
+        i += blockDim.x) {
+        float total = 0.0f;
+#pragma unroll 4
+        for (int part = 0; part < static_cast<int>(gridDim.x); ++part)
+            total += partials[part * d + i];
+        const Bf16 projected = static_cast<Bf16>(total);
+        const Bf16 sum =
+            static_cast<Bf16>(static_cast<float>(projected) + static_cast<float>(residual[i]));
+        if (local != nullptr)
+            local[i] = sum;
+        if (i >= begin && i < end)
+            y[i] = sum;
+    }
+    __syncthreads();
+}
+
+// Worker blockIdx.x's chunk of the fused FFN: the gate/up rows of its product
+// chunk, then that chunk's down partial over all d outputs.
+template <FfnMode Mode>
+__device__ inline void fused_ffn(const ops::Layer<Bf16>& layer, const Bf16* chunks, float* partials,
+    const ops::Shape& shape, ops::SharedStorage& shared)
+{
+    const int d = shape.hidden_size;
+    const int f = shape.intermediate_size;
+    const int begin = worker_begin(f);
+    const int columns = worker_end(f) - begin;
+    ops::gate_up(begin, begin + columns, layer, shape, shared);
+    __syncthreads();
+    Bf16* product = reinterpret_cast<Bf16*>(shared.rotated);
+    for (int j = threadIdx.x; j < columns; j += blockDim.x)
+        product[j] = layer.product[begin + j];
+    __syncthreads();
+    float* output = partials + static_cast<std::size_t>(blockIdx.x) * d;
+    if constexpr (Mode == FfnMode::fused_rows || Mode == FfnMode::fused_rows_plain) {
+        for (int row = threadIdx.x / ops::kWarpSize; row < d; row += ops::kWarpsPerBlock) {
+            const float value = ops::warp_dot(
+                layer.Wdown + static_cast<std::size_t>(row) * f + begin, product, columns, shared);
+            if (threadIdx.x % ops::kWarpSize == 0)
+                output[row] = value;
+        }
+    } else {
+        // Chunk element (j, i) is Wdown[i, begin + j]; a thread owns two
+        // adjacent outputs and sums its columns in order.
+        const auto* block =
+            reinterpret_cast<const __nv_bfloat162*>(chunks + static_cast<std::size_t>(begin) * d);
+        for (int pair = threadIdx.x; pair < d / 2; pair += blockDim.x) {
+            float low = 0.0f;
+            float high = 0.0f;
+#pragma unroll 8
+            for (int j = 0; j < columns; ++j) {
+                const float2 w =
+                    __bfloat1622float2(block[static_cast<std::size_t>(j) * (d / 2) + pair]);
+                const float p = static_cast<float>(product[j]);
+                low += w.x * p;
+                high += w.y * p;
+            }
+            output[2 * pair] = low;
+            output[2 * pair + 1] = high;
+        }
+    }
+}
+
+template <FfnMode Mode>
+__global__ __launch_bounds__(kThreads, 1) void ffn_waves(__grid_constant__ const FfnProgram program)
+{
+    namespace cg = cooperative_groups;
+    __shared__ ops::SharedStorage shared;
+    const auto& shape = program.shape;
+    const int d = shape.hidden_size;
+    const int f = shape.intermediate_size;
+    const std::size_t matrix = static_cast<std::size_t>(f) * d;
+    const int waves = program.iterations * program.layers;
+    // One trailing consumer step reduces the last wave's partials.
+    for (int wave = 0; wave <= waves; ++wave) {
+        Bf16* input = ops::shared_vector<Bf16>(shared);
+        float* previous =
+            program.partials + static_cast<std::size_t>((wave + 1) % 2) * gridDim.x * d;
+        if constexpr (Mode == FfnMode::fused_chunks_slice) {
+            reduce_partials(previous, program.r, program.y, nullptr, d);
+            cg::this_grid().sync();
+            ops::normalize(
+                program.y, program.attn_norm, input, 0, d, d, shape.numeric.rms_norm_eps, shared);
+            __syncthreads();
+        } else if constexpr (reduces(Mode)) {
+            reduce_partials(previous, program.r, program.y, input, d);
+            ops::normalize(
+                input, program.attn_norm, input, 0, d, d, shape.numeric.rms_norm_eps, shared);
+            __syncthreads();
+        } else if constexpr (Mode != FfnMode::barriers_split && Mode != FfnMode::barriers_fused) {
+            ops::normalize(
+                program.y, program.attn_norm, input, 0, d, d, shape.numeric.rms_norm_eps, shared);
+            __syncthreads();
+        }
+        if (wave == waves)
+            break;
+        const Bf16* weights = program.weights + (wave % program.layers) * 3 * matrix;
+        const ops::Layer<Bf16> layer{nullptr, program.y, nullptr, nullptr, nullptr, nullptr,
+            const_cast<Bf16*>(program.r), program.product, nullptr, nullptr, nullptr, nullptr,
+            nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, program.ffn_norm, weights,
+            weights + matrix, weights + 2 * matrix, nullptr, nullptr};
+        if constexpr (Mode == FfnMode::split) {
+            ops::gate_up(worker_begin(f), worker_end(f), layer, shape, shared);
+            __syncthreads();
+            cg::this_grid().sync();
+            ops::down(worker_begin(d), worker_end(d), layer, shape, shared);
+            __syncthreads();
+        } else if constexpr (Mode == FfnMode::barriers_split) {
+            cg::this_grid().sync();
+        } else if constexpr (fused(Mode)) {
+            float* current = program.partials + static_cast<std::size_t>(wave % 2) * gridDim.x * d;
+            fused_ffn<Mode>(layer, program.down_chunks + (wave % program.layers) * matrix, current,
+                shape, shared);
+            __syncthreads();
+        }
+        cg::this_grid().sync();
+    }
+}
+
+// Stores Wdown [d x f] transposed, [f x d]. Its rows [begin_k, end_k) are
+// worker k's column chunk, so the layout does not depend on the worker count.
+__global__ void transpose_down(const Bf16* down, Bf16* transposed, int d, int f)
+{
+    const std::size_t count = static_cast<std::size_t>(d) * f;
+    for (std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+        index < count; index += static_cast<std::size_t>(gridDim.x) * blockDim.x)
+        transposed[index] = down[index % d * f + index / d];
+}
+
+// Times every FfnMode over 16 Llama 3.2 1B FFN layers in alternating rounds
+// and reports per-layer medians and the paired saving of each fused mode
+// against split. y after each launch is compared with split's.
+json ffn_sweep(int sm_count)
+{
+    cuda::device_ref device{0};
+    cuda::stream stream{device};
+    auto& pool = cuda::device_default_memory_pool(device);
+    constexpr double kRooflineGbps = 212.9;
+    constexpr int d = 2048, f = 8192, layers = 16, rounds = 7;
+    constexpr std::size_t matrix = static_cast<std::size_t>(f) * d;
+    auto filled = [&](std::size_t count, unsigned seed) {
+        cuda::device_buffer<Bf16> buffer(stream, pool, count, cuda::no_init);
+        cuda::launch(stream, cuda::make_config(cuda::block_dims<256>(), cuda::grid_dims(1024)),
+            fill_hashed, buffer.data(), count, seed);
+        return buffer;
+    };
+    const auto weights = filled(layers * 3 * matrix, 11);
+    auto chunks = filled(layers * matrix, 0);
+    for (int layer = 0; layer < layers; ++layer)
+        cuda::launch(stream, cuda::make_config(cuda::block_dims<256>(), cuda::grid_dims(1024)),
+            transpose_down, weights.data() + (3 * layer + 2) * matrix,
+            chunks.data() + layer * matrix, d, f);
+    const auto r = filled(d, 3);
+    const auto ffn_norm = filled(d, 5);
+    const auto attn_norm = filled(d, 7);
+    auto product = filled(f, 0);
+    auto y = filled(d, 9);
+    const std::size_t partial_count = 2 * static_cast<std::size_t>(sm_count) * d;
+    cuda::device_buffer<float> partials(stream, pool, partial_count, cuda::no_init);
+    check(cudaMemsetAsync(partials.data(), 0, partial_count * sizeof(float), stream.get()),
+        "zero partials");
+
+    FfnProgram program{weights.data(), chunks.data(), r.data(), ffn_norm.data(), attn_norm.data(),
+        product.data(), y.data(), partials.data(),
+        {d, f, 32, 8, 64, 0, 4096, 2, 2048, 384, {1e-5f, 500000.0f, 32.0f, 1.0f, 4.0f, 8192.0f},
+            nullptr},
+        layers, 4};
+    const auto config = cuda::make_config(
+        cuda::block_dims<kThreads>(), cuda::grid_dims(sm_count), cuda::cooperative_launch{});
+
+    struct Arm
+    {
+        const char* name;
+        void (*kernel)(FfnProgram);
+        std::vector<double> samples = {};
+        std::vector<Bf16> y = {};
+    };
+    std::vector<Arm> arms{{"barriers_split", ffn_waves<FfnMode::barriers_split>},
+        {"barriers_fused", ffn_waves<FfnMode::barriers_fused>},
+        {"split", ffn_waves<FfnMode::split>}, {"fused_rows", ffn_waves<FfnMode::fused_rows>},
+        {"fused_rows_plain", ffn_waves<FfnMode::fused_rows_plain>},
+        {"fused_chunks", ffn_waves<FfnMode::fused_chunks>},
+        {"fused_chunks_plain", ffn_waves<FfnMode::fused_chunks_plain>},
+        {"fused_chunks_slice", ffn_waves<FfnMode::fused_chunks_slice>}};
+    auto launch = [&](const Arm& arm) { cuda::launch(stream, config, arm.kernel, program); };
+    // Warm-up: every arm twice, so clocks settle before the first round.
+    for (int i = 0; i < 2; ++i)
+        for (const auto& arm : arms)
+            launch(arm);
+    stream.sync();
+    for (int round = 0; round < rounds; ++round)
+        for (std::size_t n = 0; n < arms.size(); ++n) {
+            auto& arm = arms[round % 2 == 0 ? n : arms.size() - 1 - n];
+            cuda::timed_event start{stream};
+            start.record(stream);
+            launch(arm);
+            cuda::timed_event end{stream};
+            end.record(stream);
+            end.sync();
+            arm.samples.push_back(elapsed_us(start, end) / (program.iterations * layers));
+            if (round == 0) {
+                arm.y.resize(d);
+                cuda::copy_bytes(stream, y, arm.y);
+                stream.sync();
+            }
+        }
+
+    auto median = [](std::vector<double> values) {
+        std::ranges::sort(values);
+        return values[values.size() / 2];
+    };
+    const double ideal_us = 3.0 * matrix * sizeof(Bf16) / kRooflineGbps / 1e3;
+    const Arm& split = arms[2];
+    json runs = json::array();
+    for (const auto& arm : arms) {
+        std::vector<double> saving;
+        for (int round = 0; round < rounds; ++round)
+            saving.push_back(split.samples[round] - arm.samples[round]);
+        int differing = 0;
+        int max_ulps = 0;
+        for (int i = 0; i < d; ++i) {
+            std::uint16_t a, b;
+            std::memcpy(&a, &split.y[i], 2);
+            std::memcpy(&b, &arm.y[i], 2);
+            if (a != b) {
+                ++differing;
+                // Same-sign BF16 values differ by their bit patterns in units.
+                max_ulps = std::max(max_ulps, (a ^ b) & 0x8000 ? 0xffff : std::abs(a - b));
+            }
+        }
+        const double us = median(arm.samples);
+        runs.push_back({{"mode", arm.name}, {"layer_us", us}, {"ideal_us", ideal_us},
+            {"samples", arm.samples}, {"saving_vs_split_layer_us", median(saving)},
+            {"saving_vs_split_token_ms", median(saving) * layers / 1e3},
+            {"y_elements_differing_from_split", differing}, {"y_max_ulps", max_ulps}});
+    }
+    return {{"roofline_gbps", kRooflineGbps}, {"rounds", rounds}, {"runs", runs}};
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -903,8 +1206,11 @@ int main(int argc, char** argv)
             result["ring"] = ring_sweep(props.multiProcessorCount);
         else if (mode == "qkv" && argc == 2)
             result["qkv"] = qkv_sweep(props.multiProcessorCount);
+        else if (mode == "ffn" && argc == 2)
+            result["ffn"] = ffn_sweep(props.multiProcessorCount);
         else
-            throw std::runtime_error("usage: bandwidth_probe stream BYTES | rowdot | ring | qkv");
+            throw std::runtime_error(
+                "usage: bandwidth_probe stream BYTES | rowdot | ring | qkv | ffn");
         std::cout << result.dump() << '\n';
     } catch (const std::exception& error) {
         std::cerr << "bandwidth_probe: " << error.what() << '\n';

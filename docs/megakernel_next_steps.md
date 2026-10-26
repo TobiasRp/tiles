@@ -75,6 +75,16 @@ llama.cpp at every context (11% at context 1, 9% at 4K against its fastest
 configuration). A gate comparison takes about 1 to 2 minutes
 ([Section 15](#15-s6a-results)).
 
+**Progress, 2026-10-26: S4's fused-FFN gate passed.** In
+`bandwidth_probe ffn`, a fused gate/up + split-K down per worker, reading
+`Wdown` stored transposed, saves 13.7 to 13.9 µs per layer (0.22 ms per
+token) against S2c's split FFN, counting the reduction it moves to the next
+consumer. The 0.06 ms gate is passed by a factor of 3.6. Two findings change
+the plan: a coalesced transposed `Wdown` is worth as much as the fusion
+itself, and every worker repeating the 20-partial reduction costs 4.6 µs per
+layer, so one reduction of each worker's own slice followed by a barrier
+is cheaper ([Section 16](#16-s4-probe-the-fused-ffn)).
+
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
 measured, explained advantage over PyTorch CUDA Graph replay on the same
@@ -660,7 +670,11 @@ of pipeline ramp per boundary, that is at most about 0.15 ms per token.
   That consumer is the next layer's QKV, whose norm prologue already costs
   about 4 µs per wave, and every one of its 20 workers repeats the reduction.
   The probe compares that with one reduction step on a few workers before
-  the barrier.
+  the barrier. *Probe (Section 16): passed at 0.22 ms per token, with
+  `Wdown` stored transposed (`[f × d]`, so a worker's column chunk is
+  contiguous for any worker count) and with each worker reducing only its
+  own slice of `y` before one barrier. Every worker repeating the full
+  reduction costs 4.6 µs per layer, 2.6 µs more.*
 - **Wo split-K by K/V group (second).** A Wo task for group *g* needs only
   that group's four query heads, so it can start as soon as group *g*'s
   attention is done.
@@ -1770,3 +1784,106 @@ runs are usable on this machine if the first blocks are warm.
 - The spawn-order bias (1 to 8 µs) is not explained.
 - The PCIe 2.0 ×1 link is worth checking in hardware (slot or riser).
 
+
+## 16. S4 probe: the fused FFN
+
+Measured on `tux`, 2026-10-26, at `cfdab9e` plus the probe (which does not
+change the worker). CUDA 13.4, driver 595.99. Clocks unlocked (no
+passwordless `sudo` for `nvidia-smi -lgc`); after two warm-up launches per
+mode the SM ran at 1,980 MHz and memory at 6,801 MHz with no clock-event
+reason. The first warm-up ran at 1,822 MHz. Section 15 found unlocked runs
+usable on this machine once warm. Artifacts are in
+`runs/s4-ffn-probe-2026-10-26/` on tux.
+
+### The probe
+
+`bandwidth_probe ffn` runs the FFN of 16 Llama 3.2 1B layers, each with its
+own `Wgate`, `Wup` and `Wdown`, 4 times per launch on the worker's launch
+shape (20 × 1024, cooperative). Every wave starts with the next consumer's
+prologue in place of the next layer's QKV: an RMSNorm of `y`, which the
+fused modes first produce by reducing the previous wave's partials. Modes,
+each its own kernel instantiation (62 to 64 registers, no local memory):
+
+| Mode | Per worker *k*, per layer |
+| --- | --- |
+| `split` (S2c) | consumer norm; `ops::gate_up` rows *k*; barrier; `ops::down` rows *k*; barrier |
+| `fused_rows` | every worker reduces all of `y`, then norm; `ops::gate_up` chunk *k*; down partial from row-major `Wdown[:, chunk k]`, one warp per output row; barrier |
+| `fused_chunks` | as `fused_rows`, but the down partial reads `Wdown` stored transposed: a thread owns two adjacent outputs, loads `bfloat162` pairs and sums its chunk's columns in order |
+| `fused_chunks_slice` | as `fused_chunks`, but worker *k* reduces only its slice of `y`, then a barrier, then the norm reads `y` |
+| `*_plain` | the fused modes without any reduction (diagnostic) |
+| `barriers_*` | only the barriers: two per layer (split) or one (fused) |
+
+The partials are FP32, `[20 × 2048]`, alternating between two buffers by
+wave. They are summed in worker order, rounded, added to the residual and
+rounded again, as `ops::down` rounds the unsplit projection.
+
+### Results
+
+µs per layer, median of 7 rounds in alternating order. Four passes agree
+within 0.3 µs per mode, and rounds within a pass within 0.9 µs. Ideal
+streaming of the 100.7 MB per layer is 472.8 µs.
+
+| Mode | Pass 2 | Pass 3 | Pass 4 | Pass 5 | Saving against `split` | per token |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `barriers_split` | 1.42 | 1.44 | 1.42 | 1.42 | | |
+| `barriers_fused` | 0.83 | 0.83 | 0.83 | — | | |
+| `split` | 498.88 | 498.93 | 499.01 | 498.86 | 0 | |
+| `fused_rows` | 496.37 | 496.38 | 496.46 | — | 2.6 | 0.04 ms |
+| `fused_rows_plain` | 491.02 | 491.12 | 491.10 | — | 7.9 | 0.13 ms |
+| `fused_chunks` | 487.81 | 487.89 | 487.95 | 487.82 | 11.1 | 0.18 ms |
+| `fused_chunks_plain` | 483.23 | 483.20 | 483.22 | 483.22 | 15.7 | 0.25 ms |
+| **`fused_chunks_slice`** | **485.22** | **485.15** | **485.17** | **485.15** | **13.8** | **0.22 ms** |
+
+Savings are medians of the per-round paired differences. Pass 1 used a
+build without the slice mode and agrees with these within 0.1 µs; one build
+in between batched the reduction's loads (8 in flight per thread), which
+was 1.2 µs *slower* and was reverted.
+
+- **The gate passes.** The best mode saves 13.8 µs per layer, 0.22 ms per
+  token, against the 0.06 ms threshold and S6a's 10 µs resolution.
+- **About half the saving is the layout, not the fusion.** With row-major
+  `Wdown`, each worker's down partial is 2,048 warp dots of 410 columns
+  (820 bytes per row, 16 KB stride), and fusion saves 7.9 µs before
+  reduction. Stored transposed, the same partial streams contiguous
+  4 KB rows with no warp reductions, and saves another 7.8 µs. The
+  transposed layout is `Wdown`ᵀ as a whole, so it does not depend on the
+  worker count; it only works in the fused form, where a worker owns
+  columns, not rows.
+- **The full reduction on every worker costs 4.6 µs per layer.** It is not
+  latency: batching its loads made it slower. 20 workers reading 160 KB each
+  moves 3.2 MB through L2 per layer. Reducing one slice per worker (8 KB)
+  and adding back one barrier costs 1.9 to 2.0 µs.
+- **Numerics.** Against `split`, the final `y` is identical with
+  `fused_rows` and differs in 1 of 2,048 elements by 1 BF16 unit with the
+  transposed partial, as expected from the changed FP32 summation order.
+- **Against the decoder.** The probe's `split` costs 498.9 µs per layer; the
+  S2c trace's gate/up and down waves plus their barrier latency are about
+  492 µs. The probe adds a consumer norm (about 1.7 µs) and uses hashed
+  weights and inputs. The saving is larger than the 91 µs per token
+  estimated from the S2c trace (gate/up tail plus barrier) because that
+  estimate left out the down GEMV's own excess, which the transposed layout
+  removes.
+
+### What this changes in S4
+
+1. **Phase 1 builds `fused_chunks_slice`.** The package stores `Wdown`
+   transposed; the `ffn` task writes FP32 partials; a small reduction wave
+   (each worker reduces its slice of `y`) replaces the gate/up → down
+   barrier with a cheaper one. The next QKV keeps its plain norm prologue,
+   reading `y`. Layer *l*'s down partials must not be overwritten before
+   that wave has read them, which the validator models as a workspace.
+2. **The reduction wave can later become a counter wait** (Phase 2): QKV
+   worker *k* needs all of `y`, so this stays all-to-all; it is worth
+   revisiting only if the trace shows the reduction barrier's tail.
+3. **The expected S4 total rises.** With 0.22 ms from the FFN alone, S4's
+   target is about 0.25 to 0.3 ms if the attention counters pass their own
+   gate, which would put context 1 near 11.9 ms, 2.5% above the floor.
+   The decoder measurement under S6a decides; the probe has no attention,
+   QKV or Wo around the FFN.
+
+### Open
+
+- Run the probe with locked clocks when `sudo` is available.
+- `fused_chunks` could also stage the transposed chunk through the S3
+  ring; without the reduction it already streams at 98% of ideal, so this
+  is low priority.
