@@ -122,6 +122,12 @@ Outputs are bit-identical to S4. Generation is about 10 µs per token
 version was 0.2 ms per token slower, from codegen that a run-time position
 caused ([Section 19](#19-s5-results)). S6 remains.
 
+**Re-plan, 2026-10-27: S6 is narrowed to the comparison story.** The
+showcase compares only the final version with llama.cpp, PyTorch eager and
+CUDA Graph replay, adds a complete one-token timeline and illustrations of
+the static tile schedule, and drops the per-milestone ablation table and the
+synthetic size sweep ([S6](#s6--showcase-package)).
+
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
 measured, explained advantage over PyTorch CUDA Graph replay on the same
@@ -436,8 +442,7 @@ existing calibrated tolerances apply, not bit equality.
 
 Each milestone keeps the decoder reference and checkpoint regressions green,
 reprobes the compiled worker, and runs clang-format, Ruff, ty, CTest, and
-Compute Sanitizer before any timing is reported (AGENTS.md). Each one adds a
-row to the ablation table in S6.
+Compute Sanitizer before any timing is reported (AGENTS.md).
 
 **Every milestone opens with a probe gate** (added after S3). Before the
 package format or the worker changes, a microbenchmark on the worker's own
@@ -813,22 +818,54 @@ built (S3 found that weights prefetched before a barrier hide nothing).
 
 ### S6 — Showcase package
 
-- One command that imports the model, probes, plans each ablation stage,
-  checks correctness, runs the controlled sweep of S6a, and writes a report.
-- **Ablation table**, in ms/token and % of attainable bandwidth: S0 baseline
-  → S2 balanced/fused waves → S2b attention at the right parallelism → S2c
-  balanced QKV → S4 fused FFN / split-K / dataflow → S5 persistent, each at
-  contexts 1/256/1K/2K/4K, with llama.cpp from the runtime comparison.
-  Include PyTorch eager and graph replay, and the S3 probe's prefetch result
-  as a negative control.
-- **Timeline figures** from the device trace: baseline (gaps at every
-  barrier) next to the final schedule (continuous streaming), annotated with
-  bytes per task.
-- **Size sweep** with synthetic stacks of the same structure (hidden widths
-  such as 512/1024/2048, 4–16 layers). Fewer bytes per kernel make launch and
-  dependency overhead dominate, so the megakernel's advantage over graph
-  replay should grow as the model shrinks. This shows where the approach pays
-  off.
+Re-planned on 2026-10-27. The story is the final TileInfer against PyTorch
+and llama.cpp, how tile-based static scheduling produces it, and which
+choices are specific to the RTX 3050. The per-milestone ablation table and
+the synthetic size sweep are dropped: the milestone sections and the blog
+records already hold those numbers, and the older stages cannot be rebuilt
+without their own executors (the package format changed with S2c, S4 and
+S5).
+
+- **One command** that imports the pinned checkpoint, builds the worker,
+  probes it, plans the final package, verifies it against the reference and
+  the checkpoint tolerances, runs the comparison below, traces one token,
+  draws every figure, and writes a report with the environment, the clocks,
+  and the package and GGUF hashes. llama.cpp stays behind the
+  `experiments/runtimes/` subprocess boundary; the command calls its
+  scripts and does not import them. Steps that are already done (an
+  imported package, a converted GGUF, a llama.cpp build) are reused when
+  their hashes match.
+- **Comparison table, final version only.** TileInfer (S5) against
+  llama.cpp (flash attention, f16 K/V and BF16 K/V), PyTorch eager and
+  PyTorch CUDA Graph replay, at contexts 1/256/1K/2K/4K under the S6a
+  protocol: locked clocks, interleaved runtimes, both orders. Each cell gives
+  ms per token and % of the measured streaming floor. Add the 64-token
+  generation case, selection included, because S5 moved selection into the
+  worker. Put the parity table (argmax agreement, top-logit offsets) next to
+  it. The Phase 2 table of the
+  [runtime comparison](runtime_comparison_plan.md) still has the S2c
+  TileInfer and is rerun with S5.
+- **A complete timeline of one token.** All 20 workers over the whole token
+  (embedding, 16 layers, final norm, `lm_head`, selection) from
+  `--timeline-stack`, coloured by phase, with the barriers marked and one
+  layer enlarged with bytes per task. Below it, the loss budget of the final
+  version: ideal streaming, excess, and barrier latency per phase, summing
+  to the traced time. Draw it at context 1 and 4K.
+- **Illustrations of tile-based static scheduling in this repository:**
+  - the pipeline: checkpoint → `tileplan` (Python, offline) → package (plan,
+    target, weights) → `tile_runtime` (C++/CUDA, one launch per 64 steps);
+  - how one layer becomes tiles: weight matrices cut into row tiles, QKV
+    rows split evenly over the workers, the FFN fused per worker with split-K
+    partials reduced in a fixed order, attention as one task per K/V head up
+    to 384 positions and as two chunk tasks beyond;
+  - waves and barriers: the dependency graph of one layer, the waves the
+    planner derives from it, and the barrier skipped while attention is
+    fused;
+  - static assignment: the per-worker instruction streams the planner
+    writes, with bytes per worker and wave, so the balance is visible before
+    anything runs;
+  - the token loop: 64 steps per launch, greedy candidates from the logits
+    tasks combined by every worker, and the EOS and error words.
 
 ## 6. Measurement and honesty rules for the showcase claim
 
@@ -842,8 +879,10 @@ built (S3 found that weights prefetched before a barrier hide nothing).
   weak baseline. Also report an SDPA-backed graph baseline as a separate
   numerical policy, or state the limitation in the headline.
 - To attribute a speedup to *scheduling* rather than to a better operator,
-  each ablation step changes one thing. The S0 row-dot microbenchmark and the
-  bit-identical S1 and S2 checks provide matched-operator controls.
+  each milestone changed one thing, and its own section holds the controlled
+  before-and-after numbers. The S0 row-dot microbenchmark and the
+  bit-identical S1 and S2 checks provide matched-operator controls. The S6
+  write-up cites those sections and claims no attribution beyond them.
 - Report negative results with the same care as positive ones. A mechanism
   that the probe rejects (S3) belongs in the write-up, with its numbers.
 - Prior art to cite and compare against in the write-up: Hazy Research's
@@ -860,7 +899,7 @@ built (S3 found that weights prefetched before a barrier hide nothing).
 
 - **Small headroom.** If S0 measures attainable bandwidth near 190 GB/s, graph
   replay is already at the floor for short context. The showcase then rests on
-  long context, the size sweep, and timeline evidence. Find this out in S0,
+  long context and timeline evidence. Find this out in S0,
   before investing in S3–S4.
 - **Small wins per mechanism.** After S2 the remaining 1.3 ms at context 1
   is spread over steady-state streaming (about 0.32 ms), wave boundaries and
