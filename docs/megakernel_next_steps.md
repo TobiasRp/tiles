@@ -830,10 +830,12 @@ S5).
   probes it, plans the final package, verifies it against the reference and
   the checkpoint tolerances, runs the comparison below, traces one token,
   draws every figure, and writes a report with the environment, the clocks,
-  and the package and GGUF hashes. It also runs the AGENTS.md gates (a
-  fresh probe of the compiled worker, CTest, Compute Sanitizer) and records
-  their results in the report, so the report can carry the performance
-  claims. llama.cpp stays behind the
+  and the package and GGUF hashes. It also runs a fresh probe of the compiled
+  worker and CTest and records their results in the report. Compute
+  Sanitizer is too slow for the command (racecheck alone takes minutes); it
+  runs separately, and the report names the commit of its last passing run,
+  which must match the measured one before the report carries a performance
+  claim. llama.cpp stays behind the
   `experiments/runtimes/` subprocess boundary; the command calls its
   scripts and does not import them. Steps that are already done (an
   imported package, a converted GGUF, a llama.cpp build) are reused when
