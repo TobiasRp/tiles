@@ -830,18 +830,24 @@ S5).
   probes it, plans the final package, verifies it against the reference and
   the checkpoint tolerances, runs the comparison below, traces one token,
   draws every figure, and writes a report with the environment, the clocks,
-  and the package and GGUF hashes. llama.cpp stays behind the
+  and the package and GGUF hashes. It also runs the AGENTS.md gates (a
+  fresh probe of the compiled worker, CTest, Compute Sanitizer) and records
+  their results in the report, so the report can carry the performance
+  claims. llama.cpp stays behind the
   `experiments/runtimes/` subprocess boundary; the command calls its
   scripts and does not import them. Steps that are already done (an
   imported package, a converted GGUF, a llama.cpp build) are reused when
   their hashes match.
 - **Comparison table, final version only.** TileInfer (S5) against
   llama.cpp (flash attention, f16 K/V and BF16 K/V), PyTorch eager and
-  PyTorch CUDA Graph replay, at contexts 1/256/1K/2K/4K under the S6a
+  PyTorch CUDA Graph replay, plus CUDA Graph replay with SDPA attention as
+  a separate numerical policy (the Hugging Face eager attention with
+  `repeat_kv` is a weak long-context baseline; see Section 6), at contexts
+  1/256/1K/2K/4K under the S6a
   protocol: locked clocks, interleaved runtimes, both orders. Each cell gives
   ms per token and % of the measured streaming floor. Add the 64-token
   generation case, selection included, because S5 moved selection into the
-  worker. Put the parity table (argmax agreement, top-logit offsets) next to
+  worker, in ms per token and tokens per second. Put the parity table (argmax agreement, top-logit offsets) next to
   it. The Phase 2 table of the
   [runtime comparison](runtime_comparison_plan.md) still has the S2c
   TileInfer and is rerun with S5.
@@ -851,6 +857,20 @@ S5).
   layer enlarged with bytes per task. Below it, the loss budget of the final
   version: ideal streaming, excess, and barrier latency per phase, summing
   to the traced time. Draw it at context 1 and 4K.
+- **Kernel timelines of the other runtimes.** One token of PyTorch graph
+  replay and of llama.cpp from Nsight Systems, drawn on the same time axis
+  under TileInfer's timeline: 213 to 261 kernels against one launch. The
+  llama.cpp reports from `runs/rt-2026-10-25/nsys/` are re-recorded with the
+  final setup.
+- **RTX 3050-specific choices in one figure:** one block per SM from the
+  occupancy probe; about 8 SMs saturate DRAM (`worker-bandwidth.svg`); the
+  0.79 µs grid barrier; a 1.5 MB L2 that never holds the weights;
+  `cp.async` without TMA or programmatic dependent launch; the 64-register
+  budget and the S5 codegen lesson; and the display watchdog that limits a
+  launch to 64 steps.
+- **Prior art box:** Hazy Research's "no bubbles" megakernel and Mirage
+  Persistent Kernel against this design, reusing the table in
+  [the post-1 outline](blog/decoding-in-tiles-2026-10-outline.md).
 - **Illustrations of tile-based static scheduling in this repository:**
   - the pipeline: checkpoint → `tileplan` (Python, offline) → package (plan,
     target, weights) → `tile_runtime` (C++/CUDA, one launch per 64 steps);
@@ -866,6 +886,9 @@ S5).
     anything runs;
   - the token loop: 64 steps per launch, greedy candidates from the logits
     tasks combined by every worker, and the EOS and error words.
+- **Outline of the final post** in `docs/blog/`, in the style of the post-1
+  outline, before the text is written: which table and figure carries each
+  claim, and which items still need a source or measurement.
 
 ## 6. Measurement and honesty rules for the showcase claim
 
