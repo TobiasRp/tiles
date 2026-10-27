@@ -17,15 +17,15 @@ os.environ.setdefault("TORCH_DISABLE_NATIVE_JIT", "1")
 import torch
 import torch.nn.functional as F
 
+from tileplan.decoder_reference import pin_torch_numerics
+
 SENTINEL = -123.0
 
 
 def fixtures() -> list[tuple[dict, str, torch.Tensor, dict | None]]:
     """Cases as (case, checked output buffer, expected values, optional extra check)."""
     torch.manual_seed(237)
-    torch.backends.cuda.preferred_blas_library("cublaslt")
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (False, False)
+    pin_torch_numerics()
     cases: list[tuple[dict, str, torch.Tensor, dict | None]] = []
 
     def random(*shape, dtype):

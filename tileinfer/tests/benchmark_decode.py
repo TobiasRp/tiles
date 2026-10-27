@@ -14,6 +14,8 @@ os.environ.setdefault("TORCH_DISABLE_NATIVE_JIT", "1")
 import torch
 from transformers import AutoModelForCausalLM, StaticCache
 
+from tileplan.decoder_reference import pin_torch_numerics
+
 
 def _timed(call, iterations: int, rounds: int) -> list[float]:
     samples = []
@@ -39,11 +41,8 @@ def _baseline(
     rounds: int,
     dtype: str,
 ) -> dict:
-    torch.backends.cuda.preferred_blas_library("cublaslt")
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (False, False)
-    torch.backends.cuda.matmul.allow_tf32 = False
+    pin_torch_numerics()
     scalar = torch.bfloat16 if dtype == "bfloat16" else torch.float32
-    torch.backends.cudnn.allow_tf32 = False
     model = AutoModelForCausalLM.from_pretrained(
         checkpoint,
         dtype=scalar,

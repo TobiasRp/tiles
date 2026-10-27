@@ -171,6 +171,15 @@ def apply_rope(
     )
 
 
+def pin_torch_numerics() -> None:
+    """Select the cuBLASLt path and disable reduced-precision reductions and
+    TF32, the PyTorch settings the eager BF16 policy and tolerances assume."""
+    torch.backends.cuda.preferred_blas_library("cublaslt")
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (False, False)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
+
 def rms_norm(x: torch.Tensor, scale: torch.Tensor, eps: float) -> torch.Tensor:
     normalized = x.float() * torch.rsqrt(
         x.float().square().mean(dim=-1, keepdim=True) + eps

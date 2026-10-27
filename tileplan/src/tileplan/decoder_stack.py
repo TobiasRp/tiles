@@ -124,8 +124,8 @@ class StackCache:
 
 
 def final_norm(hidden: torch.Tensor, scale: torch.Tensor, eps: float) -> torch.Tensor:
-    """The final RMSNorm over the last dimension: FP32 in one step, as the
-    FP32 worker computes it; BF16 with eager PyTorch's rounding."""
+    """The final RMSNorm over the last dimension: FP32 without intermediate
+    rounding, BF16 with eager PyTorch's rounding (``rms_norm``)."""
     if hidden.dtype == torch.float32:
         factor = torch.rsqrt(hidden.square().mean(dim=-1, keepdim=True) + eps)
         return hidden * factor * scale

@@ -47,9 +47,9 @@ enum class Opcode : std::uint32_t
 };
 
 // Package opcode names, without the _f32/_bf16 precision suffix.
-inline constexpr std::array<const char*, 9> kOpcodeNames{"qkv", "attention_scores",
-    "attention_values", "output_projection", "ffn", "ffn_reduce", "embedding", "final_rms_norm",
-    "logits"};
+inline constexpr std::array kOpcodeNames{"qkv", "attention_scores", "attention_values",
+    "output_projection", "ffn", "ffn_reduce", "embedding", "final_rms_norm", "logits"};
+// Opcode::logits is the last opcode; update this check when adding one.
 static_assert(kOpcodeNames.size() == static_cast<std::size_t>(Opcode::logits),
     "every opcode after barrier needs a package name, in enum order");
 

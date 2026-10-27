@@ -16,6 +16,8 @@ os.environ.setdefault("TORCH_DISABLE_NATIVE_JIT", "1")
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from tileplan.decoder_reference import pin_torch_numerics
+
 PROMPTS = (
     "Hello, my name is",
     "The capital of France is",
@@ -31,10 +33,7 @@ TOLERANCE_CALIBRATION = json.loads(
 def _reference(
     checkpoint: Path, dtype: str
 ) -> tuple[list[list[int]], list[dict], list[str]]:
-    torch.backends.cuda.preferred_blas_library("cublaslt")
-    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (False, False)
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    pin_torch_numerics()
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)
     model = AutoModelForCausalLM.from_pretrained(
         checkpoint,
