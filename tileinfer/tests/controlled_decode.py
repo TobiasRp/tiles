@@ -2,7 +2,13 @@
 
 Each TileInfer arm is a package served by a resident ``tile_runtime_test
 --benchmark-serve`` process; ``--pytorch`` adds Transformers eager and CUDA
-Graph replay, run in this process. For every context the arms fill their
+Graph replay, run in this process, and ``--sdpa`` a graph replay with SDPA
+attention (a separate numerical policy). ``--llamacpp`` adds one arm per
+K/V type, served by one resident ``rt_probe serve`` process from
+``experiments/runtimes``; its rounds are host wall time around each
+synchronous ``llama_decode``. ``--order`` sets the spawn and block order and
+``--reference`` the arm the others are compared with (default: the first).
+For every context the arms fill their
 prefix once, then run ``--blocks`` measurement blocks each, in alternating
 order (forward, then reversed), so drift reaches every arm alike. A block is
 ``--rounds`` CUDA-event batches of ``--iterations`` launches. A background
@@ -102,15 +108,82 @@ class TileArm:
             raise RuntimeError(f"{self.name}: benchmark server failed")
 
 
+class LlamaServer:
+    """One resident ``rt_probe serve`` process with a context per K/V type."""
+
+    def __init__(
+        self, probe: Path, gguf: Path, fa: str, kvs: list[str], max_context: int
+    ) -> None:
+        self.probe, self.gguf, self.fa = probe, gguf, fa
+        command = [str(probe), "serve", "--model", str(gguf), "--fa", fa]
+        command += ["--kv", ",".join(kvs), "--max-context", str(max_context)]
+        self.process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        if not json.loads(self._line())["ready"]:
+            raise RuntimeError("rt_probe serve did not start")
+
+    def _line(self) -> str:
+        assert self.process.stdout is not None
+        line = self.process.stdout.readline()
+        if not line:
+            raise RuntimeError("rt_probe serve exited")
+        return line
+
+    def measure(self, kv: str, *request: int) -> dict:
+        assert self.process.stdin is not None
+        self.process.stdin.write(" ".join([kv, *map(str, request)]) + "\n")
+        self.process.stdin.flush()
+        return json.loads(self._line())
+
+    def close(self) -> None:
+        assert self.process.stdin is not None
+        self.process.stdin.close()
+        if self.process.wait(timeout=60) != 0:
+            raise RuntimeError("rt_probe serve failed")
+
+
+class LlamaArm:
+    """One K/V type of a resident llama.cpp server."""
+
+    def __init__(self, name: str, server: LlamaServer, kv: str) -> None:
+        self.name, self.server, self.kv = name, server, kv
+
+    def measure(
+        self, position: int, token: int, warmup: int, iterations: int, rounds: int
+    ) -> dict:
+        return self.server.measure(self.kv, position, token, warmup, iterations, rounds)
+
+    def describe(self) -> dict:
+        return {
+            "kind": "llamacpp",
+            "probe": str(self.server.probe),
+            "probe_sha256": sha256(self.server.probe),
+            "gguf": str(self.server.gguf),
+            "flash_attention": self.server.fa,
+            "kv": self.kv,
+            "timing": "host wall time per synchronous llama_decode, CUDA graphs on",
+        }
+
+
 class PyTorchArms:
     """Transformers eager and CUDA Graph replay at one fixed context.
 
     The settings match benchmark_decode.py: cuBLASLt, no TF32 or reduced BF16
     reductions, eager attention, and a static cache of exactly the context
     length, refilled for every context, by decoding or with synthetic values.
+    With ``sdpa`` a second graph runs the same model with SDPA attention and no
+    mask (the cache holds exactly the context, so none is needed), which lets
+    PyTorch use its GQA kernels instead of ``repeat_kv``.
     """
 
-    def __init__(self, checkpoint: Path, dtype: str, synthetic: bool) -> None:
+    def __init__(
+        self, checkpoint: Path, dtype: str, synthetic: bool, sdpa: bool = False
+    ) -> None:
         os.environ.setdefault("TORCH_DISABLE_NATIVE_JIT", "1")
         import torch
         from transformers import AutoModelForCausalLM
@@ -130,13 +203,32 @@ class PyTorchArms:
         ).eval()
         self.checkpoint = checkpoint
         self.synthetic = synthetic
+        self.sdpa = sdpa
         self.graph = None
+        self.sdpa_graph = None
+
+    def _capture(self, forward, warmup: int):
+        """Capture `forward` in a CUDA graph after a side-stream warmup."""
+        torch = self.torch
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(warmup):
+                forward()
+        torch.cuda.current_stream().wait_stream(side)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            logits = forward()
+        graph.replay()
+        torch.cuda.synchronize()
+        return graph, logits
 
     def prepare(self, position: int, token: int, warmup: int) -> dict:
         from transformers import StaticCache
 
         torch = self.torch
-        self.graph = None
+        self.graph = self.sdpa_graph = None
         gc.collect()
         torch.cuda.empty_cache()
         device = torch.device("cuda:0")
@@ -173,32 +265,58 @@ class PyTorchArms:
                     logits_to_keep=1,
                 ).logits
 
+            def forward_sdpa():
+                config = self.model.config
+                config._attn_implementation = "sdpa"
+                try:
+                    return self.model(
+                        input_ids=token_tensor,
+                        past_key_values=cache,
+                        use_cache=True,
+                        cache_position=cache_position,
+                        logits_to_keep=1,
+                    ).logits
+                finally:
+                    config._attn_implementation = "eager"
+
             for _ in range(warmup):
                 forward()
             logits = forward().detach().clone()
-            side = torch.cuda.Stream()
-            side.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(side):
-                for _ in range(warmup):
-                    forward()
-            torch.cuda.current_stream().wait_stream(side)
-            torch.cuda.synchronize()
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                graph_logits = forward()
-            graph.replay()
-            torch.cuda.synchronize()
+            graph, graph_logits = self._capture(forward, warmup)
             if not torch.allclose(graph_logits, logits, atol=1e-3, rtol=1e-4):
                 raise AssertionError(
                     f"graph/eager logits differ at position {position}"
                 )
+            result = {
+                "next_token": int(logits.argmax()),
+                "top_logit": float(logits.max()),
+            }
+            if self.sdpa:
+                sdpa_logits = forward_sdpa().detach().clone()
+                self.sdpa_graph, sdpa_graph_logits = self._capture(forward_sdpa, warmup)
+                if not torch.allclose(
+                    sdpa_graph_logits, sdpa_logits, atol=1e-3, rtol=1e-4
+                ):
+                    raise AssertionError(
+                        f"SDPA graph/eager logits differ at position {position}"
+                    )
+                result["sdpa"] = {
+                    "next_token": int(sdpa_logits.argmax()),
+                    "top_logit": float(sdpa_logits.max()),
+                }
         self.forward, self.graph = forward, graph
-        return {"next_token": int(logits.argmax()), "top_logit": float(logits.max())}
+        return result
 
     def measure(self, name: str, iterations: int, rounds: int) -> dict:
         torch = self.torch
         assert self.graph is not None, "prepare() first"
-        call = self.forward if name == "eager" else self.graph.replay
+        if name == "eager":
+            call = self.forward
+        elif name == "graph":
+            call = self.graph.replay
+        else:
+            assert self.sdpa_graph is not None
+            call = self.sdpa_graph.replay
         samples = []
         with torch.inference_mode():
             for _ in range(rounds):
@@ -213,15 +331,21 @@ class PyTorchArms:
                 samples.append(start.elapsed_time(end) * 1000 / iterations)
         return {"samples_us": samples, "mean_us": statistics.mean(samples)}
 
-    def describe(self) -> dict:
+    def describe(self, name: str) -> dict:
         import transformers
 
+        attention = (
+            "SDPA attention without a mask (GQA kernels)"
+            if name == "graph-sdpa"
+            else "eager attention"
+        )
         return {
             "kind": "pytorch",
+            "mode": "eager" if name == "eager" else "CUDA Graph replay",
             "checkpoint": str(self.checkpoint),
             "torch_version": self.torch.__version__,
             "transformers_version": transformers.__version__,
-            "baseline": "LlamaForCausalLM eager attention, StaticCache of the context "
+            "baseline": f"LlamaForCausalLM {attention}, StaticCache of the context "
             "length, logits_to_keep=1, cuBLASLt, no TF32 or reduced BF16 reductions",
         }
 
@@ -331,9 +455,20 @@ def environment(repository: Path) -> dict:
 def parse_arm(text: str) -> tuple[str, Path, Path]:
     name, _, paths = text.partition("=")
     executor, _, package = paths.partition(",")
-    if not name or not executor or not package or name in ("eager", "graph"):
+    if not name or not executor or not package or name in PYTORCH:
         raise argparse.ArgumentTypeError("arm must be NAME=EXECUTOR,PACKAGE")
     return name, Path(executor), Path(package)
+
+
+def parse_llamacpp(text: str) -> tuple[Path, Path, str]:
+    probe, _, rest = text.partition(",")
+    gguf, _, fa = rest.partition(",")
+    if not probe or not gguf or fa not in ("on", "off"):
+        raise argparse.ArgumentTypeError("llama.cpp must be PROBE,GGUF,on|off")
+    return Path(probe), Path(gguf), fa
+
+
+PYTORCH = ("eager", "graph", "graph-sdpa")
 
 
 def main() -> None:
@@ -342,6 +477,22 @@ def main() -> None:
     parser.add_argument(
         "--pytorch", type=Path, help="checkpoint for eager and graph arms"
     )
+    parser.add_argument(
+        "--sdpa", action="store_true", help="add graph replay with SDPA attention"
+    )
+    parser.add_argument(
+        "--llamacpp",
+        type=parse_llamacpp,
+        help="PROBE,GGUF,FLASH_ATTENTION for llama.cpp arms",
+    )
+    parser.add_argument(
+        "--llamacpp-kv",
+        nargs="+",
+        default=["f16", "bf16"],
+        help="one llama.cpp arm (llamacpp-KV) per K/V type",
+    )
+    parser.add_argument("--order", nargs="+", help="spawn and block order of arms")
+    parser.add_argument("--reference", help="arm the others are compared with")
     parser.add_argument(
         "--positions", type=int, nargs="+", default=[0, 255, 1023, 4095]
     )
@@ -362,6 +513,18 @@ def main() -> None:
     names = [name for name, _, _ in args.arm]
     if len(set(names)) != len(names):
         parser.error("arm names must be unique")
+    if args.sdpa and not args.pytorch:
+        parser.error("--sdpa needs --pytorch")
+    pytorch_names = [
+        name for name in PYTORCH if args.pytorch and (args.sdpa or name != "graph-sdpa")
+    ]
+    llama_names = [f"llamacpp-{kv}" for kv in args.llamacpp_kv] if args.llamacpp else []
+    order = args.order or names + pytorch_names + llama_names
+    if sorted(order) != sorted(names + pytorch_names + llama_names):
+        parser.error(f"--order must name every arm once: {order}")
+    reference_name = args.reference or order[0]
+    if reference_name not in order:
+        parser.error("--reference must name an arm")
 
     args.out.mkdir(parents=True, exist_ok=False)
     repository = Path(__file__).resolve().parents[2]
@@ -373,10 +536,12 @@ def main() -> None:
             "iterations": args.iterations,
             "rounds": args.rounds,
             "blocks": args.blocks,
+            "arm_order": order,
             "order": "per context: prefix and warmup per arm, then blocks in "
             "alternating forward and reversed arm order",
-            "timing": "CUDA event batch average per round; kernel only for TileInfer",
-            "comparison": "paired block differences against the first arm, "
+            "timing": "CUDA event batch average per round; kernel only for "
+            "TileInfer; host wall time per synchronous decode for llama.cpp",
+            "comparison": f"paired block differences against {reference_name}, "
             f"bootstrap 95% interval over pairs ({BOOTSTRAP} resamples); rounds "
             f"more than {100 * OUTLIER_FRACTION}% from the arm's median at a context "
             "are excluded and counted",
@@ -385,23 +550,34 @@ def main() -> None:
         },
         "environment": environment(repository),
     }
+    if args.llamacpp and args.synthetic_prefix:
+        parser.error("llama.cpp arms decode their prefix; drop --synthetic-prefix")
     telemetry = Telemetry(args.out / "telemetry.csv", args.telemetry_ms)
-    tile = [
-        TileArm(name, executor, package, args.synthetic_prefix)
-        for name, executor, package in args.arm
-    ]
-    dtype = json.loads((tile[0].package / "plan.json").read_text())["model"][
+    executors = {name: (executor, package) for name, executor, package in args.arm}
+    dtype = json.loads((args.arm[0][2] / "plan.json").read_text())["model"][
         "weight_dtype"
     ]
-    pytorch = (
-        PyTorchArms(args.pytorch, dtype, args.synthetic_prefix)
-        if args.pytorch
-        else None
-    )
-    order = names + (["eager", "graph"] if pytorch else [])
-    report["arms"] = {arm.name: arm.describe() for arm in tile}
+    # Resident servers and the PyTorch model start in arm order, so swapping
+    # the order also swaps which process allocates GPU memory first.
+    served: dict[str, TileArm | LlamaArm] = {}
+    llama: LlamaServer | None = None
+    pytorch: PyTorchArms | None = None
+    max_context = max(args.positions) + 1
+    for name in order:
+        if name in executors:
+            served[name] = TileArm(name, *executors[name], args.synthetic_prefix)
+        elif name in llama_names:
+            if llama is None:
+                probe, gguf, fa = args.llamacpp
+                llama = LlamaServer(probe, gguf, fa, args.llamacpp_kv, max_context)
+            served[name] = LlamaArm(name, llama, name.removeprefix("llamacpp-"))
+        elif pytorch is None:
+            pytorch = PyTorchArms(
+                args.pytorch, dtype, args.synthetic_prefix, sdpa=args.sdpa
+            )
+    report["arms"] = {name: arm.describe() for name, arm in served.items()}
     if pytorch:
-        report["arms"] |= {name: pytorch.describe() for name in ("eager", "graph")}
+        report["arms"] |= {name: pytorch.describe(name) for name in pytorch_names}
 
     contexts: list[dict] = []
     try:
@@ -413,11 +589,11 @@ def main() -> None:
                 else None
             )
             first = {}
-            for arm in tile:
+            for name, arm in served.items():
                 result = arm.measure(position, args.token_id, args.warmup, 1, 1)
-                first[arm.name] = (result["top_token"], result["top_logit"])
+                first[name] = (result["top_token"], result["top_logit"])
             top_token = first[names[0]][0]
-            if any(token != top_token for token, _ in first.values()):
+            if any(first[name][0] != top_token for name in names):
                 raise AssertionError(
                     f"TileInfer arms disagree at position {position}: {first}"
                 )
@@ -433,8 +609,8 @@ def main() -> None:
             for block in range(args.blocks):
                 for name in order if block % 2 == 0 else order[::-1]:
                     start = time.time()
-                    if name in names:
-                        result = tile[names.index(name)].measure(
+                    if name in served:
+                        result = served[name].measure(
                             position, args.token_id, 0, args.iterations, args.rounds
                         )
                     else:
@@ -455,6 +631,7 @@ def main() -> None:
                     "position": position,
                     "context_length": position + 1,
                     "top_token": top_token,
+                    "top_tokens": {name: token for name, (token, _) in first.items()},
                     "top_logits": {name: logit for name, (_, logit) in first.items()},
                     "pytorch": reference,
                     "blocks": blocks,
@@ -462,8 +639,11 @@ def main() -> None:
             )
     finally:
         samples = telemetry.stop()
-        for arm in tile:
-            arm.close()
+        for arm in served.values():
+            if isinstance(arm, TileArm):
+                arm.close()
+        if llama:
+            llama.close()
 
     for context in contexts:
         for block in context["blocks"]:
@@ -493,9 +673,10 @@ def main() -> None:
             }
             for name, values in means.items()
         }
-        context["paired_vs_" + order[0]] = {
-            name: paired(means[order[0]], means[name], context["position"])
-            for name in order[1:]
+        context["paired_vs_" + reference_name] = {
+            name: paired(means[reference_name], means[name], context["position"])
+            for name in order
+            if name != reference_name
         }
     report["contexts"] = contexts
     (args.out / "report.json").write_text(json.dumps(report, indent=2) + "\n")
@@ -510,10 +691,10 @@ def main() -> None:
                 + (f" ({dropped} rounds excluded)" if dropped else "")
             )
         print("  ".join(line))
-        for name, stats in context["paired_vs_" + order[0]].items():
+        for name, stats in context["paired_vs_" + reference_name].items():
             low, high = stats["ci95_us"]
             print(
-                f"    {name} - {order[0]}: {stats['mean_us']:+8.1f} us "
+                f"    {name} - {reference_name}: {stats['mean_us']:+8.1f} us "
                 f"[{low:+.1f}, {high:+.1f}] ({stats['mean_percent']:+.2f}%)"
             )
     print(args.out / "report.json")

@@ -1,13 +1,16 @@
-// Probe for the runtime comparison: greedy decode on token ids and fixed-
-// context decode timing, with and without sampling. JSON goes to stdout,
-// llama.cpp logs go to stderr.
+// Probe for the runtime comparison: greedy decode on token ids, fixed-
+// context decode timing with and without sampling, and a resident server for
+// interleaved timing. JSON goes to stdout, llama.cpp logs go to stderr.
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "llama.h"
@@ -27,6 +30,7 @@ struct Options {
     std::vector<llama_token> forced;  // teacher forcing: tokens to feed instead of the sampled ones
     std::vector<int> positions{0, 63, 255};
     int new_tokens = 32;
+    int max_context = 4096;  // serve: positions below this
     llama_token token = 1;
     int warmup = 3;
     int iterations = 5;
@@ -63,7 +67,7 @@ llama_flash_attn_type parse_fa(const std::string & name) {
 Options parse(int argc, char ** argv) {
     Options o;
     if (argc < 2) {
-        throw std::runtime_error("usage: rt_probe greedy|decode --model M [options]");
+        throw std::runtime_error("usage: rt_probe greedy|decode|serve --model M [options]");
     }
     o.mode = argv[1];
     for (int i = 2; i < argc; ++i) {
@@ -84,6 +88,7 @@ Options parse(int argc, char ** argv) {
             for (long v : parse_list(next())) o.positions.push_back((int) v);
         }
         else if (a == "--new-tokens") o.new_tokens = std::atoi(next());
+        else if (a == "--max-context") o.max_context = std::atoi(next());
         else if (a == "--token") o.token = std::atoi(next());
         else if (a == "--warmup") o.warmup = std::atoi(next());
         else if (a == "--iterations") o.iterations = std::atoi(next());
@@ -127,6 +132,36 @@ void print_array(const char * name, const std::vector<double> & values) {
     std::printf("]");
 }
 
+llama_model * load_model(const Options & o) {
+    llama_log_set([](ggml_log_level level, const char * text, void *) {
+        if (level >= GGML_LOG_LEVEL_WARN || level == GGML_LOG_LEVEL_NONE) std::fputs(text, stderr);
+    }, nullptr);
+    llama_backend_init();
+    llama_model_params mp = llama_model_default_params();
+    mp.n_gpu_layers = o.gpu_layers;
+    llama_model * model = llama_model_load_from_file(o.model.c_str(), mp);
+    if (!model) throw std::runtime_error("cannot load " + o.model);
+    return model;
+}
+
+llama_context * create_context(llama_model * model, const Options & o, int n_ctx, const std::string & kv) {
+    llama_context_params cp = llama_context_default_params();
+    cp.n_ctx = n_ctx;
+    cp.n_batch = 512;
+    cp.n_ubatch = 512;
+    cp.type_k = parse_kv(kv);
+    cp.type_v = parse_kv(kv);
+    cp.flash_attn_type = parse_fa(o.flash_attn);
+    if (o.threads > 0) {
+        cp.n_threads = o.threads;
+        cp.n_threads_batch = o.threads;
+    }
+    cp.no_perf = true;
+    llama_context * ctx = llama_init_from_model(model, cp);
+    if (!ctx) throw std::runtime_error("cannot create context");
+    return ctx;
+}
+
 struct Session {
     llama_model * model = nullptr;
     llama_context * ctx = nullptr;
@@ -134,28 +169,8 @@ struct Session {
     int n_vocab = 0;
 
     Session(const Options & o, int n_ctx) {
-        llama_log_set([](ggml_log_level level, const char * text, void *) {
-            if (level >= GGML_LOG_LEVEL_WARN || level == GGML_LOG_LEVEL_NONE) std::fputs(text, stderr);
-        }, nullptr);
-        llama_backend_init();
-        llama_model_params mp = llama_model_default_params();
-        mp.n_gpu_layers = o.gpu_layers;
-        model = llama_model_load_from_file(o.model.c_str(), mp);
-        if (!model) throw std::runtime_error("cannot load " + o.model);
-        llama_context_params cp = llama_context_default_params();
-        cp.n_ctx = n_ctx;
-        cp.n_batch = 512;
-        cp.n_ubatch = 512;
-        cp.type_k = parse_kv(o.kv);
-        cp.type_v = parse_kv(o.kv);
-        cp.flash_attn_type = parse_fa(o.flash_attn);
-        if (o.threads > 0) {
-            cp.n_threads = o.threads;
-            cp.n_threads_batch = o.threads;
-        }
-        cp.no_perf = true;
-        ctx = llama_init_from_model(model, cp);
-        if (!ctx) throw std::runtime_error("cannot create context");
+        model = load_model(o);
+        ctx = create_context(model, o, n_ctx, o.kv);
         vocab = llama_model_get_vocab(model);
         n_vocab = llama_vocab_n_tokens(vocab);
     }
@@ -229,22 +244,27 @@ void run_greedy(const Options & o) {
 
 // Rounds of `iterations` decodes at one fixed position. Each call removes the
 // previous token at that position first, so the context length stays constant.
-std::vector<double> time_position(Session & s, int position, llama_token token, const Options & o,
-                                  llama_sampler * sampler) {
-    llama_memory_t mem = llama_get_memory(s.ctx);
+std::vector<double> time_position(llama_context * ctx, int position, llama_token token, int warmup,
+                                  int iterations, int rounds, llama_sampler * sampler) {
+    llama_memory_t mem = llama_get_memory(ctx);
     auto call = [&] {
         llama_memory_seq_rm(mem, 0, position, -1);
-        decode_one(s.ctx, token);
-        if (sampler) (void) llama_sampler_sample(sampler, s.ctx, -1);
+        decode_one(ctx, token);
+        if (sampler) (void) llama_sampler_sample(sampler, ctx, -1);
     };
-    for (int i = 0; i < o.warmup; ++i) call();
+    for (int i = 0; i < warmup; ++i) call();
     std::vector<double> samples;
-    for (int r = 0; r < o.rounds; ++r) {
+    for (int r = 0; r < rounds; ++r) {
         const auto t0 = clock_type::now();
-        for (int i = 0; i < o.iterations; ++i) call();
-        samples.push_back(elapsed_us(t0) / o.iterations);
+        for (int i = 0; i < iterations; ++i) call();
+        samples.push_back(elapsed_us(t0) / iterations);
     }
     return samples;
+}
+
+std::vector<double> time_position(Session & s, int position, llama_token token, const Options & o,
+                                  llama_sampler * sampler) {
+    return time_position(s.ctx, position, token, o.warmup, o.iterations, o.rounds, sampler);
 }
 
 void run_decode(const Options & o) {
@@ -276,6 +296,64 @@ void run_decode(const Options & o) {
     llama_sampler_free(greedy);
 }
 
+// One resident context per K/V type for interleaved timing.
+struct Resident {
+    std::string kv;
+    llama_context * ctx = nullptr;
+    int filled = 0;  // prefix rows that hold `token`
+    llama_token token = -1;
+};
+
+// Resident fixed-context timing for the interleaved protocol: one model, one
+// context per K/V type in --kv (comma separated). Each stdin line
+// "KV POSITION TOKEN WARMUP ITERATIONS ROUNDS" fills the prefix up to POSITION
+// with TOKEN (untimed, keeping rows filled earlier), times decodes at POSITION
+// and answers with one JSON line.
+void run_serve(const Options & o) {
+    llama_model * model = load_model(o);
+    const int n_vocab = llama_vocab_n_tokens(llama_model_get_vocab(model));
+    std::vector<Resident> residents;
+    for (std::string_view rest = o.kv; !rest.empty();) {
+        const size_t comma = rest.find(',');
+        const std::string kv(rest.substr(0, comma));
+        residents.push_back({kv, create_context(model, o, o.max_context + 1, kv)});
+        rest = comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
+    }
+    std::printf("{\"ready\":true,\"n_vocab\":%d,\"max_context\":%d,\"kv\":[", n_vocab, o.max_context);
+    for (size_t i = 0; i < residents.size(); ++i) std::printf("%s\"%s\"", i ? "," : "", residents[i].kv.c_str());
+    std::printf("]}\n");
+    std::fflush(stdout);
+    for (std::string line; std::getline(std::cin, line);) {
+        std::istringstream in(line);
+        std::string kv;
+        int position = 0, warmup = 0, iterations = 0, rounds = 0;
+        llama_token token = 0;
+        if (!(in >> kv >> position >> token >> warmup >> iterations >> rounds)) throw std::runtime_error("bad request");
+        if (position < 0 || position >= o.max_context || warmup < 0 || iterations <= 0 || rounds <= 0) {
+            throw std::runtime_error("request out of range");
+        }
+        auto r = std::find_if(residents.begin(), residents.end(), [&](const Resident & x) { return x.kv == kv; });
+        if (r == residents.end()) throw std::runtime_error("no context for K/V type " + kv);
+        if (r->token != token) {
+            r->filled = 0;
+            r->token = token;
+        }
+        const int kept = std::min(r->filled, position);
+        llama_memory_seq_rm(llama_get_memory(r->ctx), 0, kept, -1);
+        for (int p = kept; p < position; ++p) decode_one(r->ctx, token);
+        r->filled = position;
+        const std::vector<double> samples = time_position(r->ctx, position, token, warmup, iterations, rounds, nullptr);
+        const Top top = argmax(llama_get_logits_ith(r->ctx, -1), n_vocab);
+        std::printf("{");
+        print_array("samples_us", samples);
+        std::printf(",\"top_token\":%d,\"top_logit\":%.6f}\n", top.id, top.logit);
+        std::fflush(stdout);
+    }
+    for (Resident & r : residents) llama_free(r.ctx);
+    llama_model_free(model);
+    llama_backend_free();
+}
+
 }  // namespace
 
 int main(int argc, char ** argv) {
@@ -283,7 +361,8 @@ int main(int argc, char ** argv) {
         const Options o = parse(argc, argv);
         if (o.mode == "greedy") run_greedy(o);
         else if (o.mode == "decode") run_decode(o);
-        else throw std::runtime_error("mode must be greedy or decode");
+        else if (o.mode == "serve") run_serve(o);
+        else throw std::runtime_error("mode must be greedy, decode or serve");
         return 0;
     } catch (const std::exception & e) {
         std::fprintf(stderr, "rt_probe: %s\n", e.what());

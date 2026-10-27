@@ -4,8 +4,9 @@ Runs ``tile_runtime_test --timeline-stack`` once for all positions, in
 increasing order so the prefix is filled once; keeps each position's traced
 launch with the median CUDA-event time, and decomposes it with
 ``tileplan.timeline``. The ideal stream uses the best rate from a
-``bandwidth_probe stream`` report. Writes ``timeline-report.json`` plus a
-whole-token and a one-layer Gantt chart per position.
+``bandwidth_probe stream`` report. Writes ``timeline-report.json``, the raw
+trace (``trace-pPOSITION.json``), and a whole-token and a one-layer Gantt
+chart per position.
 """
 
 import argparse
@@ -67,6 +68,7 @@ def main() -> None:
     if [trace["position"] for trace in traces] != positions:
         raise RuntimeError("timeline output does not cover every position")
     for position, trace in zip(positions, traces, strict=True):
+        (args.out / f"trace-p{position}.json").write_text(json.dumps(trace) + "\n")
         times = [sample["kernel_us"] for sample in trace["samples"]]
         median = sorted(range(len(times)), key=times.__getitem__)[len(times) // 2]
         events, info = align(trace, median)
