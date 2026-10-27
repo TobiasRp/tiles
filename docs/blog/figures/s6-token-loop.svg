@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 360" width="760" height="360" role="img" aria-label="The token loop inside one launch">
+<title>The token loop inside one launch</title>
+<rect width="100%" height="100%" fill="#fcfcfb"/>
+<text x="24.0" y="32.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="17" fill="#0b0b0b" text-anchor="start" font-weight="600">The token loop inside one launch</text>
+<text x="24.0" y="54.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#52514e" text-anchor="start" font-weight="400">Up to 64 steps per cooperative launch; greedy selection runs in the worker, so the host only launches and reads the result</text>
+<defs><marker id="ah" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#52514e"/></marker></defs>
+<rect x="24" y="96" width="712" height="196" rx="8" fill="none" stroke="#c9c8c2" stroke-width="1.5" stroke-dasharray="6 4"/>
+<text x="36.0" y="116.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#52514e" text-anchor="start" font-weight="600">one launch: steps 1 … 64</text>
+<rect x="40.0" y="140.0" width="118.0" height="62.0" rx="6" fill="#fdeee7" stroke="#eb6834" stroke-width="1.5"/>
+<text x="99.0" y="160.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">every worker</text>
+<text x="99.0" y="175.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">combines all 20</text>
+<line x1="159.0" y1="171.0" x2="179.0" y2="171.0" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="180.0" y="140.0" width="118.0" height="62.0" rx="6" fill="#e6f6ef" stroke="#1baf7a" stroke-width="1.5"/>
+<text x="239.0" y="160.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">embedding</text>
+<text x="239.0" y="175.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">token → x</text>
+<line x1="299.0" y1="171.0" x2="319.0" y2="171.0" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="320.0" y="140.0" width="118.0" height="62.0" rx="6" fill="#e8f1fc" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="379.0" y="160.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">16 layers</text>
+<text x="379.0" y="175.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">6 waves each</text>
+<line x1="439.0" y1="171.0" x2="459.0" y2="171.0" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="460.0" y="140.0" width="118.0" height="62.0" rx="6" fill="#e8f1fc" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="519.0" y="160.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">final norm</text>
+<text x="519.0" y="175.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">+ lm_head</text>
+<line x1="579.0" y1="171.0" x2="599.0" y2="171.0" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)"/>
+<rect x="600.0" y="140.0" width="118.0" height="62.0" rx="6" fill="#fdeee7" stroke="#eb6834" stroke-width="1.5"/>
+<text x="659.0" y="160.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">20 candidates</text>
+<text x="659.0" y="175.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">max logit, lowest ID</text>
+<path d="M659.0,202 V232 H99.0 V204" fill="none" stroke="#52514e" stroke-width="1.5" marker-end="url(#ah)"/>
+<text x="379.0" y="250.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">grid barrier → next step; worker 0 records the token, the count and the EOS flag</text>
+<text x="24.0" y="322.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">Each logits task writes its rows&#x27; best candidate to its own slot (20 slots, 8 bytes each). All workers read the same slots, so they</text>
+<text x="24.0" y="338.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">agree on the token and on stopping without a counter. EOS ends the loop; a non-finite logit sets the error word.</text>
+<text x="24.0" y="354.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">64 steps, not the whole request: the display&#x27;s kernel watchdog would kill a launch of tens of seconds.</text>
+</svg>

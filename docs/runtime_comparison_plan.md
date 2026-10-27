@@ -24,6 +24,35 @@ CPU, 6 threads; harness validation only, never compared with CUDA numbers):
 - Not exercised on the Mac: Metal. The TileInfer/PyTorch report adapters were
   first run on real reports in Phase 2.
 
+## S6 rerun with S5, interleaved (2026-10-27, locked clocks)
+
+The S6 showcase (`experiments/showcase/showcase.py`) puts llama.cpp into the
+S6a protocol: `rt_probe serve` keeps the model resident, and
+`tileinfer/tests/controlled_decode.py` interleaves it with TileInfer in
+paired blocks, both spawn orders. TileInfer is S5 (`c95bc03`). ms per token,
+decode only; results and the method are in
+[Section 20 of the megakernel plan](megakernel_next_steps.md#20-s6-results):
+
+| Context | TileInfer | llama.cpp FA, f16 K/V | llama.cpp FA, BF16 K/V | PyTorch graph | PyTorch eager | Floor |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 12.13 | 13.68 | 13.74 | 12.84 | 13.96 | 11.61 |
+| 256 | 12.20 | 13.68 | 13.74 | 13.37 | 14.77 | 11.65 |
+| 1,024 | 12.38 | 13.82 | 14.12 | 14.64 | 15.82 | 11.76 |
+| 2,048 | 12.58 | 14.00 | 14.67 | 16.23 | 17.40 | 11.92 |
+| 4,096 | 12.99 | 14.32 | 15.67 | 20.34 | 21.48 | 12.24 |
+
+- llama.cpp's numbers equal the Phase 2 harness's after S2c within
+  0.02 ms, so the interleaved protocol and the earlier passes agree.
+- About 1.2 ms of llama.cpp's constant deficit is one 513 KB device-to-host
+  copy of the float32 logits per token (Nsight); TileInfer and PyTorch keep
+  the logits on the GPU in this table. Generation, where every runtime uses
+  its own selection path: TileInfer 12.16 ms per token (82.3 tokens/s),
+  PyTorch graph 13.09, llama.cpp 13.92 (f16 K/V) and 13.96 (BF16 K/V).
+- This resolves the open point below on llama.cpp's lower share of DRAM
+  bandwidth at context 1: its kernels span 12.30 ms per token under Nsight
+  against TileInfer's 12.12 ms; the rest of the difference is the time
+  between them.
+
 ## Phase 2 rerun after S2c (2026-10-26, locked clocks)
 
 The same harness with TileInfer S2c (`7a38e10`), SM clock locked at
@@ -355,8 +384,9 @@ The tokenizer is checked separately (llama.cpp's GGUF tokenizer vs HF
 
 ### Still open
 
-- Why llama.cpp reaches a lower share of DRAM bandwidth than TileInfer at
-  context 1 (its mat-vec kernel versus TileInfer's GEMV).
+- Resolved in the S6 rerun above: llama.cpp's lower share of DRAM
+  bandwidth at context 1 is time between its kernels (the logits copy), not
+  its mat-vec kernel.
 - Backend (GPU) sampling in llama.cpp as a third sampling variant. The host
   path costs 0.21 ms, so the effect is bounded by that.
 - Whether the constant 0.27 to 0.35 top-logit offset is float32 activations

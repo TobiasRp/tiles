@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 440" width="760" height="440" role="img" aria-label="Decode latency against context on the RTX 3050">
+<title>Decode latency against context on the RTX 3050</title>
+<rect width="100%" height="100%" fill="#fcfcfb"/>
+<text x="24.0" y="32.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="17" fill="#0b0b0b" text-anchor="start" font-weight="600">Decode latency against context on the RTX 3050</text>
+<text x="24.0" y="54.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#52514e" text-anchor="start" font-weight="400">Llama 3.2 1B, BF16 weights, batch 1, ms per token with logits ready; labels on TileInfer give floor ÷ time</text>
+<line x1="56" x2="590" y1="355.0" y2="355.0" stroke="#e6e5e1" stroke-width="1"/>
+<text x="48.0" y="359.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">12.5</text>
+<line x1="56" x2="590" y1="281.7" y2="281.7" stroke="#e6e5e1" stroke-width="1"/>
+<text x="48.0" y="285.7" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">15</text>
+<line x1="56" x2="590" y1="208.4" y2="208.4" stroke="#e6e5e1" stroke-width="1"/>
+<text x="48.0" y="212.4" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">17.5</text>
+<line x1="56" x2="590" y1="135.1" y2="135.1" stroke="#e6e5e1" stroke-width="1"/>
+<text x="48.0" y="139.1" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">20</text>
+<text x="48.0" y="70.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="end" font-weight="400">ms</text>
+<text x="56.1" y="408.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">1</text>
+<text x="89.4" y="408.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">256</text>
+<text x="189.5" y="408.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">1,024</text>
+<text x="323.0" y="408.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">2,048</text>
+<text x="590.0" y="408.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">4,096</text>
+<text x="323.0" y="428.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">context length (tokens in the K/V cache, including the new one)</text>
+<polyline points="56.1,381.2 89.4,380.1 189.5,376.6 323.0,372.0 590.0,362.7" fill="none" stroke="#c9c8c2" stroke-width="2" stroke-dasharray="2 4"/>
+<polyline points="56.1,365.9 89.4,363.7 189.5,358.4 323.0,352.7 590.0,340.8" fill="none" stroke="#2a78d6" stroke-width="3" stroke-linejoin="round"/>
+<circle cx="56.1" cy="365.9" r="3.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"><title>TileInfer, context 1: 12.129 ms (96% of the floor)</title></circle>
+<circle cx="89.4" cy="363.7" r="3.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"><title>TileInfer, context 256: 12.204 ms (95% of the floor)</title></circle>
+<circle cx="189.5" cy="358.4" r="3.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"><title>TileInfer, context 1,024: 12.383 ms (95% of the floor)</title></circle>
+<circle cx="323.0" cy="352.7" r="3.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"><title>TileInfer, context 2,048: 12.579 ms (95% of the floor)</title></circle>
+<circle cx="590.0" cy="340.8" r="3.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="1.5"><title>TileInfer, context 4,096: 12.985 ms (94% of the floor)</title></circle>
+<polyline points="56.1,320.4 89.4,320.4 189.5,316.3 323.0,311.2 590.0,301.6" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="56.1" cy="320.4" r="3.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"><title>llama.cpp, f16 K/V, context 1: 13.681 ms (85% of the floor)</title></circle>
+<circle cx="89.4" cy="320.4" r="3.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"><title>llama.cpp, f16 K/V, context 256: 13.681 ms (85% of the floor)</title></circle>
+<circle cx="189.5" cy="316.3" r="3.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"><title>llama.cpp, f16 K/V, context 1,024: 13.820 ms (85% of the floor)</title></circle>
+<circle cx="323.0" cy="311.2" r="3.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"><title>llama.cpp, f16 K/V, context 2,048: 13.996 ms (85% of the floor)</title></circle>
+<circle cx="590.0" cy="301.6" r="3.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"><title>llama.cpp, f16 K/V, context 4,096: 14.323 ms (85% of the floor)</title></circle>
+<polyline points="56.1,318.7 89.4,318.7 189.5,307.6 323.0,291.5 590.0,262.2" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-dasharray="5 4"/>
+<circle cx="56.1" cy="318.7" r="3.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"><title>llama.cpp, BF16 K/V, context 1: 13.738 ms (84% of the floor)</title></circle>
+<circle cx="89.4" cy="318.7" r="3.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"><title>llama.cpp, BF16 K/V, context 256: 13.740 ms (85% of the floor)</title></circle>
+<circle cx="189.5" cy="307.6" r="3.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"><title>llama.cpp, BF16 K/V, context 1,024: 14.117 ms (83% of the floor)</title></circle>
+<circle cx="323.0" cy="291.5" r="3.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"><title>llama.cpp, BF16 K/V, context 2,048: 14.667 ms (81% of the floor)</title></circle>
+<circle cx="590.0" cy="262.2" r="3.5" fill="#eb6834" stroke="#fcfcfb" stroke-width="1.5"><title>llama.cpp, BF16 K/V, context 4,096: 15.666 ms (78% of the floor)</title></circle>
+<polyline points="56.1,345.0 89.4,329.5 189.5,292.3 323.0,245.7 590.0,125.3" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="56.1" cy="345.0" r="3.5" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch graph, context 1: 12.843 ms (90% of the floor)</title></circle>
+<circle cx="89.4" cy="329.5" r="3.5" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch graph, context 256: 13.370 ms (87% of the floor)</title></circle>
+<circle cx="189.5" cy="292.3" r="3.5" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch graph, context 1,024: 14.640 ms (80% of the floor)</title></circle>
+<circle cx="323.0" cy="245.7" r="3.5" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch graph, context 2,048: 16.229 ms (73% of the floor)</title></circle>
+<circle cx="590.0" cy="125.3" r="3.5" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch graph, context 4,096: 20.335 ms (60% of the floor)</title></circle>
+<polyline points="56.1,342.8 89.4,327.5 189.5,282.4 323.0,224.7 590.0,103.7" fill="none" stroke="#1baf7a" stroke-width="2" stroke-linejoin="round" stroke-dasharray="5 4"/>
+<circle cx="56.1" cy="342.8" r="3.5" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch graph, SDPA, context 1: 12.917 ms (90% of the floor)</title></circle>
+<circle cx="89.4" cy="327.5" r="3.5" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch graph, SDPA, context 256: 13.437 ms (87% of the floor)</title></circle>
+<circle cx="189.5" cy="282.4" r="3.5" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch graph, SDPA, context 1,024: 14.977 ms (79% of the floor)</title></circle>
+<circle cx="323.0" cy="224.7" r="3.5" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch graph, SDPA, context 2,048: 16.945 ms (70% of the floor)</title></circle>
+<circle cx="590.0" cy="103.7" r="3.5" fill="#1baf7a" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch graph, SDPA, context 4,096: 21.072 ms (58% of the floor)</title></circle>
+<polyline points="56.1,312.3 89.4,288.5 189.5,257.7 323.0,211.3 590.0,91.7" fill="none" stroke="#eda100" stroke-width="2" stroke-linejoin="round"/>
+<circle cx="56.1" cy="312.3" r="3.5" fill="#eda100" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch eager, context 1: 13.956 ms (83% of the floor)</title></circle>
+<circle cx="89.4" cy="288.5" r="3.5" fill="#eda100" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch eager, context 256: 14.769 ms (79% of the floor)</title></circle>
+<circle cx="189.5" cy="257.7" r="3.5" fill="#eda100" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch eager, context 1,024: 15.819 ms (74% of the floor)</title></circle>
+<circle cx="323.0" cy="211.3" r="3.5" fill="#eda100" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch eager, context 2,048: 17.402 ms (69% of the floor)</title></circle>
+<circle cx="590.0" cy="91.7" r="3.5" fill="#eda100" stroke="#fcfcfb" stroke-width="1.5"><title>PyTorch eager, context 4,096: 21.480 ms (57% of the floor)</title></circle>
+<text x="60.1" y="383.9" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#2a78d6" text-anchor="start" font-weight="600">96%</text>
+<text x="189.5" y="376.4" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#2a78d6" text-anchor="middle" font-weight="600">95%</text>
+<text x="323.0" y="370.7" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#2a78d6" text-anchor="middle" font-weight="600">95%</text>
+<text x="590.0" y="358.8" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#2a78d6" text-anchor="middle" font-weight="600">94%</text>
+<text x="600.0" y="95.7" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">PyTorch eager 21.48</text>
+<text x="600.0" y="110.7" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">PyTorch graph, SDPA 21.07</text>
+<text x="600.0" y="129.3" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">PyTorch graph 20.34</text>
+<text x="600.0" y="266.2" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">llama.cpp, BF16 K/V 15.67</text>
+<text x="600.0" y="305.6" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">llama.cpp, f16 K/V 14.32</text>
+<text x="600.0" y="344.8" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">TileInfer 12.98</text>
+<text x="600.0" y="366.7" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="400">floor at 213 GB/s</text>
+</svg>

@@ -1,0 +1,236 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 612" width="760" height="612" role="img" aria-label="How one layer becomes tiles">
+<title>How one layer becomes tiles</title>
+<rect width="100%" height="100%" fill="#fcfcfb"/>
+<text x="24.0" y="32.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="17" fill="#0b0b0b" text-anchor="start" font-weight="600">How one layer becomes tiles</text>
+<text x="24.0" y="54.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#52514e" text-anchor="start" font-weight="400">Layer 8; each bar is one wave&#x27;s output, cut into one task per worker (shades alternate per task, numbers are workers)</text>
+<text x="24.0" y="96.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="600">QKV: 20 tasks of 153 or 154 rows, 0.6 MB of weights each</text>
+<text x="24.0" y="111.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="start" font-weight="400">[Q; K; V] rows, 3,072 × 2,048; RMSNorm(x) recomputed in every task</text>
+<rect x="24.0" y="118" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 12: rows 0–153</title></rect>
+<text x="41.7" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">12</text>
+<rect x="59.5" y="118" width="35.1" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 0: rows 153–307</title></rect>
+<text x="77.3" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">0</text>
+<rect x="95.2" y="118" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 13: rows 307–460</title></rect>
+<text x="112.9" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">13</text>
+<rect x="130.6" y="118" width="35.1" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 1: rows 460–614</title></rect>
+<text x="148.5" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">1</text>
+<rect x="166.3" y="118" width="35.1" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 2: rows 614–768</title></rect>
+<text x="184.2" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">2</text>
+<rect x="202.0" y="118" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 14: rows 768–921</title></rect>
+<text x="219.7" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">14</text>
+<rect x="237.5" y="118" width="35.1" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 3: rows 921–1075</title></rect>
+<text x="255.3" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">3</text>
+<rect x="273.2" y="118" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 15: rows 1075–1228</title></rect>
+<text x="290.9" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">15</text>
+<rect x="308.6" y="118" width="35.1" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 4: rows 1228–1382</title></rect>
+<text x="326.5" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">4</text>
+<rect x="344.3" y="118" width="35.1" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 5: rows 1382–1536</title></rect>
+<text x="362.2" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">5</text>
+<rect x="380.0" y="118" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 16: rows 1536–1689</title></rect>
+<text x="397.7" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">16</text>
+<rect x="415.5" y="118" width="35.1" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 6: rows 1689–1843</title></rect>
+<text x="433.3" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">6</text>
+<rect x="451.2" y="118" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 17: rows 1843–1996</title></rect>
+<text x="468.9" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">17</text>
+<rect x="486.6" y="118" width="35.1" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 7: rows 1996–2150</title></rect>
+<text x="504.5" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">7</text>
+<rect x="522.3" y="118" width="35.1" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 8: rows 2150–2304</title></rect>
+<text x="540.2" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">8</text>
+<rect x="558.0" y="118" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 18: rows 2304–2457</title></rect>
+<text x="575.7" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">18</text>
+<rect x="593.5" y="118" width="35.1" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 9: rows 2457–2611</title></rect>
+<text x="611.3" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">9</text>
+<rect x="629.2" y="118" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 19: rows 2611–2764</title></rect>
+<text x="646.9" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">19</text>
+<rect x="664.6" y="118" width="35.1" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 10: rows 2764–2918</title></rect>
+<text x="682.5" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">10</text>
+<rect x="700.3" y="118" width="35.1" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 11: rows 2918–3072</title></rect>
+<text x="718.2" y="133.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">11</text>
+<text x="24.0" y="170.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="600">Wo: 20 tasks of 102 or 103 rows, 0.4 MB of weights each</text>
+<text x="24.0" y="185.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="start" font-weight="400">Wo rows, 2,048 × 2,048; plus the residual add</text>
+<rect x="24.0" y="192" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 8: rows 0–102</title></rect>
+<text x="41.7" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">8</text>
+<rect x="59.5" y="192" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 9: rows 102–204</title></rect>
+<text x="77.2" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">9</text>
+<rect x="94.9" y="192" width="35.2" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 0: rows 204–307</title></rect>
+<text x="112.8" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">0</text>
+<rect x="130.7" y="192" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 10: rows 307–409</title></rect>
+<text x="148.5" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">10</text>
+<rect x="166.2" y="192" width="35.2" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 1: rows 409–512</title></rect>
+<text x="184.1" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">1</text>
+<rect x="202.0" y="192" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 11: rows 512–614</title></rect>
+<text x="219.7" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">11</text>
+<rect x="237.5" y="192" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 12: rows 614–716</title></rect>
+<text x="255.2" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">12</text>
+<rect x="272.9" y="192" width="35.2" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 2: rows 716–819</title></rect>
+<text x="290.8" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">2</text>
+<rect x="308.7" y="192" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 13: rows 819–921</title></rect>
+<text x="326.5" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">13</text>
+<rect x="344.2" y="192" width="35.2" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 3: rows 921–1024</title></rect>
+<text x="362.1" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">3</text>
+<rect x="380.0" y="192" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 14: rows 1024–1126</title></rect>
+<text x="397.7" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">14</text>
+<rect x="415.5" y="192" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 15: rows 1126–1228</title></rect>
+<text x="433.2" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">15</text>
+<rect x="450.9" y="192" width="35.2" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 4: rows 1228–1331</title></rect>
+<text x="468.8" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">4</text>
+<rect x="486.7" y="192" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 16: rows 1331–1433</title></rect>
+<text x="504.5" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">16</text>
+<rect x="522.2" y="192" width="35.2" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 5: rows 1433–1536</title></rect>
+<text x="540.1" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">5</text>
+<rect x="558.0" y="192" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 17: rows 1536–1638</title></rect>
+<text x="575.7" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">17</text>
+<rect x="593.5" y="192" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 18: rows 1638–1740</title></rect>
+<text x="611.2" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">18</text>
+<rect x="628.9" y="192" width="35.2" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 6: rows 1740–1843</title></rect>
+<text x="646.8" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">6</text>
+<rect x="664.7" y="192" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 19: rows 1843–1945</title></rect>
+<text x="682.5" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">19</text>
+<rect x="700.2" y="192" width="35.2" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 7: rows 1945–2048</title></rect>
+<text x="718.1" y="207.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">7</text>
+<text x="24.0" y="244.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="600">FFN: 20 tasks of 409 or 410 rows, 5.0 MB of weights each</text>
+<text x="24.0" y="259.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="start" font-weight="400">gate/up rows and Wdown columns, 8,192 of them; SiLU(gate)·up, then an FP32 down partial over all 2,048 outputs</text>
+<rect x="24.0" y="266" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 12: rows 0–409</title></rect>
+<text x="41.8" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">12</text>
+<rect x="59.5" y="266" width="35.0" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 0: rows 409–819</title></rect>
+<text x="77.4" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">0</text>
+<rect x="95.2" y="266" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 13: rows 819–1228</title></rect>
+<text x="113.0" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">13</text>
+<rect x="130.7" y="266" width="35.0" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 1: rows 1228–1638</title></rect>
+<text x="148.5" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">1</text>
+<rect x="166.4" y="266" width="35.0" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 2: rows 1638–2048</title></rect>
+<text x="184.2" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">2</text>
+<rect x="202.0" y="266" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 14: rows 2048–2457</title></rect>
+<text x="219.8" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">14</text>
+<rect x="237.5" y="266" width="35.0" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 3: rows 2457–2867</title></rect>
+<text x="255.4" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">3</text>
+<rect x="273.2" y="266" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 15: rows 2867–3276</title></rect>
+<text x="291.0" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">15</text>
+<rect x="308.7" y="266" width="35.0" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 4: rows 3276–3686</title></rect>
+<text x="326.5" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">4</text>
+<rect x="344.4" y="266" width="35.0" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 5: rows 3686–4096</title></rect>
+<text x="362.2" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">5</text>
+<rect x="380.0" y="266" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 16: rows 4096–4505</title></rect>
+<text x="397.8" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">16</text>
+<rect x="415.5" y="266" width="35.0" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 6: rows 4505–4915</title></rect>
+<text x="433.4" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">6</text>
+<rect x="451.2" y="266" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 17: rows 4915–5324</title></rect>
+<text x="469.0" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">17</text>
+<rect x="486.7" y="266" width="35.0" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 7: rows 5324–5734</title></rect>
+<text x="504.5" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">7</text>
+<rect x="522.4" y="266" width="35.0" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 8: rows 5734–6144</title></rect>
+<text x="540.2" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">8</text>
+<rect x="558.0" y="266" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 18: rows 6144–6553</title></rect>
+<text x="575.8" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">18</text>
+<rect x="593.5" y="266" width="35.0" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 9: rows 6553–6963</title></rect>
+<text x="611.4" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">9</text>
+<rect x="629.2" y="266" width="34.9" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 19: rows 6963–7372</title></rect>
+<text x="647.0" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">19</text>
+<rect x="664.7" y="266" width="35.0" height="22" fill="#2a78d6" fill-opacity="0.9"><title>worker 10: rows 7372–7782</title></rect>
+<text x="682.5" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">10</text>
+<rect x="700.4" y="266" width="35.0" height="22" fill="#2a78d6" fill-opacity="0.55"><title>worker 11: rows 7782–8192</title></rect>
+<text x="718.2" y="281.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">11</text>
+<text x="24.0" y="318.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="600">FFN reduce: 20 tasks of 102 or 103 rows</text>
+<text x="24.0" y="333.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="start" font-weight="400">output rows, 2,048; sum of the 20 partials in a fixed order, + residual</text>
+<rect x="24.0" y="340" width="34.9" height="22" fill="#1baf7a" fill-opacity="0.9"><title>worker 8: rows 0–102</title></rect>
+<text x="41.7" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">8</text>
+<rect x="59.5" y="340" width="34.9" height="22" fill="#1baf7a" fill-opacity="0.55"><title>worker 9: rows 102–204</title></rect>
+<text x="77.2" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">9</text>
+<rect x="94.9" y="340" width="35.2" height="22" fill="#1baf7a" fill-opacity="0.9"><title>worker 0: rows 204–307</title></rect>
+<text x="112.8" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">0</text>
+<rect x="130.7" y="340" width="34.9" height="22" fill="#1baf7a" fill-opacity="0.9"><title>worker 10: rows 307–409</title></rect>
+<text x="148.5" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">10</text>
+<rect x="166.2" y="340" width="35.2" height="22" fill="#1baf7a" fill-opacity="0.55"><title>worker 1: rows 409–512</title></rect>
+<text x="184.1" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">1</text>
+<rect x="202.0" y="340" width="34.9" height="22" fill="#1baf7a" fill-opacity="0.55"><title>worker 11: rows 512–614</title></rect>
+<text x="219.7" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">11</text>
+<rect x="237.5" y="340" width="34.9" height="22" fill="#1baf7a" fill-opacity="0.9"><title>worker 12: rows 614–716</title></rect>
+<text x="255.2" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">12</text>
+<rect x="272.9" y="340" width="35.2" height="22" fill="#1baf7a" fill-opacity="0.9"><title>worker 2: rows 716–819</title></rect>
+<text x="290.8" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">2</text>
+<rect x="308.7" y="340" width="34.9" height="22" fill="#1baf7a" fill-opacity="0.55"><title>worker 13: rows 819–921</title></rect>
+<text x="326.5" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">13</text>
+<rect x="344.2" y="340" width="35.2" height="22" fill="#1baf7a" fill-opacity="0.55"><title>worker 3: rows 921–1024</title></rect>
+<text x="362.1" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">3</text>
+<rect x="380.0" y="340" width="34.9" height="22" fill="#1baf7a" fill-opacity="0.9"><title>worker 14: rows 1024–1126</title></rect>
+<text x="397.7" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">14</text>
+<rect x="415.5" y="340" width="34.9" height="22" fill="#1baf7a" fill-opacity="0.55"><title>worker 15: rows 1126–1228</title></rect>
+<text x="433.2" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">15</text>
+<rect x="450.9" y="340" width="35.2" height="22" fill="#1baf7a" fill-opacity="0.9"><title>worker 4: rows 1228–1331</title></rect>
+<text x="468.8" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">4</text>
+<rect x="486.7" y="340" width="34.9" height="22" fill="#1baf7a" fill-opacity="0.9"><title>worker 16: rows 1331–1433</title></rect>
+<text x="504.5" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">16</text>
+<rect x="522.2" y="340" width="35.2" height="22" fill="#1baf7a" fill-opacity="0.55"><title>worker 5: rows 1433–1536</title></rect>
+<text x="540.1" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">5</text>
+<rect x="558.0" y="340" width="34.9" height="22" fill="#1baf7a" fill-opacity="0.55"><title>worker 17: rows 1536–1638</title></rect>
+<text x="575.7" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">17</text>
+<rect x="593.5" y="340" width="34.9" height="22" fill="#1baf7a" fill-opacity="0.9"><title>worker 18: rows 1638–1740</title></rect>
+<text x="611.2" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">18</text>
+<rect x="628.9" y="340" width="35.2" height="22" fill="#1baf7a" fill-opacity="0.9"><title>worker 6: rows 1740–1843</title></rect>
+<text x="646.8" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">6</text>
+<rect x="664.7" y="340" width="34.9" height="22" fill="#1baf7a" fill-opacity="0.55"><title>worker 19: rows 1843–1945</title></rect>
+<text x="682.5" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">19</text>
+<rect x="700.2" y="340" width="35.2" height="22" fill="#1baf7a" fill-opacity="0.55"><title>worker 7: rows 1945–2048</title></rect>
+<text x="718.1" y="355.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="9.5" fill="#fcfcfb" text-anchor="middle" font-weight="400">7</text>
+<text x="24.0" y="412.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12" fill="#0b0b0b" text-anchor="start" font-weight="600">Attention: one task per K/V head (4 query heads each) and context chunk</text>
+<text x="24.0" y="427.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="start" font-weight="400">Each task rotates its Q and K rows (RoPE) and the chunk-0 task writes the K cache row; V is written by QKV</text>
+<text x="24.0" y="450.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">context ≤ 384: 8 fused tasks, barrier skipped</text>
+<rect x="24.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 0, chunk 0: worker 0</title></rect>
+<text x="41.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">0</text>
+<rect x="62.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 1, chunk 0: worker 2</title></rect>
+<text x="79.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">2</text>
+<rect x="100.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 2, chunk 0: worker 4</title></rect>
+<text x="117.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">4</text>
+<rect x="138.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 3, chunk 0: worker 6</title></rect>
+<text x="155.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">6</text>
+<rect x="176.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 4, chunk 0: worker 8</title></rect>
+<text x="193.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">8</text>
+<rect x="214.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 5, chunk 0: worker 10</title></rect>
+<text x="231.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">10</text>
+<rect x="252.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 6, chunk 0: worker 12</title></rect>
+<text x="269.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">12</text>
+<rect x="290.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 7, chunk 0: worker 14</title></rect>
+<text x="307.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">14</text>
+<rect x="24.0" y="500" width="34" height="34" rx="3" fill="#e6e5e1" fill-opacity="1"><title>K/V head 0, chunk 1: worker 1 (idle at this length)</title></rect>
+<rect x="62.0" y="500" width="34" height="34" rx="3" fill="#e6e5e1" fill-opacity="1"><title>K/V head 1, chunk 1: worker 3 (idle at this length)</title></rect>
+<rect x="100.0" y="500" width="34" height="34" rx="3" fill="#e6e5e1" fill-opacity="1"><title>K/V head 2, chunk 1: worker 5 (idle at this length)</title></rect>
+<rect x="138.0" y="500" width="34" height="34" rx="3" fill="#e6e5e1" fill-opacity="1"><title>K/V head 3, chunk 1: worker 7 (idle at this length)</title></rect>
+<rect x="176.0" y="500" width="34" height="34" rx="3" fill="#e6e5e1" fill-opacity="1"><title>K/V head 4, chunk 1: worker 9 (idle at this length)</title></rect>
+<rect x="214.0" y="500" width="34" height="34" rx="3" fill="#e6e5e1" fill-opacity="1"><title>K/V head 5, chunk 1: worker 11 (idle at this length)</title></rect>
+<rect x="252.0" y="500" width="34" height="34" rx="3" fill="#e6e5e1" fill-opacity="1"><title>K/V head 6, chunk 1: worker 13 (idle at this length)</title></rect>
+<rect x="290.0" y="500" width="34" height="34" rx="3" fill="#e6e5e1" fill-opacity="1"><title>K/V head 7, chunk 1: worker 15 (idle at this length)</title></rect>
+<text x="24.0" y="552.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="start" font-weight="400">rows: chunks of ≤ 384 steps; columns: K/V heads; numbers are workers</text>
+<text x="392.0" y="450.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">context &gt; 384: 16 tasks, scores → barrier → values</text>
+<rect x="392.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 0, chunk 0: worker 0</title></rect>
+<text x="409.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">0</text>
+<rect x="430.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 1, chunk 0: worker 2</title></rect>
+<text x="447.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">2</text>
+<rect x="468.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 2, chunk 0: worker 4</title></rect>
+<text x="485.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">4</text>
+<rect x="506.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 3, chunk 0: worker 6</title></rect>
+<text x="523.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">6</text>
+<rect x="544.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 4, chunk 0: worker 8</title></rect>
+<text x="561.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">8</text>
+<rect x="582.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 5, chunk 0: worker 10</title></rect>
+<text x="599.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">10</text>
+<rect x="620.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 6, chunk 0: worker 12</title></rect>
+<text x="637.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">12</text>
+<rect x="658.0" y="462" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 7, chunk 0: worker 14</title></rect>
+<text x="675.0" y="483.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">14</text>
+<rect x="392.0" y="500" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 0, chunk 1: worker 1</title></rect>
+<text x="409.0" y="521.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">1</text>
+<rect x="430.0" y="500" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 1, chunk 1: worker 3</title></rect>
+<text x="447.0" y="521.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">3</text>
+<rect x="468.0" y="500" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 2, chunk 1: worker 5</title></rect>
+<text x="485.0" y="521.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">5</text>
+<rect x="506.0" y="500" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 3, chunk 1: worker 7</title></rect>
+<text x="523.0" y="521.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">7</text>
+<rect x="544.0" y="500" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 4, chunk 1: worker 9</title></rect>
+<text x="561.0" y="521.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">9</text>
+<rect x="582.0" y="500" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 5, chunk 1: worker 11</title></rect>
+<text x="599.0" y="521.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">11</text>
+<rect x="620.0" y="500" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 6, chunk 1: worker 13</title></rect>
+<text x="637.0" y="521.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">13</text>
+<rect x="658.0" y="500" width="34" height="34" rx="3" fill="#eb6834" fill-opacity="0.85"><title>K/V head 7, chunk 1: worker 15</title></rect>
+<text x="675.0" y="521.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10" fill="#fcfcfb" text-anchor="middle" font-weight="400">15</text>
+<text x="392.0" y="552.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="start" font-weight="400">rows: chunks of ≤ 2,048 steps; columns: K/V heads; numbers are workers</text>
+</svg>

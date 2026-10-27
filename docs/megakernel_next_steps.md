@@ -126,7 +126,17 @@ caused ([Section 19](#19-s5-results)). S6 remains.
 showcase compares only the final version with llama.cpp, PyTorch eager and
 CUDA Graph replay, adds a complete one-token timeline and illustrations of
 the static tile schedule, and drops the per-milestone ablation table and the
-synthetic size sweep ([S6](#s6--showcase-package)).
+synthetic size sweep ([S6](#s6--showcase-package--done)).
+
+**Progress, 2026-10-27: S6 is done.** `experiments/showcase/showcase.py run`
+goes from the checkpoint to a report in 33 minutes; the final run used
+locked clocks at `c95bc03`, with Compute Sanitizer passing at the same
+commit. TileInfer takes **12.13 ms per token at context 1 and 12.99 ms at
+4K**, 96% and 94% of the streaming floor: 5.6% and 36% faster than CUDA
+Graph replay (0.71 and 7.35 ms), and 11% and 9% faster than llama.cpp with
+f16 K/V (1.55 and 1.34 ms). In 64-token generation TileInfer makes 82.3
+tokens per second, graph replay 76.4, llama.cpp 71.8
+([Section 20](#20-s6-results)).
 
 The goal is a prototype that **shows what a tile-based megakernel can do**.
 Running correctly in one launch is already done. The prototype should show a
@@ -816,9 +826,9 @@ built (S3 found that weights prefetched before a barrier hide nothing).
   token, and S2's argmax kernel takes 15 µs), but it completes the "single
   megakernel" story. Do it after S2–S4.
 
-### S6 — Showcase package
+### S6 — Showcase package — done
 
-Re-planned on 2026-10-27. The story is the final TileInfer against PyTorch
+Results are in [Section 20](#20-s6-results). Re-planned on 2026-10-27. The story is the final TileInfer against PyTorch
 and llama.cpp, how tile-based static scheduling produces it, and which
 choices are specific to the RTX 3050. The per-milestone ablation table and
 the synthetic size sweep are dropped: the milestone sections and the blog
@@ -2406,3 +2416,120 @@ the plan expected: a small effect that completes the single-kernel story.
 - A generation followed by another request now waits on the host for the
   generation's end position; queuing work after a generation without that
   wait would need the position on the device.
+
+## 20. S6 results
+
+Measured on `tux`, 2026-10-27, at `c95bc03` with
+`experiments/showcase/showcase.py run --out runs/s6-2026-10-27`. SM clock
+locked at 1,950 MHz (1,927 to 1,950 in the telemetry) and memory at
+6,801 MHz, persistence mode on. Compute Sanitizer passed at the same commit
+(`showcase.py sanitize`); CTest and the calibrated checkpoint tolerances
+passed in the run, with greedy selection matching the reference at 26 of 27
+steps (the known step-15 near-tie, reference top-two margin 0.125). Report,
+raw sessions, traces and figures are in `runs/s6-2026-10-27/` on tux; the
+figures are also in `docs/blog/figures/s6-*.svg`.
+
+### The command
+
+- **Steps** (each skipped when the hashes of its inputs match a finished
+  earlier run): build, probe the compiled worker, import and verify the 4K
+  package, checkpoint tolerances, CTest, GGUF and teacher-forced llama.cpp
+  parity, streaming roofline and row-dot probe, four controlled decode
+  sessions, generation, the timeline trace, Nsight kernel traces, figures and
+  `report.md`. Sanitizer runs separately; the report states whether its last
+  pass covers the measured worker.
+- **llama.cpp in the S6a protocol.** `rt_probe serve` keeps one model and one
+  context per K/V type resident and answers fixed-position requests like
+  `tile_runtime_test --benchmark-serve`, so `controlled_decode.py` can
+  interleave it with TileInfer. Three models do not fit 8 GB, so TileInfer
+  is paired with PyTorch (eager, graph, SDPA graph) in one session and with
+  llama.cpp (flash attention, f16 and BF16 K/V) in another, each in both
+  spawn orders.
+- **Run time:** 33 minutes from an empty directory, plus the separate
+  Sanitizer pass.
+
+### Decode, ms per token
+
+Fixed context, logits ready, medians over both spawn orders; percentages
+are floor ÷ time, the floor being weight and K/V bytes at 212.9 GB/s:
+
+| Context | Floor | TileInfer | llama.cpp f16 K/V | llama.cpp BF16 K/V | PyTorch graph | PyTorch graph, SDPA | PyTorch eager |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 11.61 | **12.129** (96%) | 13.681 (85%) | 13.738 (84%) | 12.843 (90%) | 12.917 (90%) | 13.956 (83%) |
+| 256 | 11.65 | **12.204** (95%) | 13.681 (85%) | 13.740 (85%) | 13.370 (87%) | 13.437 (87%) | 14.769 (79%) |
+| 1,024 | 11.76 | **12.383** (95%) | 13.820 (85%) | 14.117 (83%) | 14.640 (80%) | 14.977 (79%) | 15.819 (74%) |
+| 2,048 | 11.92 | **12.579** (95%) | 13.996 (85%) | 14.667 (81%) | 16.229 (73%) | 16.945 (70%) | 17.402 (69%) |
+| 4,096 | 12.24 | **12.985** (94%) | 14.323 (85%) | 15.666 (78%) | 20.335 (60%) | 21.072 (58%) | 21.480 (57%) |
+
+Every paired difference against TileInfer has a 95% half-width of 3 to
+12 µs. TileInfer repeats the S4 and S5 numbers within 15 µs and graph
+replay the S6a session within 0.05 ms; the unlocked development run
+(`runs/s6-dev`) agrees within 0.03 ms in every cell.
+
+- **Graph replay** loses 0.71 ms at context 1 and 7.35 ms at 4K. Its kernels
+  leave only 40 µs idle per token (Nsight), so the loss is inside the
+  kernels: GEMV shapes below the roofline and eager attention, whose cost
+  grows with context.
+- **llama.cpp** loses an almost constant 1.3 to 1.6 ms with f16 K/V. Its
+  213 kernels per token leave a few µs idle, but 1.8 ms pass between the last
+  kernel of one token and the first of the next. In that gap one
+  513,024-byte device-to-host copy, the full float32 logits, takes 1.19 ms;
+  the CUDA graph launch takes 0.2 ms of host time. TileInfer and PyTorch
+  leave the logits on the GPU in this table, so this row is not
+  like-for-like at the API boundary; the generation table below is. Why the
+  copy runs at 0.43 GB/s is not examined (a pageable host buffer is likely).
+- **SDPA does not help.** Inside the model PyTorch dispatches to CUTLASS
+  memory-efficient attention (284 µs per layer at 4K), which cannot take
+  grouped K/V, after expanding K and V to 32 heads (two 121 µs copies per
+  layer). That costs more than the eager path's `repeat_kv` and matmuls, so
+  the SDPA graph is 0.07 to 0.74 ms slower than graph replay. The stand-alone
+  SDPA call with `enable_gqa` takes 84 µs per layer at 4K, so a better
+  dispatch exists; it is not what Transformers 4.57 reaches here.
+
+### Generation, 64 tokens
+
+The `1, 2, 3,` prompt, greedy, selection included, two passes in opposite
+order:
+
+| Runtime | ms per token | tokens/s |
+| --- | ---: | ---: |
+| TileInfer | **12.156** | **82.3** |
+| PyTorch graph | 13.089 | 76.4 |
+| llama.cpp FA, f16 K/V | 13.922 | 71.8 |
+| llama.cpp FA, BF16 K/V | 13.961 | 71.6 |
+| PyTorch eager | 14.423 | 69.3 |
+
+All runtimes generate the same tokens; at every measured context TileInfer,
+PyTorch eager, SDPA and both llama.cpp configurations pick the same next
+token. llama.cpp's teacher-forced parity has no real mismatches (one exact
+BF16 tie), maximum top-logit error 0.21.
+
+### Where TileInfer's last 0.5 ms goes
+
+From the timeline trace (`timeline/timeline-report.json`):
+
+| Context | Traced | Ideal streaming | Above ideal | GEMV below roofline | Attention | Barrier latency | Small phases |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 12.125 ms | 11.607 ms | 518 µs | 322 µs | 93 µs | 100 µs | 4 µs |
+| 4,096 | 12.975 ms | 12.237 ms | 738 µs | 331 µs | 283 µs | 120 µs | 4 µs |
+
+QKV and Wo stream at 190 GB/s, the FFN and `lm_head` at 209 GB/s; QKV
+(85 µs), the FFN (106 µs) and Wo (51 µs) hold most of the GEMV excess. At 4K
+attention reaches 141 GB/s on the K/V cache.
+
+### Figures
+
+`s6-comparison` (decode against context), `s6-kernels-ctx1/4096` (one token
+of each runtime in Nsight), `s6-timeline-ctx1/4096` (the whole token on 20
+workers with layer 8 enlarged and the loss budget), and the static-schedule
+illustrations `s6-pipeline`, `s6-layer-tiles`, `s6-waves`,
+`s6-assignment-ctx1/4096`, `s6-token-loop`, `s6-rtx3050` and
+`s6-prior-art`. [The final post's outline](blog/tiles-showcase-2026-10-outline.md)
+assigns them to its sections.
+
+### Open
+
+- The llama.cpp logits copy: whether a pinned buffer would remove most of
+  its gap, and whether llama.cpp's backend sampling avoids it.
+- A stronger PyTorch baseline: SDPA with a dispatch that keeps grouped K/V,
+  or `torch.compile`; both are separate numerical policies.

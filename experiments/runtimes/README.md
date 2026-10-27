@@ -40,6 +40,11 @@ sweep (TileInfer, PyTorch eager and graph, six llama.cpp configurations, two
 passes in opposite order). `rtbench report` accepts several records files and
 TileInfer reports and averages cells that repeat, so the passes can be merged.
 
+`rt_probe serve` keeps the model resident and answers fixed-position timing
+requests on standard input, one context per K/V type; the S6 showcase uses it
+to interleave llama.cpp with TileInfer under the controlled protocol
+([experiments/showcase](../showcase/README.md)).
+
 Every row records whether it includes sampling (`none`: logits ready;
 `greedy`: next token id known). The report keeps the two apart.
 

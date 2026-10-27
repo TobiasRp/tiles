@@ -8,6 +8,8 @@ SequenceContext, CUDA arithmetic, and
 synthetic full stack with float32 or BF16 weights/activations/KV, and the pinned Llama 3.2 1B
 checkpoint bridge are implemented.
 The MLP prototype is historical and its source/tests were removed.
+The S6 showcase command (`experiments/showcase/showcase.py`) reproduces the
+final comparison with PyTorch and llama.cpp and the blog figures.
 
 - Keep Python as the offline planner, fixture generator, baseline runner, and
   one-command orchestrator. Keep per-inference scheduling in the C++/CUDA

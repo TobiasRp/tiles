@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 316" width="760" height="316" role="img" aria-label="One layer as waves and barriers">
+<title>One layer as waves and barriers</title>
+<rect width="100%" height="100%" fill="#fcfcfb"/>
+<text x="24.0" y="32.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="17" fill="#0b0b0b" text-anchor="start" font-weight="600">One layer as waves and barriers</text>
+<text x="24.0" y="54.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#52514e" text-anchor="start" font-weight="400">A wave depends only on earlier waves and ends at a grid barrier; the plan fixes both</text>
+<defs><marker id="ah" markerUnits="userSpaceOnUse" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto"><path d="M0,0 L9,4.5 L0,9 z" fill="#52514e"/></marker></defs>
+<rect x="24.0" y="110.0" width="100.0" height="92.0" rx="6" fill="#e8f1fc" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="74.0" y="130.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">QKV</text>
+<text x="74.0" y="145.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">20 tasks</text>
+<text x="74.0" y="160.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">norm, [Q; K; V]</text>
+<text x="74.0" y="175.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">V → cache</text>
+<line x1="135.2" x2="135.2" y1="96" y2="216" stroke="#0b0b0b" stroke-width="2"/>
+<rect x="146.4" y="110.0" width="100.0" height="92.0" rx="6" fill="#fdeee7" stroke="#eb6834" stroke-width="1.5"/>
+<text x="196.4" y="130.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">scores</text>
+<text x="196.4" y="145.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">16 tasks</text>
+<text x="196.4" y="160.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">RoPE, K → cache</text>
+<text x="196.4" y="175.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">q·K, softmax</text>
+<line x1="257.6" x2="257.6" y1="96" y2="216" stroke="#0b0b0b" stroke-width="2" stroke-dasharray="4 3"/>
+<text x="257.6" y="234.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="middle" font-weight="400">skipped while context ≤ 384</text>
+<text x="257.6" y="248.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="middle" font-weight="400">(scores and values then fuse)</text>
+<rect x="268.8" y="110.0" width="100.0" height="92.0" rx="6" fill="#fdeee7" stroke="#eb6834" stroke-width="1.5"/>
+<text x="318.8" y="130.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">values</text>
+<text x="318.8" y="145.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">16 tasks</text>
+<text x="318.8" y="160.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">softmax · V</text>
+<text x="318.8" y="175.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">chunk partials</text>
+<line x1="380.0" x2="380.0" y1="96" y2="216" stroke="#0b0b0b" stroke-width="2"/>
+<rect x="391.2" y="110.0" width="100.0" height="92.0" rx="6" fill="#e8f1fc" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="441.2" y="130.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">Wo</text>
+<text x="441.2" y="145.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">20 tasks</text>
+<text x="441.2" y="160.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">merge, Wo rows</text>
+<text x="441.2" y="175.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">+ residual</text>
+<line x1="502.4" x2="502.4" y1="96" y2="216" stroke="#0b0b0b" stroke-width="2"/>
+<rect x="513.6" y="110.0" width="100.0" height="92.0" rx="6" fill="#e8f1fc" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="563.6" y="130.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">FFN</text>
+<text x="563.6" y="145.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">20 tasks</text>
+<text x="563.6" y="160.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">norm, gate/up</text>
+<text x="563.6" y="175.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">down partial</text>
+<line x1="624.8" x2="624.8" y1="96" y2="216" stroke="#0b0b0b" stroke-width="2"/>
+<rect x="636.0" y="110.0" width="100.0" height="92.0" rx="6" fill="#e8f1fc" stroke="#2a78d6" stroke-width="1.5"/>
+<text x="686.0" y="130.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#0b0b0b" text-anchor="middle" font-weight="600">FFN reduce</text>
+<text x="686.0" y="145.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">20 tasks</text>
+<text x="686.0" y="160.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">sum partials</text>
+<text x="686.0" y="175.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="middle" font-weight="400">+ residual</text>
+<text x="24.0" y="86.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="start" font-weight="400">black lines: grid barriers</text>
+<text x="24.0" y="280.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">A token is 99 waves: embedding, 16 × 6 layer waves, final norm and lm_head.</text>
+<text x="24.0" y="295.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">All 20 workers pass every barrier; a worker without a task in a wave waits there.</text>
+</svg>
