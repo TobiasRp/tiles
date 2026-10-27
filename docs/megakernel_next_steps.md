@@ -880,9 +880,10 @@ S5).
   `cp.async` without TMA or programmatic dependent launch; the 64-register
   budget and the S5 codegen lesson; and the display watchdog that limits a
   launch to 64 steps.
-- **Prior art box:** Hazy Research's "no bubbles" megakernel and Mirage
-  Persistent Kernel against this design, reusing the table in
-  [the post-1 outline](blog/decoding-in-tiles-2026-10-outline.md).
+- **Prior art box:** Hazy Research's "no bubbles" megakernel against this
+  design, reusing the table in
+  [the post-1 outline](blog/decoding-in-tiles-2026-10-outline.md); Mirage
+  Persistent Kernel is mentioned in the text only.
 - **Illustrations of tile-based static scheduling in this repository:**
   - the pipeline: checkpoint → `tileplan` (Python, offline) → package (plan,
     target, weights) → `tile_runtime` (C++/CUDA, one launch per 64 steps);

@@ -1,43 +1,35 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 364" width="760" height="364" role="img" aria-label="Megakernels for batch-1 decode: three designs">
-<title>Megakernels for batch-1 decode: three designs</title>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 364" width="760" height="364" role="img" aria-label="Megakernels for batch-1 decode: two designs">
+<title>Megakernels for batch-1 decode: two designs</title>
 <rect width="100%" height="100%" fill="#fcfcfb"/>
-<text x="24.0" y="32.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="17" fill="#0b0b0b" text-anchor="start" font-weight="600">Megakernels for batch-1 decode: three designs</text>
+<text x="24.0" y="32.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="17" fill="#0b0b0b" text-anchor="start" font-weight="600">Megakernels for batch-1 decode: two designs</text>
 <text x="24.0" y="54.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="12.5" fill="#52514e" text-anchor="start" font-weight="400">Same idea, one launch per forward pass; the bottleneck moves with the GPU</text>
 <text x="32.0" y="84.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600"></text>
-<text x="136.0" y="84.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600">Hazy Research, No Bubbles</text>
-<text x="336.0" y="84.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600">Mirage Persistent Kernel</text>
-<text x="512.0" y="84.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600">TileInfer (this repo)</text>
+<text x="152.0" y="84.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600">Hazy Research, No Bubbles</text>
+<text x="442.0" y="84.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600">TileInfer (this repo)</text>
 <rect x="24" y="95" width="712" height="30" fill="#e6e5e1" fill-opacity="0.45"/>
 <text x="32.0" y="114.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600">GPU</text>
-<text x="136.0" y="114.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">H100, B200</text>
-<text x="336.0" y="114.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">—</text>
-<text x="512.0" y="114.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">RTX 3050 8 GB (sm_86)</text>
+<text x="152.0" y="114.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">H100, B200</text>
+<text x="442.0" y="114.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">RTX 3050 8 GB (sm_86)</text>
 <text x="32.0" y="144.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600">Schedule</text>
-<text x="136.0" y="144.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">instruction sequence per SM</text>
-<text x="336.0" y="144.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">compiled from the model</text>
-<text x="512.0" y="144.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">offline Python plan, validated</text>
+<text x="152.0" y="144.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">instruction sequence per SM</text>
+<text x="442.0" y="144.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">offline Python plan, validated</text>
 <rect x="24" y="155" width="712" height="30" fill="#e6e5e1" fill-opacity="0.45"/>
 <text x="32.0" y="174.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600">Dependencies</text>
-<text x="136.0" y="174.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">counters in global memory</text>
-<text x="336.0" y="174.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">event-driven task graph</text>
-<text x="512.0" y="174.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">grid barriers between 99 waves</text>
+<text x="152.0" y="174.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">counters in global memory</text>
+<text x="442.0" y="174.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">grid barriers between 99 waves</text>
 <text x="32.0" y="204.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600">Overlap</text>
-<text x="136.0" y="204.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">pages: next weights load early</text>
-<text x="336.0" y="204.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">—</text>
-<text x="512.0" y="204.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">none; prefetch probed, not built</text>
+<text x="152.0" y="204.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">pages: next weights load early</text>
+<text x="442.0" y="204.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">none; prefetch probed, not built</text>
 <rect x="24" y="215" width="712" height="30" fill="#e6e5e1" fill-opacity="0.45"/>
 <text x="32.0" y="234.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600">Granularity</text>
-<text x="136.0" y="234.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">7 fused instruction kinds</text>
-<text x="336.0" y="234.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">—</text>
-<text x="512.0" y="234.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">1,852 row tiles, 9 opcodes</text>
+<text x="152.0" y="234.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">7 fused instruction kinds</text>
+<text x="442.0" y="234.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">1,852 row tiles, 9 opcodes</text>
 <text x="32.0" y="264.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600">Hardware</text>
-<text x="136.0" y="264.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">TMA, large shared memory</text>
-<text x="336.0" y="264.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">—</text>
-<text x="512.0" y="264.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">plain loads, 1 block × 1024 per SM</text>
+<text x="152.0" y="264.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">TMA, large shared memory</text>
+<text x="442.0" y="264.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">plain loads, 1 block × 1024 per SM</text>
 <rect x="24" y="275" width="712" height="30" fill="#e6e5e1" fill-opacity="0.45"/>
 <text x="32.0" y="294.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11.5" fill="#0b0b0b" text-anchor="start" font-weight="600">Bottleneck</text>
-<text x="136.0" y="294.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">µs overheads vs a 0.3–0.7 ms floor</text>
-<text x="336.0" y="294.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">—</text>
-<text x="512.0" y="294.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">DRAM rate through every barrier</text>
-<text x="24.0" y="334.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="start" font-weight="400">Hazy and Mirage cells summarize their public write-ups (— : not compared here); none of their numbers is measured here.</text>
+<text x="152.0" y="294.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#52514e" text-anchor="start" font-weight="400">µs overheads vs a 0.3–0.7 ms floor</text>
+<text x="442.0" y="294.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="11" fill="#0b0b0b" text-anchor="start" font-weight="400">DRAM rate through every barrier</text>
+<text x="24.0" y="334.0" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="10.5" fill="#52514e" text-anchor="start" font-weight="400">The Hazy Research column summarizes their public write-up; none of its numbers is measured here.</text>
 </svg>

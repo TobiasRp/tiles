@@ -28,7 +28,7 @@ from that run):
 | 7 | `s6-timeline-ctx1.svg`, `s6-timeline-ctx4096.svg` | the full token on 20 workers, the loss budget |
 | 8 | `s6-token-loop.svg` | 64 steps per launch, selection on the GPU |
 | 9 | `s6-rtx3050.svg` | the hardware constraints behind the design |
-| 10 | `s6-prior-art.svg` | Hazy Research and Mirage against this design |
+| 10 | `s6-prior-art.svg` | Hazy Research's megakernel against this design |
 | – | `s6-kernels-ctx4096.svg`, `s6-assignment-ctx1.svg` | backups for questions |
 
 ## 1. The result (Fig. 1, decode table)
@@ -117,6 +117,7 @@ from that run):
 - Hazy Research's "No Bubbles" megakernel
   (<https://hazyresearch.stanford.edu/blog/2025-05-27-no-bubbles>) and
   Mirage Persistent Kernel (<https://github.com/mirage-project/mirage>).
+  Fig. 10 compares with Hazy only; Mirage gets a sentence in the text.
 - Same idea, a different regime: on H100/B200 the floor is under a
   millisecond and microsecond overheads matter; on the 3050 it is 11.6 ms and
   the job is staying at DRAM rate through every barrier.
@@ -134,7 +135,7 @@ from that run):
 
 ## Facts to check before writing
 
-- Mirage: GPUs it targets and its dependency mechanism, from its paper or
-  README, before filling the empty cells of Fig. 10.
+- Mirage: what it targets and how it tracks dependencies, from its paper or
+  README, before describing it in the text (it is not in Fig. 10).
 - Hazy: the hardware-feature column of Fig. 10 against their post.
 - The speed of llama.cpp's logits copy (Section 2).

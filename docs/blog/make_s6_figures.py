@@ -1333,55 +1333,36 @@ def prior_art(run: Path, out: Path) -> None:
     opcodes = len({t["opcode"] for t in plan["tasks"]})
     waves = len(plan["waves"])
     rows = [
-        (
-            "",
-            "Hazy Research, No Bubbles",
-            "Mirage Persistent Kernel",
-            "TileInfer (this repo)",
-        ),
-        ("GPU", "H100, B200", "—", "RTX 3050 8 GB (sm_86)"),
-        (
-            "Schedule",
-            "instruction sequence per SM",
-            "compiled from the model",
-            "offline Python plan, validated",
-        ),
+        ("", "Hazy Research, No Bubbles", "TileInfer (this repo)"),
+        ("GPU", "H100, B200", "RTX 3050 8 GB (sm_86)"),
+        ("Schedule", "instruction sequence per SM", "offline Python plan, validated"),
         (
             "Dependencies",
             "counters in global memory",
-            "event-driven task graph",
             f"grid barriers between {waves} waves",
         ),
         (
             "Overlap",
             "pages: next weights load early",
-            "—",
             "none; prefetch probed, not built",
         ),
         (
             "Granularity",
             "7 fused instruction kinds",
-            "—",
             f"{len(plan['tasks']):,} row tiles, {opcodes} opcodes",
         ),
-        (
-            "Hardware",
-            "TMA, large shared memory",
-            "—",
-            "plain loads, 1 block × 1024 per SM",
-        ),
+        ("Hardware", "TMA, large shared memory", "plain loads, 1 block × 1024 per SM"),
         (
             "Bottleneck",
             "µs overheads vs a 0.3–0.7 ms floor",
-            "—",
             "DRAM rate through every barrier",
         ),
     ]
     left, top, row_height = 24, 84, 30
-    widths = [104, 200, 176, 232]
+    widths = [120, 290, 302]
     svg = Svg(
         top + len(rows) * row_height + 40,
-        "Megakernels for batch-1 decode: three designs",
+        "Megakernels for batch-1 decode: two designs",
         "Same idea, one launch per forward pass; the bottleneck moves with the GPU",
     )
     for r, cells in enumerate(rows):
@@ -1399,7 +1380,7 @@ def prior_art(run: Path, out: Path) -> None:
                     y,
                     cell,
                     size=11.5 if header else 11,
-                    color=TEXT if header or c == 3 else MUTED,
+                    color=TEXT if header or c == 2 else MUTED,
                     weight=600 if header else 400,
                 )
             )
@@ -1408,7 +1389,7 @@ def prior_art(run: Path, out: Path) -> None:
         svg.text(
             left,
             top + len(rows) * row_height + 10,
-            "Hazy and Mirage cells summarize their public write-ups (— : not compared here); none of their numbers is measured here.",
+            "The Hazy Research column summarizes their public write-up; none of its numbers is measured here.",
             size=10.5,
             color=MUTED,
         )
