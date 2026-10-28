@@ -99,6 +99,6 @@ uv run --locked --project tileplan python -m unittest discover -s tileplan/tests
 The [block](tests/fixtures/decoder_m1/README.md) and
 [stack](tests/fixtures/decoder_m4/README.md) fixtures cover incremental decoding
 against full-prefix recomputation. Package tests cover storage, dependencies,
-quantization, and reproducibility. See the [runtime checks](../tileinfer/README.md#checks)
+BF16 rounding and packing, and reproducibility. See the [runtime checks](../tileinfer/README.md#checks)
 for GPU and real-checkpoint validation, and [pyproject.toml](pyproject.toml) for
 developer dependencies and Ruff configuration.

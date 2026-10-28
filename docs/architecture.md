@@ -276,7 +276,7 @@ and continues from there.
 | Command | Purpose |
 | --- | --- |
 | `tile_runtime generate PACKAGE INPUTS.json --max-new-tokens N` | Greedy generation from token IDs. |
-| `tile_runtime bench PACKAGE INPUTS.json --new-tokens N` | Times the generation path with EOS disabled. |
+| `tile_runtime bench PACKAGE INPUTS.json --new-tokens N --warmup W --rounds R` | Times the generation path with EOS disabled. |
 | `tile_runtime check PACKAGE INPUTS.json` | Per-token logits and K/V snapshots for regressions. |
 | `tile_runtime --inspect-plan`, `--describe-target-json` | Package summary; worker probe. |
 | `tile_runtime_test --benchmark-serve`, `--timeline-stack`, ... | Resident benchmark server and per-instruction trace (test build only). |

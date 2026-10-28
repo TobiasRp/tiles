@@ -2,7 +2,7 @@
 
 One command from the pinned Llama 3.2 1B checkpoint to a report that
 compares the final TileInfer with llama.cpp, PyTorch eager and PyTorch CUDA
-Graph replay on the RTX 3050. The milestone is planned in
+Graph replay on the RTX 3050. Its results are in
 [S6 in the development log](../../docs/development.md#s6-showcase).
 
 ## Run
@@ -22,7 +22,7 @@ sudo nvidia-smi -rgc   # unlock afterwards
 sudo nvidia-smi -rmc
 ```
 
-`run` takes about an hour on a fresh directory. Each step stores the hashes
+The final S6 `run` took 33 minutes. Each step stores the hashes
 of its inputs in `OUT/steps/` and is skipped when they are unchanged, so a
 rerun after a failure continues where it stopped, and a changed worker,
 package or protocol reruns what depends on it. `--force STEP...` reruns steps

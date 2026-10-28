@@ -15,8 +15,10 @@ flowchart LR
     C --> D[Next token] --> C
 ```
 
-The current prototype uses fixed waves with grid barriers. Finer-grained tile
-scheduling is still work in progress.
+The executor runs fixed waves separated by grid barriers. Finer-grained
+dataflow scheduling (dependency counters in place of barriers) was tested and
+did not win for this model and hardware, because the work on both sides of
+each barrier is already balanced.
 
 ## Results
 

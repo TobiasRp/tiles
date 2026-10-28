@@ -38,10 +38,11 @@ bytes at 212.9 GB/s:
 All runtimes generate the same tokens. Paired differences against TileInfer
 have 95% half-widths of 3 to 12 µs.
 
-- **Graph replay** leaves only 40 µs idle per token, so its loss (0.71 ms at
-  context 1, 7.35 ms at 4K) is inside the kernels: GEMV shapes below the
+- **Graph replay** leaves only 40 µs idle per token, so its gap to TileInfer
+  (0.71 ms at context 1, 7.35 ms at 4K) is inside the kernels: GEMV shapes below the
   roofline and eager attention with `repeat_kv`.
-- **llama.cpp** loses an almost constant 1.3 to 1.6 ms, most of it between
+- **llama.cpp** (f16 K/V) is an almost constant 1.3 to 1.6 ms behind
+  TileInfer, most of it between
   tokens: one 513 KB device-to-host copy of the float32 logits takes
   1.19 ms. TileInfer and PyTorch keep logits on the GPU in the decode table,
   so that table is not like-for-like at the API boundary; the generation
