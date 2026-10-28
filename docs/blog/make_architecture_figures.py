@@ -3,7 +3,7 @@
 usage: python docs/blog/make_architecture_figures.py OUT_DIR
 
 Two static figures: the whole one-token decoder, and one decoder layer op by
-op. Every number comes from the pinned model config (docs/tile_graph_decoder.md)
+op. Every number comes from the pinned model config (docs/architecture.md)
 and is derived below, so the figures cannot drift from the shapes.
 """
 

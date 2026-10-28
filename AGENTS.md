@@ -1,9 +1,9 @@
 # Repository guidance
 
 This repository tests the tile-graph inference hypothesis on the RTX 3050.
-Read the four design documents in `docs/` before changing the plan format or
-executor. The active workload is the Llama-style one-token decoder in
-`docs/tile_graph_decoder.md`. Its CPU reference, version-10 whole-token plan,
+Read `docs/architecture.md` (and `docs/development.md` for the measured
+history) before changing the plan format or executor. The active workload is
+the Llama 3.2 1B one-token decoder. Its CPU reference, version-10 whole-token plan,
 SequenceContext, CUDA arithmetic, and
 synthetic full stack with float32 or BF16 weights/activations/KV, and the pinned Llama 3.2 1B
 checkpoint bridge are implemented.
@@ -27,6 +27,3 @@ final comparison with PyTorch and llama.cpp and the blog figures.
   opcodes or the execution loop. Run clang-format, Ruff, ty, CTest, and Compute Sanitizer before
   performance claims; distinguish exploratory timings from a controlled
   shape/tile sweep.
-- Work in `tux:~/dev/tiles` over SSH, if available: edit, build, run, test,
-  and commit there. Treat any other local checkout as read-only; do not edit
-  or commit in it, and do not mirror files from it to `tux`.

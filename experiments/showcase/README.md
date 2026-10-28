@@ -3,7 +3,7 @@
 One command from the pinned Llama 3.2 1B checkpoint to a report that
 compares the final TileInfer with llama.cpp, PyTorch eager and PyTorch CUDA
 Graph replay on the RTX 3050. The milestone is planned in
-[S6 of the megakernel plan](../../docs/megakernel_next_steps.md#s6--showcase-package).
+[S6 in the development log](../../docs/development.md#s6-showcase).
 
 ## Run
 

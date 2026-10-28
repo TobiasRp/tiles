@@ -64,7 +64,7 @@ fingerprints are rejected; regenerate those packages.
 and K/V together; `--dtype float32` selects the pure-float32 path. Synthetic
 builders default to float32 and also accept `--weight-dtype` as an alias.
 Matrix arithmetic uses FP32 SIMT multiplication and accumulation over BF16
-operands; [the measured comparison](../docs/bf16_compute_results.md) explains
+operands; [the measured comparison](../docs/development.md#bf16-compute) explains
 why the native Tensor Core variant was removed.
 
 There is no tile-size parameter. Projections split their rows evenly over the

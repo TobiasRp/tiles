@@ -2,7 +2,7 @@
 
 Third status record for the blog series. It follows
 [the S2 post](s2-fused-tasks-2026-10.md) and covers the first phase of
-milestone S3 in [the megakernel plan](../megakernel_next_steps.md): a
+milestone S3 in [the megakernel plan](../development.md): a
 microbenchmark that had to show weight prefetch across grid barriers was
 worth building into the decoder. Everything here was measured on `tux` on
 2026-10-23 with the probe from commits `16f412e` and `00a68b8`. Raw artifacts
@@ -184,7 +184,7 @@ with the ring's `lm_head` gain of 0.02–0.03 ms, at most about 0.1 ms.
    and saved a package-format change for at most 0.1 ms.
 
 The revised plan is in
-[the megakernel plan](../megakernel_next_steps.md#5-milestones).
+[the megakernel plan](../development.md#the-megakernel-plan).
 
 ## How these numbers were produced
 

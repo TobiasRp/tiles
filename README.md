@@ -42,6 +42,7 @@ continuations rather than chat messages.
 
 - [TilePlan](tileplan/README.md): checkpoint setup, packages, and graph visualization.
 - [TileInfer](tileinfer/README.md): runtime API, tests, and PyTorch eager/graph measurements.
-- [Decoder design](docs/tile_graph_decoder.md): numerical semantics and the execution model.
+- [Architecture](docs/architecture.md): the package, the worker, the numerical contract, and the repository layout.
+- [Development log](docs/development.md): milestones, measurements, and negative results.
 - [Showcase](experiments/showcase/README.md): one command that measures TileInfer
   against PyTorch and llama.cpp and draws the figures.

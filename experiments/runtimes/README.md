@@ -1,8 +1,9 @@
 # Runtime comparison
 
 Puts llama.cpp next to TileInfer and PyTorch for Llama 3.2 1B in BF16 at
-batch 1. The plan, fairness rules and open points are in
-[docs/runtime_comparison_plan.md](../../docs/runtime_comparison_plan.md).
+batch 1. The fairness rules are in
+[the architecture document](../../docs/architecture.md#measurement) and the
+results in [the development log](../../docs/development.md#final-results).
 
 This directory has its own Python project and lockfile, and builds llama.cpp
 out of tree at a pinned release (`scripts/llamacpp.pin`). It does not touch

@@ -20,7 +20,7 @@ rounding follows the pinned PyTorch eager operator boundaries. Public logits
 and diagnostics widen the modeled values to float32. Projections, attention,
 and the language-model head use SIMT warp reductions. A native BF16 MMA
 variant was measured 2.15 times slower for batch-one decode and has been
-removed; see [the BF16 results](../docs/bf16_compute_results.md).
+removed; see [BF16 compute](../docs/development.md#bf16-compute).
 
 The runtime reads only packages of the current format; regenerate older
 packages with TilePlan. For a text demo, use [`generate.py`](../generate.py),
@@ -58,53 +58,11 @@ Prefill and generation return tickets; `wait` retrieves the result.
 ownership, and every read against its producer across layers and shared scratch.
 The blocking diagnostics API is linked only into the test harness.
 
-## Historical measurements on RTX 3050
+## Measure
 
-These tables describe the superseded version-3 BF16-weight/float32-activation
-implementation. They do not measure the BF16-compute path. Current
-validation and controlled arithmetic-variant comparisons are described in
-[the BF16 implementation results](../docs/bf16_compute_results.md).
-
-Pinned Llama 3.2 1B checkpoint, batch one, TF32 disabled; measured October 13, 2026.
-The TileInfer package uses 64-row tiles. No GPU clocks were locked.
-
-### Autoregressive generation
-
-Six prompt tokens, 16 generated tokens, three warmup runs and seven measured
-runs per mode, plus graph-capture setup. CUDA events include GPU argmax feedback
-and decoding, excluding loading, prefill, and readback. PyTorch uses eager
-attention and `StaticCache` in both modes. The graph captures the entire 16-token loop;
-each replay starts from a freshly prefilled cache.
-
-| Implementation | Weights / activations | Average ms/token |
-| --- | --- | ---: |
-| TileInfer v3 (retired) | BF16 / float32 | 16.03 |
-| PyTorch eager | float32 / float32 | 25.55 |
-| PyTorch graph replay | float32 / float32 | 24.43 |
-| PyTorch eager | BF16 / BF16 | 14.42 |
-| PyTorch graph replay | BF16 / BF16 | 13.06 |
-
-Float32 PyTorch and TileInfer generated identical IDs. BF16 PyTorch generated
-a different continuation; its eager and graph paths agreed. The BF16 rows use
-BF16 activations and matrix operations, while the float32 reference stores twice as many
-weight bytes as TileInfer.
-
-### Fixed-context decoder step
-
-Repeated token ID 1, three warmups, seven rounds of five calls per context.
-These timings exclude selection and hold the context length fixed. PyTorch
-uses float32 weights/arithmetic, eager attention, and `StaticCache`; graph
-replay captures one decoder step. Eager/graph logits agree, and TileInfer's
-top token/logit matches the reference at every context.
-
-| Context tokens | PyTorch eager (ms) | PyTorch graph (ms) | TileInfer (ms) |
-| ---: | ---: | ---: | ---: |
-| 1 | 25.56 | 24.33 | 15.42 |
-| 64 | 26.04 | 24.49 | 17.48 |
-| 256 | 26.54 | 25.07 | 23.75 |
-
-Raw samples and environment details are in `runs/tileinfer-baselines-2026-10-13/`
-on tux. These are workload measurements, not a general model/shape sweep.
+Current results against PyTorch and llama.cpp are in
+[the development log](../docs/development.md#final-results);
+[the showcase command](../experiments/showcase/README.md) reproduces them.
 
 To repeat generation measurements from `tileinfer/`, set `PACKAGE` and `INPUTS`
 to your package and prompt JSON:
@@ -145,7 +103,7 @@ compared with PyTorch. `--pytorch CHECKPOINT` adds eager and CUDA Graph arms.
 Measurement modes trust the package's declared weight checksum (hashing
 2.5 GB took 19 s per process), so run `tileplan verify` once per package. Run
 the same package as two arms (A/A) to see the protocol's resolution; see
-[the S6a results](../docs/megakernel_next_steps.md#15-s6a-results).
+[S6a](../docs/development.md#s6a-controlled-measurement).
 
 To see where a token's time goes, measure the bandwidth roofline once, then
 trace the worker at chosen contexts. The trace records every instruction's
@@ -165,26 +123,25 @@ All positions are traced in one process, so the prefix is decoded once;
 
 `bandwidth_probe rowdot` times the worker's GEMV routine on the Llama 3.2 1B
 projection shapes with 1–20 active workers. See
-[the S0 results](../docs/megakernel_next_steps.md#9-s0-results-where-the-time-goes).
+[S0](../docs/development.md#s0-where-the-time-goes).
 `bandwidth_probe ring` runs the same shapes as wave programs separated by
 grid barriers. It compares direct loads with a `cp.async` shared-memory
 weight ring, refilled before or after each barrier, and with an L2 prefetch;
 see [the S3 results](../docs/blog/s3-weight-prefetch-2026-10.md).
 `bandwidth_probe qkv` runs the QKV waves of 16 layers as S2b's one-head tasks
 and as the worker's even row split; see
-[the S2c results](../docs/megakernel_next_steps.md#14-s2c-results).
+[S2c](../docs/development.md#s2c-balanced-qkv).
 `bandwidth_probe ffn` runs the FFN of 16 layers as S2c's split waves and as
 fused per-worker tasks with split-K down partials; see
-[the S4 probe](../docs/megakernel_next_steps.md#16-s4-probe-the-fused-ffn).
+[S4](../docs/development.md#s4-fewer-wave-boundaries).
 `counter_probe PACKAGE [POSITION...]` runs a BF16 stack package with the worker's
 operators and replaces the barriers around attention with counter waits; see
-[the S4 counter probe](../docs/megakernel_next_steps.md#18-s4-phase-0b-probe-counters-around-attention).
+[S4](../docs/development.md#s4-fewer-wave-boundaries).
 `attention_probe [POSITIONS [CHUNKS]]` runs the attention waves of 16 layers
 with one block per SM: S2's kernels as the reference, an instrumented copy
 with per-phase cycle counts, the S2b wide-load candidates, and the worker's
 own attention tasks with the planner's default chunk rule and barrier skip.
-See [the S2b probe](../docs/megakernel_next_steps.md#11-s2b-probe-results-attention-at-the-right-parallelism)
-and [results](../docs/megakernel_next_steps.md#12-s2b-results).
+See [S2b](../docs/development.md#s2b-attention-at-the-right-parallelism).
 
 ## Checks
 
@@ -205,5 +162,5 @@ initcheck disables API-copy inspection only for the deliberately gated
 ring tests. Kernel memory reads remain checked.
 [llama32_checkpoint.py](tests/llama32_checkpoint.py) compares layer outputs,
 K/V, logits, and greedy choices with matching-precision Transformers.
-See the [decoder design](../docs/tile_graph_decoder.md)
+See the [architecture document](../docs/architecture.md)
 for the full numerical and execution contract.
