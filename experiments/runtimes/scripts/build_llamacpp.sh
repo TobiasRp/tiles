@@ -2,7 +2,7 @@
 # Build llama.cpp tools. Usage: build_llamacpp.sh [cpu|metal|cuda]
 # cpu   - portable CPU build (harness validation)
 # metal - Apple GPU (Mac harness checks only; never compared with CUDA numbers)
-# cuda  - RTX 3050 (compute capability 8.6); for tux
+# cuda  - RTX 3050 (compute capability 8.6)
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 backend="${1:-cpu}"

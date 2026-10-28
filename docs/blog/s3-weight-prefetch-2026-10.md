@@ -2,11 +2,11 @@
 
 Third status record for the blog series. It follows
 [the S2 post](s2-fused-tasks-2026-10.md) and covers the first phase of
-milestone S3 in [the megakernel plan](../development.md): a
+milestone S3 in [the megakernel plan](../development.md#the-megakernel-plan): a
 microbenchmark that had to show weight prefetch across grid barriers was
-worth building into the decoder. Everything here was measured on `tux` on
+worth building into the decoder. Everything here was measured on the RTX 3050 on
 2026-10-23 with the probe from commits `16f412e` and `00a68b8`. Raw artifacts
-are in `runs/s3-2026-10-23/`, and
+are in `runs/s3-2026-10-23/` (not committed), and
 [`make_s3_figures.py`](make_s3_figures.py) redraws the figures from them.
 
 ## In one paragraph
@@ -188,7 +188,7 @@ The revised plan is in
 
 ## How these numbers were produced
 
-From `tux:~/dev/tiles` at `00a68b8`:
+From the repository root at `00a68b8`:
 
 ```sh
 cmake --build tileinfer/build/release --target bandwidth_probe

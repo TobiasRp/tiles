@@ -12,6 +12,8 @@ from pathlib import Path
 from types import ModuleType
 from unittest.mock import Mock, patch
 
+from tileplan.plan_core import FORMAT
+
 
 class GenerateTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -19,7 +21,6 @@ class GenerateTests(unittest.TestCase):
             str(Path(__file__).resolve().parents[2] / "generate.py")
         )
         self.main = script["main"]
-        self.format = script["FORMAT"]
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -73,7 +74,7 @@ class GenerateTests(unittest.TestCase):
         (path / "plan.json").write_text(
             json.dumps(
                 {
-                    "header": {"format_version": version or self.format},
+                    "header": {"format_version": version or FORMAT},
                     "source": {"repository": "meta-llama/Llama-3.2-1B"},
                     "model": model,
                 }

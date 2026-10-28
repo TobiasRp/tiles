@@ -129,14 +129,16 @@ to the weights, scratch, and CUDA runtime.
 
 ## The package
 
-A package is a directory with three files:
+A package is a directory with three files, planned for one probed
+`target.json` that the plan's `target` section records:
 
-- `target.json`: the probed device and worker the plan was built for.
 - `plan.json`: format version 10, the model shape and precision, tensor
   layout, storage sizes, and the task program with predecessors, waves, and
   workers. It is canonical JSON and its SHA-256 identifies the plan.
 - `weights.bin`: contiguous little-endian weights in manifest order, with
   size and SHA-256 recorded in the plan. No pointers are serialized.
+- `planning_report.json`: a summary for people (sizes, chunking, hashes);
+  the runtime does not read it.
 
 The loader reads only the current format; older packages must be
 regenerated.

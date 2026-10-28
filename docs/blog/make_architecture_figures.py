@@ -11,7 +11,7 @@ import sys
 from html import escape
 from pathlib import Path
 
-from make_figures import GRID, MUTED, NEUTRAL, SERIES, SURFACE, TEXT, WIDTH, Svg
+from make_figures import GRID, MUTED, NEUTRAL, SERIES, SURFACE, TEXT, Svg
 
 HIDDEN, LAYERS, Q_HEADS, KV_HEADS, HEAD_DIM = 2048, 16, 32, 8, 64
 FFN, VOCAB, THETA = 8192, 128_256, 500_000
@@ -89,7 +89,9 @@ def box(
         y += 4
 
 
-def arrow(svg: Svg, *points: tuple[float, float], width: float = 1.5, dash: str = "") -> None:
+def arrow(
+    svg: Svg, *points: tuple[float, float], width: float = 1.5, dash: str = ""
+) -> None:
     path = "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in points)
     extra = f' stroke-dasharray="{dash}"' if dash else ""
     svg.add(
@@ -98,13 +100,23 @@ def arrow(svg: Svg, *points: tuple[float, float], width: float = 1.5, dash: str 
     )
 
 
-def line(svg: Svg, *points: tuple[float, float], color: str = MUTED, width: float = 1.5, dash: str = "") -> None:
+def line(
+    svg: Svg,
+    *points: tuple[float, float],
+    color: str = MUTED,
+    width: float = 1.5,
+    dash: str = "",
+) -> None:
     path = "M" + " L".join(f"{x:.1f},{y:.1f}" for x, y in points)
     extra = f' stroke-dasharray="{dash}"' if dash else ""
-    svg.add(f'<path d="{path}" fill="none" stroke="{color}" stroke-width="{width}"{extra}/>')
+    svg.add(
+        f'<path d="{path}" fill="none" stroke="{color}" stroke-width="{width}"{extra}/>'
+    )
 
 
-def label(svg: Svg, x: float, y: float, value: str, *, anchor: str = "start", size: float = 11) -> None:
+def label(
+    svg: Svg, x: float, y: float, value: str, *, anchor: str = "start", size: float = 11
+) -> None:
     svg.add(svg.text(x, y, value, size=size, color=MUTED, anchor=anchor))
 
 
@@ -145,8 +157,16 @@ def overview(out: Path) -> None:
     box(svg, cx, 104, 200, 28, PLAIN, ["token id t, position p"])
     arrow(svg, (cx, 132), (cx, 158))
     box(
-        svg, cx, 158, width, 50, TABLE,
-        ["Token embedding", f"{n(VOCAB)} × {n(HIDDEN)} lookup · {millions(EMBED_PARAMS)}"],
+        svg,
+        cx,
+        158,
+        width,
+        50,
+        TABLE,
+        [
+            "Token embedding",
+            f"{n(VOCAB)} × {n(HIDDEN)} lookup · {millions(EMBED_PARAMS)}",
+        ],
         "Row t of the embedding table: no arithmetic, one 2,048-wide row read.",
     )
     arrow(svg, (cx, 208), (cx, 238))
@@ -161,7 +181,12 @@ def overview(out: Path) -> None:
     tops = {0: 272, 1: 320, 15: 402}
     for index, top in tops.items():
         box(
-            svg, cx, top, 190, 32, WEIGHT,
+            svg,
+            cx,
+            top,
+            190,
+            32,
+            WEIGHT,
             [f"Layer {index}"],
             f"Same graph as every layer; layer {index} has its own {millions(LAYER_PARAMS)} weights.",
         )
@@ -176,7 +201,12 @@ def overview(out: Path) -> None:
     box(svg, cx, 480, width, 36, SMALL, ["Final RMSNorm", f"scale [{n(HIDDEN)}]"])
     arrow(svg, (cx, 516), (cx, 542))
     box(
-        svg, cx, 542, width, 50, TABLE,
+        svg,
+        cx,
+        542,
+        width,
+        50,
+        TABLE,
         ["lm_head", f"{n(HIDDEN)} → {n(VOCAB)} · shares the embedding"],
         "Output projection reuses the embedding matrix: no second copy of the weights.",
     )
@@ -193,7 +223,12 @@ def overview(out: Path) -> None:
 
     # KV cache beside the stack.
     box(
-        svg, 595, 272, 250, 100, STATE,
+        svg,
+        595,
+        272,
+        250,
+        100,
+        STATE,
         [
             "KV cache",
             f"{LAYERS} layers × {KV_HEADS} KV heads × T × {HEAD_DIM}",
@@ -234,7 +269,16 @@ def overview(out: Path) -> None:
         f"embedding {millions(EMBED_PARAMS)} ({EMBED_PARAMS / TOTAL_PARAMS:.0%})",
     ]
     for i, text in enumerate(budget):
-        svg.add(svg.text(470, 404 + 17 * i, text, size=11.5, color=MUTED if i else TEXT, weight=400 if i else 600))
+        svg.add(
+            svg.text(
+                470,
+                404 + 17 * i,
+                text,
+                size=11.5,
+                color=MUTED if i else TEXT,
+                weight=400 if i else 600,
+            )
+        )
     svg.write(out)
 
 
@@ -270,7 +314,9 @@ def decoder_layer(out: Path) -> None:
             f'<rect x="{band_x}" y="{top}" width="{band_w}" height="{bottom - top}" rx="10" '
             f'fill="{BAND}" stroke="{GRID}" stroke-width="1.5"/>'
         )
-        svg.add(svg.text(band_x + 12, top + 17, name, size=10.5, weight=600, color=MUTED))
+        svg.add(
+            svg.text(band_x + 12, top + 17, name, size=10.5, weight=600, color=MUTED)
+        )
 
     # Backgrounds go first so the rail and ops draw over them.
     attn_band = (128, 668)
@@ -283,12 +329,25 @@ def decoder_layer(out: Path) -> None:
     svg.add(
         f'<path d="M{rail - 6},1052 L{rail},1064 L{rail + 6},1052 z" fill="{TEXT}"/>'
     )
-    svg.add(svg.text(rail + 12, 112, f"x  [{n(HIDDEN)}] from the previous layer", size=11, color=MUTED))
+    svg.add(
+        svg.text(
+            rail + 12,
+            112,
+            f"x  [{n(HIDDEN)}] from the previous layer",
+            size=11,
+            color=MUTED,
+        )
+    )
 
     # --- Attention ---
     norm_top, norm_h = 142, 40
     box(
-        svg, cm, norm_top, 200, norm_h, SMALL,
+        svg,
+        cm,
+        norm_top,
+        200,
+        norm_h,
+        SMALL,
         ["RMSNorm", "x / √(mean(x²) + ε) · w"],
         f"attn_norm: scale [{n(HIDDEN)}], ε = 1e-5, float32 reduction",
     )
@@ -300,14 +359,37 @@ def decoder_layer(out: Path) -> None:
 
     proj_top, proj_h = 224, 58
     projections = [
-        (cq, "Wq", f"{n(HIDDEN)} → {n(Q_DIM)}", HIDDEN * Q_DIM, f"{Q_HEADS} query heads × {HEAD_DIM}"),
-        (ck, "Wk", f"{n(HIDDEN)} → {n(KV_DIM)}", HIDDEN * KV_DIM, f"{KV_HEADS} KV heads × {HEAD_DIM}"),
-        (cv, "Wv", f"{n(HIDDEN)} → {n(KV_DIM)}", HIDDEN * KV_DIM, f"{KV_HEADS} KV heads × {HEAD_DIM}"),
+        (
+            cq,
+            "Wq",
+            f"{n(HIDDEN)} → {n(Q_DIM)}",
+            HIDDEN * Q_DIM,
+            f"{Q_HEADS} query heads × {HEAD_DIM}",
+        ),
+        (
+            ck,
+            "Wk",
+            f"{n(HIDDEN)} → {n(KV_DIM)}",
+            HIDDEN * KV_DIM,
+            f"{KV_HEADS} KV heads × {HEAD_DIM}",
+        ),
+        (
+            cv,
+            "Wv",
+            f"{n(HIDDEN)} → {n(KV_DIM)}",
+            HIDDEN * KV_DIM,
+            f"{KV_HEADS} KV heads × {HEAD_DIM}",
+        ),
     ]
     for cx, name, shape, params, heads in projections:
         arrow(svg, (cx, split), (cx, proj_top))
         box(
-            svg, cx, proj_top, 146, proj_h, WEIGHT,
+            svg,
+            cx,
+            proj_top,
+            146,
+            proj_h,
+            WEIGHT,
             [name, f"{shape} · {megabytes(params)}", heads],
             f"{name} [out, in] BF16 matrix, bias-free: {megabytes(params)} read per token",
         )
@@ -316,7 +398,12 @@ def decoder_layer(out: Path) -> None:
     for cx, name in ((cq, "q"), (ck, "k")):
         arrow(svg, (cx, proj_top + proj_h), (cx, rope_top))
         box(
-            svg, cx, rope_top, 146, rope_h, SMALL,
+            svg,
+            cx,
+            rope_top,
+            146,
+            rope_h,
+            SMALL,
             [f"RoPE({name})", f"rotate by p · θ = {n(THETA)}"],
             "Llama 3 frequency scaling (factor 32); split-half pairing as in Hugging Face.",
         )
@@ -327,7 +414,12 @@ def decoder_layer(out: Path) -> None:
     arrow(svg, (cv, proj_top + proj_h), (cv, cache_top))
     label(svg, cv + 8, 342, "v is not rotated")
     box(
-        svg, cache_cx, cache_top, cache_w, cache_h, STATE,
+        svg,
+        cache_cx,
+        cache_top,
+        cache_w,
+        cache_h,
+        STATE,
         [
             "KV cache, this layer",
             f"K, V for positions 0…p · {KV_HEADS} KV heads × {HEAD_DIM}",
@@ -343,7 +435,12 @@ def decoder_layer(out: Path) -> None:
     arrow(svg, (cache_cx, cache_top + cache_h), (cache_cx, attn_top))
     label(svg, cache_cx + 8, 488, "K, V")
     box(
-        svg, attn_cx, attn_top, attn_w, attn_h, STATE,
+        svg,
+        attn_cx,
+        attn_top,
+        attn_w,
+        attn_h,
+        STATE,
         [
             f"Attention, per query head h  ({Q_HEADS} heads)",
             f"scores[t] = q_h · K[t] / √{HEAD_DIM},  t = 0…p     (causal: nothing after p exists yet)",
@@ -358,7 +455,12 @@ def decoder_layer(out: Path) -> None:
     arrow(svg, (cm, attn_top + attn_h), (cm, wo_top))
     label(svg, cm + 8, 606, f"concat {Q_HEADS} × {HEAD_DIM} = {n(Q_DIM)}")
     box(
-        svg, cm, wo_top, 200, wo_h, WEIGHT,
+        svg,
+        cm,
+        wo_top,
+        200,
+        wo_h,
+        WEIGHT,
         ["Wo", f"{n(Q_DIM)} → {n(HIDDEN)} · {megabytes(Q_DIM * HIDDEN)}"],
         "Output projection, bias-free.",
     )
@@ -370,7 +472,12 @@ def decoder_layer(out: Path) -> None:
     # --- MLP ---
     norm2_top = 706
     box(
-        svg, cm, norm2_top, 200, norm_h, SMALL,
+        svg,
+        cm,
+        norm2_top,
+        200,
+        norm_h,
+        SMALL,
         ["RMSNorm", "x / √(mean(x²) + ε) · w"],
         f"ffn_norm: scale [{n(HIDDEN)}], ε = 1e-5",
     )
@@ -385,7 +492,12 @@ def decoder_layer(out: Path) -> None:
     for cx, name in ((cg, "Wgate"), (cu, "Wup")):
         arrow(svg, (cx, split2), (cx, gate_top))
         box(
-            svg, cx, gate_top, 130, gate_h, WEIGHT,
+            svg,
+            cx,
+            gate_top,
+            130,
+            gate_h,
+            WEIGHT,
             [name, f"{n(HIDDEN)} → {n(FFN)}", megabytes(HIDDEN * FFN)],
             f"{name}: bias-free, {megabytes(HIDDEN * FFN)} read per token",
         )
@@ -403,14 +515,27 @@ def decoder_layer(out: Path) -> None:
     down_top, down_h = 984, 54
     arrow(svg, (cm, mul_y + 11), (cm, down_top))
     box(
-        svg, cm, down_top, 200, down_h, WEIGHT,
+        svg,
+        cm,
+        down_top,
+        200,
+        down_h,
+        WEIGHT,
         ["Wdown", f"{n(FFN)} → {n(HIDDEN)} · {megabytes(HIDDEN * FFN)}"],
         "Down projection, bias-free.",
     )
     add2 = down_top + down_h / 2
     arrow(svg, (cm - 100, add2), (rail + 12, add2))
     operator(svg, rail, add2, "+", "Residual add: out = r + Wdown · (SiLU(gate) · up)")
-    svg.add(svg.text(rail + 12, 1056, f"x'  [{n(HIDDEN)}] to the next layer", size=11, color=MUTED))
+    svg.add(
+        svg.text(
+            rail + 12,
+            1056,
+            f"x'  [{n(HIDDEN)}] to the next layer",
+            size=11,
+            color=MUTED,
+        )
+    )
 
     footer = (
         f"Per layer: {millions(LAYER_PARAMS)} weights ({megabytes(LAYER_PARAMS)} in BF16): "

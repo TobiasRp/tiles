@@ -7,7 +7,7 @@ Graph replay on the RTX 3050. The milestone is planned in
 
 ## Run
 
-On `tux`, from the repository root, with the checkpoint in
+On the RTX 3050, from the repository root, with the checkpoint in
 `checkpoints/Llama-3.2-1B` and the `experiments/runtimes` environment synced
 (see [its README](../runtimes/README.md)):
 

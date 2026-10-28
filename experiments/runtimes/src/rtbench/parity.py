@@ -1,7 +1,7 @@
 """Token and logit parity of a GGUF run against the Transformers reference.
 
-The reference runs on whatever device is available (CPU on the Mac, CUDA on
-tux) with BF16 weights and eager attention, one token at a time, like the
+The reference runs on whatever device is available (CPU on a Mac, CUDA on
+the RTX 3050) with BF16 weights and eager attention, one token at a time, like the
 TileInfer checkpoint tests.
 """
 

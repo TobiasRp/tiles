@@ -3,13 +3,13 @@
 This repository tests the tile-graph inference hypothesis on the RTX 3050.
 Read `docs/architecture.md` (and `docs/development.md` for the measured
 history) before changing the plan format or executor. The active workload is
-the Llama 3.2 1B one-token decoder. Its CPU reference, version-10 whole-token plan,
-SequenceContext, CUDA arithmetic, and
-synthetic full stack with float32 or BF16 weights/activations/KV, and the pinned Llama 3.2 1B
-checkpoint bridge are implemented.
-The MLP prototype is historical and its source/tests were removed.
-The S6 showcase command (`experiments/showcase/showcase.py`) reproduces the
-final comparison with PyTorch and llama.cpp and the blog figures.
+the Llama 3.2 1B one-token decoder. Implemented: its CPU reference, the
+version-10 whole-token plan, `SequenceContext`, the CUDA arithmetic, the
+synthetic full stack with float32 or BF16 weights, activations, and K/V, and
+the pinned Llama 3.2 1B checkpoint bridge. The earlier MLP prototype was
+removed. The S6 showcase command (`experiments/showcase/showcase.py`)
+reproduces the final comparison with PyTorch and llama.cpp and the blog
+figures.
 
 - Keep Python as the offline planner, fixture generator, baseline runner, and
   one-command orchestrator. Keep per-inference scheduling in the C++/CUDA

@@ -17,9 +17,6 @@ INFER = ROOT / "tileinfer"
 CHECKPOINT = ROOT / "checkpoints" / "Llama-3.2-1B"
 EXECUTOR = INFER / "build" / "release" / "tile_runtime"
 VENV = PLAN / ".venv"
-# Package format accepted by the runtime built from this checkout; keep it
-# equal to tileplan.plan_core.FORMAT.
-FORMAT = 10
 
 
 def run(command, *, cwd):
@@ -50,6 +47,18 @@ def main():
     if not CHECKPOINT.is_dir():
         parser.error(f"checkpoint is missing: {CHECKPOINT}")
 
+    if Path(sys.prefix).resolve() != VENV.resolve():
+        uv = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
+        print(
+            "Preparing checkpoint Python dependencies...", file=sys.stderr, flush=True
+        )
+        run([uv, "sync", "--locked", "--group", "checkpoint"], cwd=PLAN)
+        python = VENV / "bin" / "python"
+        os.execv(python, [str(python), str(__file__), *sys.argv[1:]])
+
+    # The package format accepted by the runtime built from this checkout.
+    from tileplan.plan_core import FORMAT
+
     package = None
     if args.package is not None:
         if args.max_context is not None:
@@ -64,9 +73,10 @@ def main():
         if plan.get("source", {}).get("repository") != "meta-llama/Llama-3.2-1B":
             parser.error(f"not a Llama 3.2 1B checkpoint package: {package}")
         model = plan.get("model", {})
-        if plan["header"]["format_version"] != FORMAT:
+        version = plan.get("header", {}).get("format_version")
+        if version != FORMAT:
             parser.error(
-                f"package format {plan['header']['format_version']} is retired; "
+                f"package format {version} is not supported; "
                 f"regenerate a version-{FORMAT} package"
             )
         if args.dtype is not None and args.dtype != model.get(
@@ -80,15 +90,6 @@ def main():
         max_context = args.max_context if args.max_context is not None else 4096
         if max_context < 2:
             parser.error("--max-context must be at least 2")
-
-    if Path(sys.prefix).resolve() != VENV.resolve():
-        uv = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
-        print(
-            "Preparing checkpoint Python dependencies...", file=sys.stderr, flush=True
-        )
-        run([uv, "sync", "--locked", "--group", "checkpoint"], cwd=PLAN)
-        python = VENV / "bin" / "python"
-        os.execv(python, [str(python), str(__file__), *sys.argv[1:]])
 
     from transformers import AutoTokenizer
 

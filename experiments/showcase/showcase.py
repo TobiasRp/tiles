@@ -1,6 +1,6 @@
 """One command for the S6 showcase: from the checkpoint to a report on the RTX 3050.
 
-usage (repository root on tux):
+usage (from the repository root, on the CUDA machine):
   python3 experiments/showcase/showcase.py run --out runs/s6-2026-10-27
   python3 experiments/showcase/showcase.py sanitize --out runs/s6-2026-10-27
 
@@ -364,7 +364,7 @@ def run(args: argparse.Namespace) -> None:
         """Calibrated tolerances must pass; a greedy mismatch only on a near-tie.
 
         The script also fails on any greedy mismatch. The 4K package has a known
-        one at a one-unit BF16 tie of the reference (Section 12 of the plan), so
+        one at a one-unit BF16 tie of the reference (S2b in docs/development.md), so
         a mismatch is accepted where the reference's top-two margin is at most
         NEAR_TIE, and the report lists it.
         """

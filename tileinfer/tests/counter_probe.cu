@@ -14,7 +14,7 @@
 // the barriers.) Waits change only ordering, so every mode must reproduce the
 // barrier mode's logits bit for bit, also with random delays before tasks.
 // The barrier mode is the reference and must time like the decoder itself.
-// K/V holds synthetic values (within 0.03% of a decoded prefix, Section 15).
+// K/V holds synthetic values (within 0.03% of a decoded prefix; see S6a in docs/development.md).
 
 #include "detail/cuda_check.hpp"
 #include "detail/uploaded_plan.cuh"

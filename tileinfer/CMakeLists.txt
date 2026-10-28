@@ -103,7 +103,7 @@ if(TILE_INFER_ENABLE_CUDA)
         tileinfer_warnings(attention_probe)
         # Grid barriers against counter waits around attention on a real package; not a CTest.
         add_executable(counter_probe tests/counter_probe.cu)
-        target_include_directories(counter_probe PRIVATE third_party /cccl)
+        target_include_directories(counter_probe PRIVATE third_party ${CUDAToolkit_INCLUDE_DIRS}/cccl)
         target_link_libraries(counter_probe PRIVATE tileinfer_runtime)
         tileinfer_warnings(counter_probe)
         add_executable(sequence_context_smoke tests/sequence_context_smoke.cpp)

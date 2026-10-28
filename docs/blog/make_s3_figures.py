@@ -115,9 +115,7 @@ def gap_absorption(times: dict[Key, float], ideal: float, out: Path) -> None:
         )
         labels.append((y(values[-1]), name))
     for name, color, (prefetch, depth, stage) in series:
-        values = [
-            times[("layer", gap, prefetch, depth, stage)] - ideal for gap in gaps
-        ]
+        values = [times[("layer", gap, prefetch, depth, stage)] - ideal for gap in gaps]
         points = " ".join(
             f"{x(g):.1f},{y(v):.1f}" for g, v in zip(gaps, values, strict=True)
         )

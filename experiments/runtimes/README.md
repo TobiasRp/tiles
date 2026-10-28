@@ -14,7 +14,7 @@ out of tree at a pinned release (`scripts/llamacpp.pin`). It does not touch
 ```sh
 cd experiments/runtimes
 scripts/fetch_llamacpp.sh                 # pinned llama.cpp into third_party/
-scripts/build_llamacpp.sh cpu             # or metal (Mac) / cuda (tux, sm_86)
+scripts/build_llamacpp.sh cpu             # or metal (Mac) / cuda (RTX 3050, sm_86)
 scripts/build_probe.sh cpu
 UV_PYTHON=3.12 uv sync --group dev
 ```

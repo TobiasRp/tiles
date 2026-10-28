@@ -16,7 +16,7 @@ The cache has shape `[1, 6, 2, 8]`; only the first five positions are valid.
 Regenerate from `tileplan/` with:
 
 ```sh
-~/.local/bin/uv run --locked python -m tileplan reference --out tests/fixtures/decoder_m1
+uv run --locked python -m tileplan reference --out tests/fixtures/decoder_m1
 ```
 
 Remove the existing directory first when intentionally changing the contract.
